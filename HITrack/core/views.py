@@ -147,8 +147,11 @@ class RepositoryTagViewSet(BaseViewSet):
     @action(detail=True, methods=['post'])
     def process(self, request, uuid=None):
         tag = self.get_object()
-        if tag.processing_status == 'in_process':
-            return Response({'error': 'Tag is already being processed'}, status=409)
+        if tag.processing_status in ['in_process', 'pending']:
+            return Response(
+                {'error': 'Tag is already queued for processing'}, 
+                status=status.HTTP_409_CONFLICT
+            )
         
         tag.processing_status = 'pending'
         tag.save()

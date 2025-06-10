@@ -61,7 +61,8 @@
                 <v-icon
                   size="small"
                   color="primary"
-                  :class="{ 'opacity-50': item.processing_status === 'in_process' }"
+                  :class="{ 'opacity-50': ['in_process', 'pending'].includes(item.processing_status) }"
+                  :disabled="['in_process', 'pending'].includes(item.processing_status)"
                   @click.stop="onProcessTag(item)"
                 >
                   mdi-cog
@@ -228,6 +229,10 @@ const navigateToTagImages = (item: any) => {
 const onProcessTag = async (tag: any) => {
   if (!tag.uuid) {
     notificationService.error('Cannot process tag: missing UUID')
+    return
+  }
+  if (['in_process', 'pending'].includes(tag.processing_status)) {
+    notificationService.warning('Tag is already queued for processing')
     return
   }
   try {
