@@ -145,6 +145,16 @@ class RepositoryViewSet(BaseViewSet):
         serializer = RepositoryTagListSerializer(page, many=True)
         return paginator.get_paginated_response(serializer.data)
 
+    @action(detail=True, methods=['get'], url_path='tags-graph')
+    def tags_graph(self, request, uuid=None):
+        """
+        Returns 30 latest tags for repository for use in charts (fields: uuid, tag, findings, components, created_at)
+        """
+        repository = self.get_object()
+        tags = repository.tags.order_by('-created_at')[:30]
+        serializer = RepositoryTagListSerializer(tags, many=True)
+        return Response(serializer.data)
+
 class RepositoryTagViewSet(BaseViewSet):
     queryset = RepositoryTag.objects.all()
     serializer_class = RepositoryTagSerializer

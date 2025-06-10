@@ -151,9 +151,20 @@ interface SortItem { key: string; order: 'asc' | 'desc' }
 const tagsSortBy = ref<SortItem[]>([{ key: 'created_at', order: 'desc' }])
 const tagsPageCount = computed(() => Math.ceil(tagsTotal.value / tagsPerPage.value) || 1)
 
-const tagLabels = computed(() => (repository.value?.tags || []).map((tag: any) => tag.tag))
-const findingsData = computed(() => (repository.value?.tags || []).map(getTagFindings))
-const uniqueComponentsData = computed(() => (repository.value?.tags || []).map(getTagUniqueComponents))
+const tagsForCharts = ref<any[]>([])
+
+const fetchTagsForCharts = async () => {
+  try {
+    const resp = await api.get(`repositories/${route.params.uuid}/tags-graph/`)
+    tagsForCharts.value = resp.data
+  } catch (e) {
+    tagsForCharts.value = []
+  }
+}
+
+const tagLabels = computed(() => tagsForCharts.value.map((tag: any) => tag.tag))
+const findingsData = computed(() => tagsForCharts.value.map((tag: any) => tag.findings))
+const uniqueComponentsData = computed(() => tagsForCharts.value.map((tag: any) => tag.components))
 
 const barChartData = computed(() => ({
   labels: tagLabels.value,
@@ -320,6 +331,7 @@ const onTagRowClick = (event: any, { item }: any) => {
 onMounted(() => {
   fetchRepository()
   fetchTags()
+  fetchTagsForCharts()
 })
 </script>
 
