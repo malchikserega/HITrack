@@ -952,9 +952,11 @@ def scan_repository_tags(repository_uuid: str):
                 # Check if tag already exists
                 if not RepositoryTag.objects.filter(repository=repository, tag=tag_name).exists():
                     # Get manifest for the tag
-                    manifest = get_manifest(registry.api_url, token, repository.name, tag_name)
-                    digest = manifest.get('config', {}).get('digest', '').replace('sha256:', '')
-                    
+                    manifest, digest = get_manifest(registry.api_url, token, repository.name, tag_name)
+                    if digest:
+                        digest = digest.replace('sha256:', '')
+                    else:
+                        digest = ''
                     # Create new tag
                     RepositoryTag.objects.create(
                         repository=repository,
