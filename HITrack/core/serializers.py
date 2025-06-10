@@ -183,10 +183,11 @@ class ImageListSerializer(serializers.ModelSerializer):
     has_sbom = serializers.SerializerMethodField()
     findings = serializers.SerializerMethodField()
     unique_findings = serializers.SerializerMethodField()
+    components_count = serializers.SerializerMethodField()
 
     class Meta:
         model = Image
-        fields = ['uuid', 'name', 'digest', 'scan_status', 'has_sbom', 'findings', 'unique_findings', 'updated_at']
+        fields = ['uuid', 'name', 'digest', 'scan_status', 'has_sbom', 'findings', 'unique_findings', 'components_count', 'updated_at']
         read_only_fields = ['uuid', 'updated_at']
 
     def get_has_sbom(self, obj):
@@ -199,6 +200,9 @@ class ImageListSerializer(serializers.ModelSerializer):
     def get_unique_findings(self, obj):
         # Count unique vulnerabilities across all components
         return obj.component_versions.values('vulnerabilities').distinct().count()
+
+    def get_components_count(self, obj):
+        return obj.component_versions.count()
 
 
 class TagImageShortSerializer(serializers.ModelSerializer):

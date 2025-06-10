@@ -21,6 +21,18 @@
               hide-details
               density="compact"
             ></v-switch>
+            <v-spacer></v-spacer>
+            <v-text-field
+              v-model="search"
+              append-inner-icon="mdi-magnify"
+              label="Search images"
+              hide-details
+              density="compact"
+              class="ml-4"
+              style="max-width: 300px;"
+              @keyup.enter="fetchImages"
+              @click:append-inner="fetchImages"
+            />
           </div>
         </v-col>
       </v-row>
@@ -34,6 +46,12 @@
               :loading="loading"
               class="elevation-1"
               item-class="clickable-row"
+              :page="page"
+              :items-per-page="itemsPerPage"
+              :server-items-length="totalItems"
+              :options.sync="tableOptions"
+              :sort-by.sync="sortBy"
+              @update:options="onOptionsUpdate"
             >
               <template #item="{ item }">
                 <tr class="clickable-row">
@@ -66,15 +84,9 @@
                     </v-tooltip>
                   </td>
                   <td @click="onRowClick(item)">
-                    <v-tooltip location="top">
-                      <template #activator="{ props }">
-                        <v-icon v-bind="props" :color="item.has_sbom ? 'success' : 'error'">
-                          {{ item.has_sbom ? 'mdi-check-circle' : 'mdi-close-circle' }}
-                        </v-icon>
-                      </template>
-                      <span v-if="item.has_sbom">SBOM present</span>
-                      <span v-else>No SBOM</span>
-                    </v-tooltip>
+                    <v-icon :color="item.has_sbom ? 'success' : 'error'">
+                      {{ item.has_sbom ? 'mdi-check-circle' : 'mdi-close-circle' }}
+                    </v-icon>
                   </td>
                   <td @click="onRowClick(item)">
                     <v-chip
@@ -84,6 +96,9 @@
                     >
                       {{ showUniqueFindings ? item.unique_findings : item.findings }}
                     </v-chip>
+                  </td>
+                  <td @click="onRowClick(item)">
+                    {{ item.components_count }}
                   </td>
                   <td @click="onRowClick(item)">
                     <span class="nowrap">{{ $formatDate(item.updated_at) }}</span>
@@ -175,11 +190,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '../plugins/axios'
 import { notificationService } from '../plugins/notifications'
 import type { Image, PaginatedResponse } from '../types/interfaces'
+import type { DataTableSortItem } from 'vuetify'
 
 const images = ref<Image[]>([])
 const loading = ref(false)
@@ -187,6 +203,12 @@ const saving = ref(false)
 const deleting = ref(false)
 const dialog = ref(false)
 const dialogDelete = ref(false)
+const search = ref('')
+const page = ref(1)
+const itemsPerPage = ref(10)
+const totalItems = ref(0)
+const sortBy = ref<DataTableSortItem[]>([{ key: 'updated_at', order: 'desc' }])
+const tableOptions = ref({})
 const editedItem = ref<Image>({
   id: undefined,
   uuid: '',
@@ -236,11 +258,11 @@ const defaultItem = {
 const headers: any[] = [
   { title: 'Name', key: 'name', sortable: true },
   { title: 'Digest', key: 'digest', sortable: true },
-  { title: 'Status', key: 'scan_status', sortable: true },
+  { title: 'SBOM', key: 'has_sbom', sortable: false },
   { title: 'Findings', key: 'findings', sortable: true },
   { title: 'Components', key: 'components_count', sortable: true },
-  { title: 'Created', key: 'created_at', sortable: true },
-  { title: 'Updated', key: 'updated_at', sortable: true }
+  { title: 'Updated', key: 'updated_at', sortable: true },
+  { title: 'Actions', key: 'actions', sortable: false }
 ]
 
 const rules = {
@@ -250,8 +272,17 @@ const rules = {
 const fetchImages = async () => {
   loading.value = true
   try {
-    const response = await api.get<PaginatedResponse<Image>>('images/')
+    const params: any = {
+      page: page.value,
+      page_size: itemsPerPage.value,
+    }
+    if (search.value) params.search = search.value
+    if (sortBy.value && sortBy.value.length > 0) {
+      params.ordering = sortBy.value.map(s => s.order === 'desc' ? `-${s.key}` : s.key).join(',')
+    }
+    const response = await api.get<PaginatedResponse<Image>>('images/', { params })
     images.value = response.data.results
+    totalItems.value = response.data.count
   } catch (error) {
     console.error('Error fetching images:', error)
     notificationService.error('Failed to fetch images')
@@ -259,6 +290,15 @@ const fetchImages = async () => {
     loading.value = false
   }
 }
+
+const onOptionsUpdate = (options: any) => {
+  page.value = options.page
+  itemsPerPage.value = options.itemsPerPage
+  sortBy.value = options.sortBy
+  fetchImages()
+}
+
+watch([page, itemsPerPage, search, sortBy], fetchImages)
 
 const openDialog = (title: string, item?: Image) => {
   formTitle.value = title
