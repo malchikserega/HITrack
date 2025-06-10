@@ -175,7 +175,7 @@ def periodic_repository_scan():
     This task should be scheduled to run daily.
     """
     from .models import Repository, RepositoryTag, ContainerRegistry
-    from .utils.acr import get_tags, get_bearer_token
+    from .utils.acr import get_tags, get_bearer_token, get_manifest, is_helm_chart
     from datetime import datetime
 
     logger.info("Starting periodic repository scan")
@@ -195,8 +195,20 @@ def periodic_repository_scan():
 
             token = get_bearer_token(registry.api_url, registry.login, registry.password)
 
-            # Get all tags from registry and take last 10
-            all_tags = list(get_tags(registry.api_url, token, repository.name))
+            # Get all tags from registry 
+            all_tags = list(get_tags(registry.api_url, token, repository.name, limit=10))
+
+            # Try to determine type if unknown
+            if repository.repository_type in ('none', 'Unknown') and all_tags:
+                first_tag = all_tags[0]
+                manifest, _ = get_manifest(registry.api_url, token, repository.name, first_tag)
+                if manifest:
+                    if is_helm_chart(manifest):
+                        repository.repository_type = 'helm'
+                    else:
+                        repository.repository_type = 'docker'
+                    repository.save()
+
             tags_to_scan = all_tags[-10:] if all_tags else []
             logger.info(f"Found {len(tags_to_scan)} tags to scan for repository {repository.name}")
 
@@ -280,7 +292,7 @@ def scan_repository(repository_name: str, repository_url: str, scan_option: str)
             repository.save()
 
         # Get all tags
-        all_tags = list(get_tags(registry.api_url, token, repository_name))
+        all_tags = list(get_tags(registry.api_url, token, repository_name, limit=30))
         if scan_option == 'last':
             tags_to_scan = all_tags[-1:] if all_tags else []
         elif scan_option == 'last10':

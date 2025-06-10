@@ -31,8 +31,11 @@ class Repository(models.Model):
     url = models.CharField(max_length=255, blank=True, null=True, unique=True)
     status = models.BooleanField(default=False, blank=True, verbose_name="Status")
     last_scanned = models.DateTimeField(blank=True, null=True)
-    repository_type = models.CharField(max_length=10, choices=[('helm', 'Helm Chart'), ('docker', 'Docker Image')],
-                                       default='docker')
+    repository_type = models.CharField(
+        max_length=10,
+        choices=[('helm', 'Helm Chart'), ('docker', 'Docker Image'), ('none', 'Unknown')],
+        default='none'
+    )
     container_registry = models.ForeignKey('ContainerRegistry', on_delete=models.CASCADE, related_name='repositories', blank=True, null=True, to_field='uuid')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

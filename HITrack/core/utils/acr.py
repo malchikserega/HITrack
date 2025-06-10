@@ -72,37 +72,65 @@ def get_paged_data(url: str, token: str) -> Generator[dict, None, None]:
         dict: JSON response data for each page.
     """
     headers = {"Authorization": f"Bearer {token}"}
+    from urllib.parse import urlparse, urljoin
+
+    parsed = urlparse(url)
+    base_url = f"{parsed.scheme}://{parsed.netloc}"
 
     while url:
+        if url.startswith("/"):
+            url = urljoin(base_url, url)
         try:
             response = requests.get(url, headers=headers)
             response.raise_for_status()
-            yield response.json()
-            url = response.links.get("next", {}).get("url")
+            data = response.json()
+            yield data
+            next_link = response.links.get("next", {}).get("url")
+            url = next_link if next_link else None
         except requests.RequestException as e:
             logger.error(f"Failed to fetch data from {url}: {e}")
+            logger.error(f"Response content: {getattr(e.response, 'text', None)}")
             break
 
 
-def get_repositories(api_url: str, token: str) -> Generator[Tuple[str, str, int], None, None]:
+def get_repositories(api_url: str, token: str, page_size: int = 50, last_repo: str = None) -> Tuple[list, str]:
     """
-    Get all repositories from ACR with their names, full URLs and tag counts.
+    Get repositories from ACR with pagination.
     
     Args:
         api_url (str): ACR API URL
         token (str): Bearer token for authentication
+        page_size (int): Number of repositories to return
+        last_repo (str): Name of the last repository from previous page
         
-    Yields:
-        Tuple[str, str, int]: A tuple containing (repository_name, full_url, tag_count)
+    Returns:
+        Tuple[list, str]: A tuple containing (list of repositories, next page token)
     """
-    for page in get_paged_data(f"{api_url}/v2/_catalog?n={PAGE_SIZE}", token):
-        for repo in page.get("repositories", []):
-            # Count tags for this repository
-            tag_count = sum(1 for _ in get_tags(api_url, token, repo))
-            yield repo, f"{api_url.split('//')[1]}/{repo}", tag_count
+    url = f"{api_url}/v2/_catalog?n={page_size}"
+    if last_repo:
+        url += f"&last={last_repo}"
+        
+    response = requests.get(url, headers={'Authorization': f'Bearer {token}'})
+    response.raise_for_status()
+    
+    data = response.json()
+    repos = data.get('repositories', [])
+    
+    # Get the next page token from Link header if present
+    next_page = None
+    if 'Link' in response.headers:
+        link_header = response.headers['Link']
+        if 'next' in link_header:
+            # Extract the last parameter from the next link
+            import re
+            match = re.search(r'last=([^&>]+)', link_header)
+            if match:
+                next_page = match.group(1)
+    
+    return [(repo, f"{api_url.split('//')[1]}/{repo}") for repo in repos], next_page
 
 
-def get_tags(api_url: str, token: str, repo: str) -> Generator[str, None, None]:
+def get_tags(api_url: str, token: str, repo: str, limit: int = None) -> Generator[str, None, None]:
     """
     Get all tags for a repository.
     
@@ -110,13 +138,23 @@ def get_tags(api_url: str, token: str, repo: str) -> Generator[str, None, None]:
         api_url (str): ACR API URL
         token (str): Bearer token for authentication
         repo (str): Repository name.
+        limit (int): Optional limit on the number of tags to return.
         
     Yields:
         str: Tag name.
     """
-    for page in get_paged_data(f"{api_url}/v2/{repo}/tags/list?n={PAGE_SIZE}", token):
+    count = 0
+    page_size = PAGE_SIZE
+    if limit is not None and limit < PAGE_SIZE:
+        page_size = limit
+    for page in get_paged_data(f"{api_url}/v2/{repo}/tags/list?n={page_size}", token):
+        if not page or page.get("tags") is None:
+            break
         for tag in page.get("tags", []):
             yield tag
+            count += 1
+            if limit is not None and count >= limit:
+                return
 
 
 def get_manifest(api_url: str, token: str, repo: str, tag: str) -> Tuple[Optional[dict], Optional[str]]:

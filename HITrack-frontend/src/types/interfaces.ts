@@ -15,7 +15,7 @@ export interface Repository extends BaseEntity {
   name: string
   url: string
   tag_count: number
-  repository_type: 'docker' | 'helm'
+  repository_type: 'docker' | 'helm' | 'none'
 }
 
 /**

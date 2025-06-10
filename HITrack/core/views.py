@@ -43,29 +43,45 @@ class RepositoryViewSet(BaseViewSet):
     @action(detail=False, methods=['get'])
     def get_acr_repos(self, request):
         """
-        Get all repositories from Azure Container Registry.
+        Get repositories from Azure Container Registry with pagination.
+        Uses ACR's native pagination to efficiently fetch repositories.
         """
         from .models import ContainerRegistry
         from .utils.acr import get_repositories, get_bearer_token
 
         registry_uuid = request.query_params.get('registry_uuid')
         provider = request.query_params.get('provider', 'acr')
+        page_size = int(request.query_params.get('page_size', 50))
+        last_repo = request.query_params.get('last')
+        
         try:
             if registry_uuid:
                 registry = ContainerRegistry.objects.get(uuid=registry_uuid)
             else:
                 registry = ContainerRegistry.objects.get(provider=provider)
+                
             token = get_bearer_token(registry.api_url, registry.login, registry.password)
-            repos = list(get_repositories(registry.api_url, token))
+            
+            # Get repositories with pagination
+            repos, next_page = get_repositories(
+                registry.api_url,
+                token,
+                page_size=page_size,
+                last_repo=last_repo
+            )
+            
             return Response({
                 "repositories": [
                     {
                         "name": repo[0],
-                        "url": repo[1],
-                        "tag_count": repo[2]
+                        "url": repo[1]
                     }
                     for repo in repos
-                ]
+                ],
+                "pagination": {
+                    "next_page": next_page,
+                    "page_size": page_size
+                }
             })
         except ContainerRegistry.DoesNotExist:
             return Response(
@@ -291,60 +307,53 @@ class StatsViewSet(viewsets.ViewSet):
 class JobViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
 
-    @action(detail=False, methods=['post'], url_path='scan-repositories')
-    def scan_repositories(self, request):
+    @action(detail=False, methods=['post'], url_path='add-repositories')
+    def add_repositories(self, request):
         """
-        Create a new scanning job for repositories.
-        If repository doesn't exist in the system, it will be created first with status=True
-        and a scan task will be initiated. For existing repositories, no scan task will be created.
-        Note: Repository is uniquely identified by the combination of name and url.
-        
-        Expected payload:
-        {
-            "repositories": [
-                {
-                    "repository_url": "url",
-                    "repository_name": "name",
-                    "scan_option": "last|last10|all"
-                }
-            ]
-        }
+        Add new repositories if they do not exist in the system yet.
+        Repository is uniquely identified by the combination of name and url.
+        The registry_uuid should be provided to link repositories to the correct registry.
         """
+        from .models import ContainerRegistry
         try:
             repositories = request.data.get('repositories', [])
+            registry_uuid = request.data.get('registry_uuid')
             if not repositories:
                 return Response(
                     {'error': 'No repositories provided'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
+            # Get the registry by uuid or fallback to first acr
+            registry = None
+            if registry_uuid:
+                registry = ContainerRegistry.objects.filter(uuid=registry_uuid).first()
+            else:
+                registry = ContainerRegistry.objects.filter(provider='acr').first()
+            if not registry:
+                return Response(
+                    {'error': 'No ACR registry found'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
             results = []
             for repo_data in repositories:
-                # Check if repository exists, create if it doesn't
                 repository, created = Repository.objects.get_or_create(
                     url=repo_data['repository_url'],
                     name=repo_data['repository_name'],
-                    defaults={'status': True}
+                    defaults={
+                        'status': True,
+                        'repository_type': 'none',
+                        'container_registry': registry
+                    }
                 )
-
                 result = {
                     'repository': repo_data['repository_name'],
                     'repository_id': str(repository.uuid),
                     'created': created
                 }
-
-                # Start the scan task only for newly created repositories
-                if created:
-                    task = scan_repository.delay(
-                        repository_name=repo_data['repository_name'],
-                        repository_url=repo_data['repository_url'],
-                        scan_option=repo_data['scan_option']
-                    )
-                    result['task_id'] = task.id
-                else:
-                    result['task_id'] = None
-                    result['message'] = 'Repository already exists, no scan task created'
-
+                if not created:
+                    result['message'] = 'Repository already exists'
                 results.append(result)
 
             return Response({

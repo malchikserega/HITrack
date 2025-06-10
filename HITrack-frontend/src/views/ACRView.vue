@@ -36,8 +36,20 @@
         </v-col>
       </v-row>
 
-      <v-dialog v-model="dialog" max-width="800px">
-        <v-card>
+      <v-dialog 
+        v-model="dialog" 
+        width="1000"
+        class="acr-dialog"
+      >
+        <v-card class="dialog-card">
+          <div class="dialog-header">
+            <span class="text-h5">Select Repositories</span>
+            <v-btn
+              icon="mdi-close"
+              variant="text"
+              @click="dialog = false"
+            ></v-btn>
+          </div>
           <v-stepper v-model="currentStep" :items="steps" class="wizard-stepper">
             <!-- Step 1: Repository Selection -->
             <template v-slot:item.1>
@@ -52,131 +64,71 @@
                     @click:clear="search = ''"
                     class="mb-4"
                   ></v-text-field>
-                  
-                  <v-list class="repository-list">
-                    <template v-if="repositories.length > 0">
-                      <v-list-item
-                        v-for="repo in filteredRepositories"
-                        :key="repo.uuid || repo.url"
-                        :value="repo"
-                        class="repository-item"
-                        @click="toggleRepository(repo)"
-                      >
-                        <template v-slot:prepend>
-                          <v-checkbox
-                            v-model="selectedRepositories"
-                            :value="repo"
-                            hide-details
-                            class="mr-2"
-                            @click.stop
-                          ></v-checkbox>
-                        </template>
-                        <v-list-item-title class="text-subtitle-1 font-weight-medium">
-                          {{ repo.name }}
-                          <v-chip
-                            size="x-small"
-                            color="light-blue-lighten-1"
-                            variant="outlined"
-                            class="ml-2"
-                            density="compact"
-                          >
-                            {{ repo.url }}
-                          </v-chip>
-                          <v-chip
-                            size="x-small"
-                            color="purple-lighten-1"
-                            variant="outlined"
-                            class="ml-2"
-                            density="compact"
-                          >
-                            {{ repo.tag_count }} tags
-                          </v-chip>
-                        </v-list-item-title>
-                      </v-list-item>
-                    </template>
-                    <template v-else>
-                      <v-list-item>
-                        <v-list-item-title class="text-center py-4">
+                  <div class="scrollable-content">
+                    <v-list class="repository-list">
+                      <template v-if="repositories.length > 0">
+                        <v-list-item
+                          v-for="repo in filteredRepositories"
+                          :key="repo.uuid || repo.url"
+                          :value="repo"
+                          class="repository-item"
+                          @click="toggleRepository(repo)"
+                        >
+                          <template v-slot:prepend>
+                            <v-checkbox
+                              v-model="selectedRepositories"
+                              :value="repo"
+                              hide-details
+                              class="mr-2"
+                              @click.stop
+                            ></v-checkbox>
+                          </template>
+                          <v-list-item-title class="text-subtitle-1 font-weight-medium">
+                            {{ repo.name }}
+                            <v-chip
+                              size="x-small"
+                              color="light-blue-lighten-1"
+                              variant="outlined"
+                              class="ml-2"
+                              density="compact"
+                            >
+                              {{ repo.url }}
+                            </v-chip>
+                          </v-list-item-title>
+                        </v-list-item>
+                        <!-- Loading indicator for infinite scroll -->
+                        <div v-if="isLoadingMore" class="text-center py-4">
                           <v-progress-circular
                             indeterminate
                             color="primary"
-                            class="mb-2"
+                            size="24"
                           ></v-progress-circular>
-                          <div>Loading repositories...</div>
-                        </v-list-item-title>
-                      </v-list-item>
-                    </template>
-                  </v-list>
+                        </div>
+                        <!-- Observer target for infinite scroll -->
+                        <div ref="observerTarget" class="observer-target"></div>
+                      </template>
+                      <template v-else>
+                        <v-list-item>
+                          <v-list-item-title class="text-center py-4">
+                            <v-progress-circular
+                              indeterminate
+                              color="primary"
+                              class="mb-2"
+                            ></v-progress-circular>
+                            <div>Loading repositories...</div>
+                          </v-list-item-title>
+                        </v-list-item>
+                      </template>
+                    </v-list>
+                  </div>
                 </v-card-text>
               </v-card>
             </template>
 
-            <!-- Step 2: Scanning Options -->
+            <!-- Step 2: Summary and Confirmation -->
             <template v-slot:item.2>
-              <v-card flat class="step-card" title="Choose versions to scan for each repository">
-                <v-card-text class="step-content">
-                  <v-table>
-                    <thead>
-                      <tr>
-                        <th class="text-subtitle-1 font-weight-medium">Repository</th>
-                        <th class="text-subtitle-1 font-weight-medium text-center">Last version</th>
-                        <th class="text-subtitle-1 font-weight-medium text-center">Last 10</th>
-                        <th class="text-subtitle-1 font-weight-medium text-center">All</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <tr v-for="repo in selectedRepositories" :key="repo.uuid || repo.url">
-                        <td class="text-subtitle-1">{{ repo.name }}</td>
-                        <td class="text-center">
-                          <v-radio-group
-                            v-model="scanOptions[repo.url]"
-                            hide-details
-                            class="radio-group"
-                          >
-                            <v-radio
-                              value="last"
-                              color="primary"
-                              hide-details
-                            ></v-radio>
-                          </v-radio-group>
-                        </td>
-                        <td class="text-center">
-                          <v-radio-group
-                            v-model="scanOptions[repo.url]"
-                            hide-details
-                            class="radio-group"
-                          >
-                            <v-radio
-                              value="last10"
-                              color="primary"
-                              hide-details
-                            ></v-radio>
-                          </v-radio-group>
-                        </td>
-                        <td class="text-center">
-                          <v-radio-group
-                            v-model="scanOptions[repo.url]"
-                            hide-details
-                            class="radio-group"
-                          >
-                            <v-radio
-                              value="all"
-                              color="primary"
-                              hide-details
-                            ></v-radio>
-                          </v-radio-group>
-                        </td>
-                      </tr>
-                    </tbody>
-                  </v-table>
-                </v-card-text>
-              </v-card>
-            </template>
-
-            <!-- Step 3: Summary and Confirmation -->
-            <template v-slot:item.3>
-              <v-card flat class="step-card" title="Summary for chosen repositories">
-                <v-card-text class="step-content">
+              <v-card flat class="summary-auto-card">
+                <v-card-text class="summary-auto-content">
                   <v-list class="summary-list">
                     <v-list-item
                       v-for="repo in selectedRepositories"
@@ -189,15 +141,6 @@
                       <v-list-item-title class="text-subtitle-1 font-weight-medium">
                         {{ repo.name }}
                       </v-list-item-title>
-                      <template v-slot:append>
-                        <v-chip
-                          size="small"
-                          :color="getScanOptionColor(scanOptions[repo.url])"
-                          class="text-caption ml-2"
-                        >
-                          {{ getScanOptionLabel(scanOptions[repo.url]) }}
-                        </v-chip>
-                      </template>
                     </v-list-item>
                   </v-list>
                 </v-card-text>
@@ -216,7 +159,7 @@
                 </v-btn>
                 <v-spacer></v-spacer>
                 <v-btn
-                  v-if="currentStep < 3"
+                  v-if="currentStep < 2"
                   variant="text"
                   color="primary"
                   @click="nextStep"
@@ -242,7 +185,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import api from '../plugins/axios'
 import { notificationService } from '../plugins/notifications'
 import type { Repository, PaginatedResponse } from '../types/interfaces'
@@ -255,13 +198,15 @@ const currentStep = ref(1)
 const search = ref('')
 const repositories = ref<Repository[]>([])
 const selectedRepositories = ref<Repository[]>([])
-const scanOptions = ref<Record<string, string>>({})
 const submitting = ref(false)
 const isLoading = ref(false)
+const hasMore = ref(true)
+const isLoadingMore = ref(false)
+const pageSize = 50
+const lastRepo = ref<string | null>(null)
 
 const steps = [
   { title: 'Select Repositories', description: 'Select the repositories' },
-  { title: 'Scanning options', description: 'Select tags to scan for each repository' },
   { title: 'Summary', description: 'Submit repositories' }
 ]
 
@@ -278,55 +223,88 @@ const filteredRepositories = computed(() => {
   )
 })
 
-const getScanOptionLabel = (option: string) => {
-  switch (option) {
-    case 'all': return 'Scan all tags'
-    case 'last10': return 'Scan last 10 tags'
-    case 'last': return 'Scan last tag only'
-    default: return 'Not selected'
-  }
-}
-
-const getScanOptionColor = (option: string) => {
-  switch (option) {
-    case 'last': return 'info'
-    case 'last10': return 'warning'
-    case 'all': return 'success'
-    default: return 'grey'
-  }
-}
-
-const openDialog = async () => {
+const loadRepositories = async (reset: boolean = false) => {
   if (!selectedRegistry.value) return
-  isLoading.value = true
+  if (reset) {
+    isLoading.value = true
+    lastRepo.value = null
+  } else {
+    isLoadingMore.value = true
+  }
   try {
     const registry = acrRegistries.value.find(r => r.uuid === selectedRegistry.value)
     const response = await api.get('repositories/get_acr_repos/', {
       params: {
         provider: 'acr',
-        registry_uuid: registry?.uuid
+        registry_uuid: registry?.uuid,
+        page_size: pageSize,
+        last: lastRepo.value
       }
     })
-    repositories.value = response.data.repositories
-    dialog.value = true
-    currentStep.value = 1
-    selectedRepositories.value = []
-    scanOptions.value = {}
+    if (reset) {
+      repositories.value = response.data.repositories
+    } else {
+      repositories.value = [...repositories.value, ...response.data.repositories]
+    }
+    lastRepo.value = response.data.pagination.next_page
+    hasMore.value = !!lastRepo.value
+    console.log('After loadRepositories:', { hasMore: hasMore.value, isLoadingMore: isLoadingMore.value, lastRepo: lastRepo.value })
   } catch (error) {
     notificationService.error('Failed to fetch repositories')
   } finally {
     isLoading.value = false
+    isLoadingMore.value = false
   }
 }
 
-const nextStep = () => {
-  if (currentStep.value === 1) {
-    selectedRepositories.value.forEach(repo => {
-      if (!scanOptions.value[repo.url]) {
-        scanOptions.value[repo.url] = 'last'
-      }
-    })
+const openDialog = async () => {
+  if (!selectedRegistry.value) return
+  await loadRepositories(true)
+  dialog.value = true
+  currentStep.value = 1
+  selectedRepositories.value = []
+}
+
+const loadMore = async () => {
+  if (!isLoadingMore.value && hasMore.value) {
+    await loadRepositories(false)
   }
+}
+
+// Add intersection observer for infinite scroll
+const observerTarget = ref<HTMLElement | null>(null)
+
+onMounted(() => {
+  const observer = new IntersectionObserver(
+    (entries) => {
+      if (entries[0].isIntersecting && hasMore.value && !isLoadingMore.value) {
+        console.log('Observer triggered - loading more repositories')
+        loadMore()
+      }
+    },
+    { 
+      threshold: 0.1,
+      rootMargin: '100px'
+    }
+  )
+
+  // Watch for changes in the observer target
+  watch(observerTarget, (newTarget) => {
+    if (newTarget) {
+      console.log('Observer target mounted, starting observation')
+      observer.observe(newTarget)
+    }
+  })
+
+  return () => {
+    if (observerTarget.value) {
+      console.log('Cleaning up observer')
+      observer.unobserve(observerTarget.value)
+    }
+  }
+})
+
+const nextStep = () => {
   currentStep.value++
 }
 
@@ -336,11 +314,13 @@ const submitJob = async () => {
     const jobData = selectedRepositories.value
       .map((repo: any) => ({
         repository_url: repo.url,
-        repository_name: repo.name,
-        scan_option: scanOptions.value[repo.url] || 'last'
+        repository_name: repo.name
       }))
 
-    const response = await api.post('jobs/scan-repositories/', { repositories: jobData })
+    const response = await api.post('jobs/add-repositories/', {
+      repositories: jobData,
+      registry_uuid: selectedRegistry.value
+    })
     console.log('Job created:', response.data)
     
     const newRepos = response.data.results.filter((r: any) => r.created)
@@ -348,7 +328,7 @@ const submitJob = async () => {
     
     if (newRepos.length > 0) {
       const newRepoNames = newRepos.map((r: any) => r.repository_name || r.repository).join(', ')
-      notificationService.success(`Started scanning new repositories: ${newRepoNames}`, 10000)
+      notificationService.success(`Added new repositories: ${newRepoNames}`, 10000)
     }
     
     if (existingRepos.length > 0) {
@@ -358,8 +338,8 @@ const submitJob = async () => {
     
     dialog.value = false
   } catch (error) {
-    console.error('Error creating job:', error)
-    notificationService.error('Failed to create job')
+    console.error('Error adding repositories:', error)
+    notificationService.error('Failed to add repositories')
   } finally {
     submitting.value = false
   }
@@ -369,10 +349,8 @@ const toggleRepository = (repo: Repository) => {
   const index = selectedRepositories.value.findIndex((r: Repository) => r.url === repo.url)
   if (index === -1) {
     selectedRepositories.value.push(repo)
-    scanOptions.value[repo.url] = 'last'
   } else {
     selectedRepositories.value.splice(index, 1)
-    delete scanOptions.value[repo.url]
   }
 }
 
@@ -394,34 +372,80 @@ onMounted(async () => {
   padding: 20px;
 }
 
+.dialog-card {
+  width: 1000px;
+  max-width: 99vw;
+  min-width: 340px;
+  height: 80vh;
+  display: flex;
+  flex-direction: column;
+  margin: auto;
+  overflow: hidden;
+}
+
+.dialog-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 24px 32px 16px 32px;
+  border-bottom: 1px solid #eee;
+  background: #fff;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  font-size: 1.3rem;
+}
+
+.acr-dialog :deep(.v-overlay__content) {
+  max-height: 80vh;
+  margin: auto;
+}
+
 .wizard-stepper {
   background: transparent !important;
-  height: 600px;
+  height: 100%;
   display: flex;
   flex-direction: column;
   position: relative;
+  overflow: hidden;
+}
+
+:deep(.v-stepper__header) {
+  position: sticky;
+  top: 64px;
+  z-index: 9;
+  background: #fff;
+  padding: 16px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.12);
 }
 
 .step-card {
   flex: 1;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
-  padding-bottom: 64px;
-  height: 500px;
+  justify-content: flex-start;
+  height: auto;
 }
 
 .step-content {
+  padding: 0 24px;
+}
+
+.scrollable-content {
   flex: 1;
   overflow-y: auto;
   padding: 16px;
-  height: calc(100% - 32px);
+  min-height: 0;
+  max-height: 45vh;
 }
 
 .repository-list {
-  border: 1px solid;
+  border: 1px solid rgba(0, 0, 0, 0.12);
   border-radius: 4px;
   overflow: hidden;
+  min-height: 200px;
+  display: flex;
+  flex-direction: column;
 }
 
 .repository-item {
@@ -432,82 +456,39 @@ onMounted(async () => {
   border-bottom: none;
 }
 
+.observer-target {
+  height: 20px;
+  width: 100%;
+}
+
 .stepper-actions {
   display: flex;
   align-items: center;
   padding: 16px;
   border-top: 1px solid rgba(0, 0, 0, 0.12);
-  position: absolute;
+  position: sticky;
   bottom: 0;
   left: 0;
   right: 0;
   background: white;
-  z-index: 2;
+  z-index: 10;
   height: 64px;
 }
 
-.scan-options-list {
-  background: transparent;
-  border: 1px solid rgba(0, 0, 0, 0.12);
-  border-radius: 8px;
-  overflow: hidden;
-}
-
-.scan-option-item {
-  border-bottom: 1px solid rgba(0, 0, 0, 0.12);
-  padding: 16px;
-}
-
-.scan-option-item:last-child {
-  border-bottom: none;
-}
-
-:deep(.v-table) {
+.summary-auto-card {
+  height: auto !important;
+  min-height: unset !important;
+  display: block !important;
+  box-shadow: none;
   background: transparent;
 }
-
-:deep(.v-table .v-table__wrapper > table) {
-  border: 1px solid rgba(0, 0, 0, 0.12);
-  border-radius: 8px;
+.summary-auto-content {
+  padding: 24px;
 }
-
-:deep(.v-table .v-table__wrapper > table > thead > tr > th) {
-  font-weight: 600;
-  padding: 12px 16px;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.12);
-  font-size: 1rem;
-  line-height: 1.5;
-}
-
-:deep(.v-table .v-table__wrapper > table > tbody > tr > td) {
-  padding: 12px 16px;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.12);
-  font-size: 1rem;
-  line-height: 1.5;
-}
-
-:deep(.v-table .v-table__wrapper > table > tbody > tr:last-child > td) {
-  border-bottom: none;
-}
-
-:deep(.radio-group) {
-  margin: 0;
-  padding: 0;
-  display: flex;
-  justify-content: center;
-}
-
-:deep(.radio-group .v-radio) {
-  margin: 0;
-  padding: 0;
-}
-
-:deep(.radio-group .v-radio__input) {
-  margin-right: 0;
-}
-
-:deep(.radio-group .v-radio__label) {
-  display: none;
+/* Make stepper actions static for summary step */
+.summary-auto-card + .stepper-actions {
+  position: static !important;
+  margin-top: 0;
 }
 
 .summary-list {
@@ -515,6 +496,8 @@ onMounted(async () => {
   border: 1px solid rgba(0, 0, 0, 0.12);
   border-radius: 8px;
   overflow: hidden;
+  margin-top: 12px;
+  margin-bottom: 12px;
 }
 
 .summary-item {
@@ -527,57 +510,5 @@ onMounted(async () => {
 
 .summary-item:last-child {
   border-bottom: none;
-}
-
-:deep(.v-list-item__content) {
-  padding: 0;
-}
-
-:deep(.v-list-item-title) {
-  font-size: 1rem;
-  line-height: 1.5;
-}
-
-:deep(.v-list-item-subtitle) {
-  font-size: 0.875rem;
-  line-height: 1.25;
-}
-
-:deep(.v-chip) {
-  font-size: 0.65rem;
-  line-height: 1.2;
-  height: 20px;
-  font-family: monospace;
-  padding: 0 6px;
-}
-
-:deep(.v-chip .v-chip__content) {
-  padding: 0 2px;
-}
-
-:deep(.v-text-field .v-field__input) {
-  font-size: 1rem;
-  line-height: 1.5;
-}
-
-:deep(.v-list-item-title) {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.v-progress-circular {
-  margin: 0 8px;
-}
-
-.repository-list {
-  min-height: 200px;
-  display: flex;
-  flex-direction: column;
-}
-
-.repository-list .v-list-item {
-  flex: 0 0 auto;
 }
 </style> 
