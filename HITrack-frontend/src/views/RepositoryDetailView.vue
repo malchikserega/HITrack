@@ -76,7 +76,18 @@
               :disabled="['in_process', 'pending'].includes(item.processing_status)"
               @click.stop="onProcessTag(item)"
             >
-              mdi-cog
+              mdi-code-tags
+            </v-icon>
+            <v-icon
+              size="small"
+              color="info"
+              class="ml-2"
+              :class="{ 'opacity-50': ['in_process', 'pending'].includes(item.processing_status) }"
+              :disabled="['in_process', 'pending'].includes(item.processing_status)"
+              @click.stop="onRescanTagImages(item)"
+              title="Rescan all images for this tag"
+            >
+              mdi-cog-refresh
             </v-icon>
           </template>
         </v-data-table>
@@ -294,6 +305,17 @@ const onProcessTag = async (tag: any) => {
   } catch (error: any) {
     console.error('Error processing tag:', error)
     notificationService.error('Failed to process tag')
+  }
+}
+
+const onRescanTagImages = async (tag: any) => {
+  if (!tag.uuid) return
+  try {
+    const resp = await api.post(`repository-tags/${tag.uuid}/rescan-images/`)
+    notificationService.success(resp.data.message || 'Rescan started')
+    fetchTags()
+  } catch (e) {
+    notificationService.error('Failed to start rescan for tag images')
   }
 }
 

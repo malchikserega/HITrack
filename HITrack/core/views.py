@@ -207,6 +207,29 @@ class RepositoryTagViewSet(BaseViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+    @action(detail=True, methods=['post'], url_path='rescan-images')
+    def rescan_images(self, request, uuid=None):
+        tag = self.get_object()
+        images = tag.images.all()
+        started = 0
+        from .tasks import generate_sbom_and_create_components
+        for image in images:
+            if image.scan_status != 'in_process':
+                image.scan_status = 'pending'
+                image.save()
+                repo_tag = image.repository_tags.first()
+                art_type = repo_tag.repository.repository_type if repo_tag else 'docker'
+                generate_sbom_and_create_components.delay(
+                    image_uuid=str(image.uuid),
+                    art_type=art_type
+                )
+                started += 1
+        return Response({
+            'status': 'success',
+            'message': f'Rescan started for {started} images',
+            'count': started
+        })
+
 class ImageViewSet(BaseViewSet):
     queryset = Image.objects.all()
     filterset_fields = ['repository_tags', 'component_versions']
