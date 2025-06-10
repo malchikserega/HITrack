@@ -99,6 +99,16 @@
                   <td>
                     <span class="nowrap">{{ $formatDate(item.updated_at) }}</span>
                   </td>
+                  <td>
+                    <v-icon
+                      size="small"
+                      color="primary"
+                      :class="{ 'opacity-50': item.scan_status === 'in_process' }"
+                      @click.stop="onRescan(item)"
+                    >
+                      mdi-refresh
+                    </v-icon>
+                  </td>
                 </tr>
               </template>
             </v-data-table>
@@ -159,7 +169,8 @@ const headers: any[] = [
   { title: 'SBOM', key: 'has_sbom', sortable: false },
   { title: 'Findings', key: 'findings', sortable: true },
   { title: 'Components', key: 'components_count', sortable: true },
-  { title: 'Updated', key: 'updated_at', sortable: true }
+  { title: 'Updated', key: 'updated_at', sortable: true },
+  { title: 'Actions', key: 'actions', sortable: false }
 ]
 
 const pageCount = computed(() => Math.ceil(totalItems.value / itemsPerPage.value) || 1)
@@ -233,6 +244,16 @@ const copyDigest = (digest: string) => {
   navigator.clipboard.writeText(digest)
     .then(() => notificationService.success('Digest copied!'))
     .catch(() => notificationService.error('Failed to copy digest'))
+}
+
+const onRescan = async (image: Image) => {
+  try {
+    await api.post(`images/${image.uuid}/rescan/`)
+    notificationService.success('Image rescan started successfully')
+    await fetchImages()
+  } catch (error) {
+    notificationService.error('Failed to start image rescan')
+  }
 }
 
 const goBack = () => router.back()
