@@ -135,6 +135,11 @@ import api from '../plugins/axios'
 import { notificationService } from '../plugins/notifications'
 import type { Image, PaginatedResponse } from '../types/interfaces'
 
+interface SortItem {
+  key: string
+  order: 'asc' | 'desc'
+}
+
 const route = useRoute()
 const router = useRouter()
 const tagUuid = computed(() => route.params.uuid as string)
@@ -145,7 +150,7 @@ const search = ref('')
 const page = ref(1)
 const itemsPerPage = ref(10)
 const totalItems = ref(0)
-const sortBy = ref([{ key: 'updated_at', order: 'desc' }])
+const sortBy = ref<SortItem[]>([{ key: 'updated_at', order: 'desc' }])
 const showUniqueFindings = ref(false)
 
 const headers: any[] = [
