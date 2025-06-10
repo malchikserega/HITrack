@@ -197,8 +197,9 @@ def periodic_repository_scan():
 
             # Get all tags from registry 
             all_tags = list(get_tags(registry.api_url, token, repository.name, limit=10))
+            logger.info(f"Found {len(all_tags)} tags for repository {repository.name}")
 
-            # Try to determine type if unknown
+            # Determine repository type if unknown
             if repository.repository_type in ('none', 'Unknown') and all_tags:
                 first_tag = all_tags[0]
                 manifest, _ = get_manifest(registry.api_url, token, repository.name, first_tag)
@@ -945,6 +946,17 @@ def scan_repository_tags(repository_uuid: str):
         # Get all tags from registry 
         all_tags = list(get_tags(registry.api_url, token, repository.name, limit=10))
         logger.info(f"Found {len(all_tags)} tags for repository {repository.name}")
+
+        # Determine repository type if unknown
+        if repository.repository_type in ('none', 'Unknown') and all_tags:
+            first_tag = all_tags[0]
+            manifest, _ = get_manifest(registry.api_url, token, repository.name, first_tag)
+            if manifest:
+                if is_helm_chart(manifest):
+                    repository.repository_type = 'helm'
+                else:
+                    repository.repository_type = 'docker'
+                repository.save()
 
         # Process each tag
         for tag_name in all_tags:
