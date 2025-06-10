@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
+import TagImagesView from '../views/TagImagesView.vue'
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -56,6 +57,16 @@ const router = createRouter({
       path: '/repositories/:uuid',
       name: 'RepositoryDetail',
       component: () => import('../views/RepositoryDetailView.vue'),
+    },
+    {
+      path: '/repository-tags/:uuid/images',
+      name: 'tag-images',
+      component: TagImagesView,
+      props: true,
+      meta: {
+        requiresAuth: true,
+        title: 'Tag Images'
+      }
     }
   ]
 })

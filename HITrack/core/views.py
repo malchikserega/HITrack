@@ -21,6 +21,7 @@ class BaseViewSet(viewsets.ModelViewSet):
     ordering_fields = ['created_at', 'updated_at']
     ordering = ['-created_at']  # Default ordering
     lookup_field = 'uuid'
+    pagination_class = CustomPageNumberPagination
 
 class RepositoryViewSet(BaseViewSet):
     queryset = Repository.objects.all()
@@ -124,12 +125,23 @@ class RepositoryTagViewSet(BaseViewSet):
     filterset_fields = ['repository', 'tag']
     search_fields = ['tag', 'repository__name']
     ordering_fields = ['tag', 'created_at', 'updated_at']
+    lookup_field = 'uuid'
 
     @action(detail=True, methods=['get'])
-    def images(self, request, pk=None):
+    def images(self, request, uuid=None):
         tag = self.get_object()
         images = tag.images.all()
-        serializer = ImageSerializer(images, many=True)
+        
+        # Apply ordering if provided
+        ordering = request.query_params.get('ordering', '-updated_at')
+        if ordering:
+            images = images.order_by(ordering)
+            
+        page = self.paginate_queryset(images)
+        if page is not None:
+            serializer = ImageListSerializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+        serializer = ImageListSerializer(images, many=True)
         return Response(serializer.data)
 
     @action(detail=True, methods=['post'])

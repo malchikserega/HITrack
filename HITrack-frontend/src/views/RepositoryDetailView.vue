@@ -22,45 +22,54 @@
     <v-row>
       <v-col cols="12">
         <h2 class="text-h6 font-weight-bold mb-2">Tags</h2>
-        <v-data-table
+        <v-table
           :headers="tagHeaders"
           :items="tagsWithActions"
           :loading="loading"
           class="elevation-1"
-          @click:row="onTagRowClick"
         >
-          <template #item.findings="{ item }">
-            {{ getTagFindings(item) }}
-          </template>
-          <template #item.components="{ item }">
-            {{ getTagUniqueComponents(item) }}
-          </template>
-          <template #item.tag="{ item }">
-            <span>{{ (item as RepositoryTag).tag }}</span>
-            <v-chip
-              size="x-small"
-              :color="getTagStatusColor((item as RepositoryTag).processing_status || 'none')"
-              class="ml-2"
-              variant="tonal"
-              style="font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; height: 20px;"
+          <thead>
+            <tr>
+              <th v-for="header in tagHeaders" :key="header.key">
+                {{ header.title }}
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr 
+              v-for="item in tagsWithActions" 
+              :key="item.uuid"
+              class="clickable-row" 
+              @click="navigateToTagImages(item)"
             >
-              {{ (item as RepositoryTag).processing_status?.replace('_', ' ') || 'none' }}
-            </v-chip>
-          </template>
-          <template #item.actions="{ item }">
-            <v-icon
-              size="small"
-              color="primary"
-              :class="{ 'opacity-50': (item as RepositoryTag).processing_status === 'in_process' }"
-              @click.stop="onProcessTag(item as RepositoryTag)"
-            >
-              <v-tooltip activator="parent" location="top">
-                {{ getProcessingStatusTooltip((item as RepositoryTag).processing_status || 'none') }}
-              </v-tooltip>
-              mdi-cog
-            </v-icon>
-          </template>
-        </v-data-table>
+              <td>
+                <span>{{ item.tag }}</span>
+                <v-chip
+                  size="x-small"
+                  :color="getTagStatusColor(item.processing_status || 'none')"
+                  class="ml-2"
+                  variant="tonal"
+                  style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;"
+                >
+                  {{ getProcessingStatusTooltip(item.processing_status || 'none') }}
+                </v-chip>
+              </td>
+              <td>{{ getTagFindings(item) }}</td>
+              <td>{{ getTagUniqueComponents(item) }}</td>
+              <td>{{ item.created_at }}</td>
+              <td>
+                <v-icon
+                  size="small"
+                  color="primary"
+                  :class="{ 'opacity-50': item.processing_status === 'in_process' }"
+                  @click.stop="onProcessTag(item)"
+                >
+                  mdi-cog
+                </v-icon>
+              </td>
+            </tr>
+          </tbody>
+        </v-table>
       </v-col>
     </v-row>
   </v-container>
@@ -212,8 +221,8 @@ const fetchRepository = async () => {
 }
 
 const goBack = () => router.back()
-const onTagRowClick = (tag: any) => {
-  
+const navigateToTagImages = (item: any) => {
+  router.push({ name: 'tag-images', params: { uuid: item.uuid } })
 }
 
 const onProcessTag = async (tag: any) => {
@@ -257,4 +266,11 @@ onMounted(fetchRepository)
 </script>
 
 <style scoped>
+.clickable-row {
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+.clickable-row:hover {
+  background-color: rgba(0, 0, 0, 0.04);
+}
 </style> 
