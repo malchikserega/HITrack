@@ -22,62 +22,80 @@
     <v-row>
       <v-col cols="12">
         <h2 class="text-h6 font-weight-bold mb-2">Tags</h2>
-        <v-table
+        <div class="d-flex align-center mb-2">
+          <v-text-field
+            v-model="tagSearch"
+            append-inner-icon="mdi-magnify"
+            label="Search tags"
+            hide-details
+            density="compact"
+            class="mr-4"
+            style="max-width: 300px;"
+            @keyup.enter="fetchTags"
+            @click:append-inner="fetchTags"
+          />
+          <v-spacer></v-spacer>
+          <v-select
+            :items="[10, 20, 50, 100]"
+            v-model="tagsPerPage"
+            label="Items per page"
+            style="max-width: 150px"
+            hide-details
+            density="compact"
+            variant="outlined"
+            @update:model-value="onTagsPerPageChange"
+          />
+        </div>
+        <v-data-table
           :headers="tagHeaders"
-          :items="tagsWithActions"
-          :loading="loading"
-          class="elevation-1"
+          :items="tags"
+          :loading="tagsLoading"
+          :items-per-page="tagsPerPage"
+          :page="tagsPage"
+          :sort-by.sync="tagsSortBy"
+          hide-default-footer
+          item-class="clickable-row"
+          @click:row="onTagRowClick"
         >
-          <thead>
-            <tr>
-              <th v-for="header in tagHeaders" :key="header.key">
-                {{ header.title }}
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr 
-              v-for="item in tagsWithActions" 
-              :key="item.uuid"
-              class="clickable-row" 
-              @click="navigateToTagImages(item)"
+          <template #item.processing_status="{ item }">
+            <v-chip
+              size="x-small"
+              :color="getTagStatusColor(item.processing_status || 'none')"
+              class="ml-2"
+              variant="tonal"
+              style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;"
             >
-              <td>
-                <span>{{ item.tag }}</span>
-                <v-chip
-                  size="x-small"
-                  :color="getTagStatusColor(item.processing_status || 'none')"
-                  class="ml-2"
-                  variant="tonal"
-                  style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;"
-                >
-                  {{ getProcessingStatusTooltip(item.processing_status || 'none') }}
-                </v-chip>
-              </td>
-              <td>{{ getTagFindings(item) }}</td>
-              <td>{{ getTagUniqueComponents(item) }}</td>
-              <td>{{ item.created_at }}</td>
-              <td>
-                <v-icon
-                  size="small"
-                  color="primary"
-                  :class="{ 'opacity-50': ['in_process', 'pending'].includes(item.processing_status) }"
-                  :disabled="['in_process', 'pending'].includes(item.processing_status)"
-                  @click.stop="onProcessTag(item)"
-                >
-                  mdi-cog
-                </v-icon>
-              </td>
-            </tr>
-          </tbody>
-        </v-table>
+              {{ getProcessingStatusTooltip(item.processing_status || 'none') }}
+            </v-chip>
+          </template>
+          <template #item.actions="{ item }">
+            <v-icon
+              size="small"
+              color="primary"
+              :class="{ 'opacity-50': ['in_process', 'pending'].includes(item.processing_status) }"
+              :disabled="['in_process', 'pending'].includes(item.processing_status)"
+              @click.stop="onProcessTag(item)"
+            >
+              mdi-cog
+            </v-icon>
+          </template>
+        </v-data-table>
+        <div class="d-flex align-center justify-end mt-2 gap-4">
+          <v-pagination
+            v-model="tagsPage"
+            :length="tagsPageCount"
+            @update:model-value="fetchTags"
+            :total-visible="7"
+            density="comfortable"
+          />
+        </div>
       </v-col>
     </v-row>
   </v-container>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import api from '../plugins/axios'
 import { notificationService } from '../plugins/notifications'
@@ -116,20 +134,22 @@ const loading = ref(true)
 
 const tagHeaders = [
   { title: 'Tag', key: 'tag' },
+  { title: 'Status', key: 'processing_status', sortable: false },
   { title: 'Vulnerabilities', key: 'findings' },
   { title: 'Components', key: 'components' },
   { title: 'Created', key: 'created_at' },
   { title: 'Actions', key: 'actions', sortable: false }
 ]
 
-const getTagFindings = (tag: any) => {
-  if (!tag.images) return 0;
-  return tag.images.reduce((sum: number, img: any) => sum + (img.findings || 0), 0);
-}
-const getTagUniqueComponents = (tag: any) => {
-  if (!tag.images) return 0;
-  return tag.images.reduce((sum: number, img: any) => sum + (img.components_count || 0), 0);
-}
+const tags = ref<any[]>([])
+const tagsLoading = ref(false)
+const tagSearch = ref('')
+const tagsPage = ref(1)
+const tagsPerPage = ref(10)
+const tagsTotal = ref(0)
+interface SortItem { key: string; order: 'asc' | 'desc' }
+const tagsSortBy = ref<SortItem[]>([{ key: 'created_at', order: 'desc' }])
+const tagsPageCount = computed(() => Math.ceil(tagsTotal.value / tagsPerPage.value) || 1)
 
 const tagLabels = computed(() => (repository.value?.tags || []).map((tag: any) => tag.tag))
 const findingsData = computed(() => (repository.value?.tags || []).map(getTagFindings))
@@ -204,12 +224,33 @@ const comboChartOptions = {
   }
 }
 
-const tagsWithActions = computed(() =>
-  (repository.value?.tags || []).map((tag: any) => ({
-    ...tag,
-    actions: true
-  }))
-)
+const fetchTags = async () => {
+  tagsLoading.value = true
+  try {
+    const params: any = {
+      page: tagsPage.value,
+      page_size: tagsPerPage.value,
+    }
+    if (tagSearch.value) params.search = tagSearch.value
+    if (tagsSortBy.value && tagsSortBy.value.length > 0) {
+      params.ordering = tagsSortBy.value.map(s => s.order === 'desc' ? `-${s.key}` : s.key).join(',')
+    }
+    const resp = await api.get(`repositories/${route.params.uuid}/tags-list/`, { params })
+    tags.value = resp.data.results
+    tagsTotal.value = resp.data.count
+  } catch (e) {
+    tags.value = []
+    tagsTotal.value = 0
+  } finally {
+    tagsLoading.value = false
+  }
+}
+
+watch([tagSearch, tagsSortBy], () => {
+  tagsPage.value = 1
+  fetchTags()
+})
+watch([tagsPage, tagsPerPage], fetchTags)
 
 const fetchRepository = async () => {
   loading.value = true
@@ -267,7 +308,19 @@ const getTagStatusColor = (status: string) => {
   return map[status] || 'default'
 }
 
-onMounted(fetchRepository)
+const onTagsPerPageChange = () => {
+  tagsPage.value = 1
+  fetchTags()
+}
+
+const onTagRowClick = (event: any, { item }: any) => {
+  router.push({ name: 'tag-images', params: { uuid: item.uuid } })
+}
+
+onMounted(() => {
+  fetchRepository()
+  fetchTags()
+})
 </script>
 
 <style scoped>

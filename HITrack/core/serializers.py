@@ -223,10 +223,12 @@ class TagImageShortSerializer(serializers.ModelSerializer):
 class RepositoryTagSerializer(serializers.ModelSerializer):
     images = TagImageShortSerializer(many=True, read_only=True)
     vulnerabilities_count = serializers.SerializerMethodField()
+    findings = serializers.SerializerMethodField()
+    components = serializers.SerializerMethodField()
 
     class Meta:
         model = RepositoryTag
-        fields = ['uuid', 'tag', 'repository', 'images', 'created_at', 'updated_at', 'vulnerabilities_count', 'processing_status']
+        fields = ['uuid', 'tag', 'repository', 'images', 'created_at', 'updated_at', 'vulnerabilities_count', 'processing_status', 'findings', 'components']
         read_only_fields = ['created_at', 'updated_at', 'uuid']
 
     def get_vulnerabilities_count(self, obj):
@@ -234,6 +236,14 @@ class RepositoryTagSerializer(serializers.ModelSerializer):
         return Vulnerability.objects.filter(
             component_versions__images__repository_tags=obj
         ).distinct().count()
+
+    def get_findings(self, obj):
+        # Сумма всех findings по images
+        return sum(img.component_versions.values('vulnerabilities').count() for img in obj.images.all())
+
+    def get_components(self, obj):
+        # Сумма всех components_count по images
+        return sum(img.component_versions.count() for img in obj.images.all())
 
 
 class RepositorySerializer(serializers.ModelSerializer):
@@ -259,3 +269,19 @@ class RepositoryListSerializer(serializers.ModelSerializer):
 
     def get_tag_count(self, obj):
         return obj.tags.count()
+
+
+class RepositoryTagListSerializer(serializers.ModelSerializer):
+    findings = serializers.SerializerMethodField()
+    components = serializers.SerializerMethodField()
+
+    class Meta:
+        model = RepositoryTag
+        fields = ['uuid', 'tag', 'created_at', 'processing_status', 'findings', 'components']
+        read_only_fields = ['created_at', 'uuid']
+
+    def get_findings(self, obj):
+        return sum(img.component_versions.values('vulnerabilities').count() for img in obj.images.all())
+
+    def get_components(self, obj):
+        return sum(img.component_versions.count() for img in obj.images.all())

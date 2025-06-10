@@ -7,11 +7,13 @@ from .models import Repository, RepositoryTag, Image, Component, ComponentVersio
 from .serializers import (
     RepositorySerializer, RepositoryTagSerializer, ImageSerializer, ImageListSerializer,
     ComponentSerializer, ComponentVersionSerializer, VulnerabilitySerializer, ComponentListSerializer,
-    RepositoryListSerializer
+    RepositoryListSerializer, RepositoryTagListSerializer
 )
 from django.db import models
 from .tasks import scan_repository
 from .pagination import CustomPageNumberPagination
+from django.db.models import Q
+from rest_framework.generics import ListAPIView
 
 # Create your views here.
 
@@ -118,6 +120,30 @@ class RepositoryViewSet(BaseViewSet):
                 {'error': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+    @action(detail=True, methods=['get'], url_path='paginated-tags')
+    def paginated_tags(self, request, uuid=None):
+        """
+        Returns paginated, searchable, and sortable list of tags for a repository.
+        """
+        repository = self.get_object()
+        tags = repository.tags.all()
+
+        # Search
+        search = request.query_params.get('search')
+        if search:
+            tags = tags.filter(Q(tag__icontains=search))
+
+        # Ordering
+        ordering = request.query_params.get('ordering', '-created_at')
+        if ordering:
+            tags = tags.order_by(ordering)
+
+        # Pagination
+        paginator = CustomPageNumberPagination()
+        page = paginator.paginate_queryset(tags, request)
+        serializer = RepositoryTagListSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
 
 class RepositoryTagViewSet(BaseViewSet):
     queryset = RepositoryTag.objects.all()
@@ -234,7 +260,6 @@ class ImageViewSet(BaseViewSet):
         """
         Paginated list of component versions for a given image, with search and ordering support.
         """
-        from django.db.models import Q
         image = self.get_object()
         # Get all component versions linked to this image, with their components
         component_versions = image.component_versions.select_related('component').all()
@@ -449,3 +474,15 @@ def list_acr_registries(request):
         for r in registries
     ]
     return Response({'registries': data})
+
+class RepositoryTagListForRepositoryView(ListAPIView):
+    serializer_class = RepositoryTagListSerializer
+    pagination_class = CustomPageNumberPagination
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    search_fields = ['tag']
+    ordering_fields = ['created_at', 'tag']
+    ordering = ['-created_at']
+
+    def get_queryset(self):
+        repository_uuid = self.kwargs['repository_uuid']
+        return RepositoryTag.objects.filter(repository__uuid=repository_uuid)

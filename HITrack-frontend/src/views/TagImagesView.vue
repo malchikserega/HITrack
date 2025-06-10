@@ -6,7 +6,17 @@
           <v-btn variant="text" @click="goBack" class="mb-2">
             <v-icon left>mdi-arrow-left</v-icon>Back
           </v-btn>
-          <h1 class="text-h4 mb-4 font-weight-black">Images for Tag: {{ tagName }}</h1>
+          <div class="d-flex align-center">
+            <h1 class="text-h4 mb-4 font-weight-black">Images for Tag:</h1>
+            <v-chip
+              class="ml-4 mb-4"
+              color="primary"
+              size="large"
+              variant="elevated"
+            >
+              {{ tagName }}
+            </v-chip>
+          </div>
         </v-col>
       </v-row>
       <v-row class="pa-0 ma-0 mt-0">
@@ -189,9 +199,6 @@ const fetchImages = async () => {
     const response = await api.get<PaginatedResponse<Image>>(`repository-tags/${tagUuid.value}/images/`, { params })
     images.value = response.data.results
     totalItems.value = response.data.count
-    if (response.data.results.length > 0 && response.data.results[0].repository_tags && response.data.results[0].repository_tags.length > 0) {
-      tagName.value = response.data.results[0].repository_tags[0].tag
-    }
   } catch (error) {
     notificationService.error('Failed to fetch images for tag')
   } finally {
@@ -262,7 +269,19 @@ const navigateToImageDetail = (image: Image) => {
   router.push({ name: 'image-detail', params: { uuid: image.uuid } })
 }
 
-onMounted(fetchImages)
+const fetchTagName = async () => {
+  try {
+    const resp = await api.get(`repository-tags/${tagUuid.value}/`)
+    tagName.value = resp.data.tag
+  } catch (error) {
+    tagName.value = ''
+  }
+}
+
+onMounted(() => {
+  fetchTagName()
+  fetchImages()
+})
 </script>
 
 <style scoped>
