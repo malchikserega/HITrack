@@ -608,8 +608,6 @@ def parse_sbom_and_create_components(image_uuid: str):
                             version_obj.images.add(image)
                             links_created += 1
 
-                logger.info(f"Created {links_created} new image-component version links in batch {current_batch}")
-
             batch_time = time.time() - batch_start_time
             logger.info(f"Completed batch {current_batch}/{total_batches} in {batch_time:.2f} seconds")
 
@@ -786,8 +784,6 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
                     cvv.fix = fix_str
                     cvv.save()
                 
-                logger.info(f"{'Created' if cvv_created else 'Updated'} vulnerability link for {vuln_id} in {component_version}")
-        
         # Update image scan status
         image.scan_status = 'success'
         image.save()
