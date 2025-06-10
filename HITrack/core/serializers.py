@@ -222,7 +222,7 @@ class RepositoryTagSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = RepositoryTag
-        fields = ['uuid', 'tag', 'repository', 'images', 'created_at', 'updated_at', 'vulnerabilities_count']
+        fields = ['uuid', 'tag', 'repository', 'images', 'created_at', 'updated_at', 'vulnerabilities_count', 'processing_status']
         read_only_fields = ['created_at', 'updated_at', 'uuid']
 
     def get_vulnerabilities_count(self, obj):

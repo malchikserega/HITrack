@@ -16,6 +16,7 @@ export interface Repository extends BaseEntity {
   url: string
   tag_count: number
   repository_type: 'docker' | 'helm' | 'none'
+  scan_status: 'pending' | 'in_process' | 'success' | 'error' | 'none'
 }
 
 /**
@@ -40,6 +41,7 @@ export interface RepositoryTag extends BaseEntity {
   tag: string
   repository: Repository
   images?: Image[]
+  processing_status?: 'pending' | 'in_process' | 'success' | 'error' | 'none'
 }
 
 /**

@@ -31,6 +31,17 @@ class Repository(models.Model):
     url = models.CharField(max_length=255, blank=True, null=True, unique=True)
     status = models.BooleanField(default=False, blank=True, verbose_name="Status")
     last_scanned = models.DateTimeField(blank=True, null=True)
+    scan_status = models.CharField(
+        max_length=32,
+        choices=[
+            ('pending', 'Pending'),
+            ('in_process', 'In Process'),
+            ('success', 'Success'),
+            ('error', 'Error'),
+            ('none', 'None'),
+        ],
+        default='none'
+    )
     repository_type = models.CharField(
         max_length=10,
         choices=[('helm', 'Helm Chart'), ('docker', 'Docker Image'), ('none', 'Unknown')],
@@ -53,6 +64,17 @@ class RepositoryTag(models.Model):
     tag = models.CharField(max_length=255)
     digest = models.CharField(max_length=255, blank=True, null=True)
     repository = models.ForeignKey(Repository, on_delete=models.CASCADE, related_name='tags', to_field='uuid')
+    processing_status = models.CharField(
+        max_length=32,
+        choices=[
+            ('pending', 'Pending'),
+            ('in_process', 'In Process'),
+            ('success', 'Success'),
+            ('error', 'Error'),
+            ('none', 'None'),
+        ],
+        default='none'
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

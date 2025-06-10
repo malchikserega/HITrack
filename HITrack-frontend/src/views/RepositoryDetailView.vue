@@ -24,7 +24,7 @@
         <h2 class="text-h6 font-weight-bold mb-2">Tags</h2>
         <v-data-table
           :headers="tagHeaders"
-          :items="repository?.tags || []"
+          :items="tagsWithActions"
           :loading="loading"
           class="elevation-1"
           @click:row="onTagRowClick"
@@ -34,6 +34,31 @@
           </template>
           <template #item.components="{ item }">
             {{ getTagUniqueComponents(item) }}
+          </template>
+          <template #item.tag="{ item }">
+            <span>{{ (item as RepositoryTag).tag }}</span>
+            <v-chip
+              size="x-small"
+              :color="getTagStatusColor((item as RepositoryTag).processing_status || 'none')"
+              class="ml-2"
+              variant="tonal"
+              style="font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; height: 20px;"
+            >
+              {{ (item as RepositoryTag).processing_status?.replace('_', ' ') || 'none' }}
+            </v-chip>
+          </template>
+          <template #item.actions="{ item }">
+            <v-icon
+              size="small"
+              color="primary"
+              :class="{ 'opacity-50': (item as RepositoryTag).processing_status === 'in_process' }"
+              @click.stop="onProcessTag(item as RepositoryTag)"
+            >
+              <v-tooltip activator="parent" location="top">
+                {{ getProcessingStatusTooltip((item as RepositoryTag).processing_status || 'none') }}
+              </v-tooltip>
+              mdi-cog
+            </v-icon>
           </template>
         </v-data-table>
       </v-col>
@@ -45,7 +70,9 @@
 import { ref, onMounted, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import api from '../plugins/axios'
+import { notificationService } from '../plugins/notifications'
 import { Bar, Line } from 'vue-chartjs'
+import type { RepositoryTag } from '../types/interfaces'
 import {
   Chart as ChartJS,
   Title,
@@ -82,6 +109,7 @@ const tagHeaders = [
   { title: 'Vulnerabilities', key: 'findings' },
   { title: 'Components', key: 'components' },
   { title: 'Created', key: 'created_at' },
+  { title: 'Actions', key: 'actions', sortable: false }
 ]
 
 const getTagFindings = (tag: any) => {
@@ -166,6 +194,13 @@ const comboChartOptions = {
   }
 }
 
+const tagsWithActions = computed(() =>
+  (repository.value?.tags || []).map((tag: any) => ({
+    ...tag,
+    actions: true
+  }))
+)
+
 const fetchRepository = async () => {
   loading.value = true
   try {
@@ -179,6 +214,43 @@ const fetchRepository = async () => {
 const goBack = () => router.back()
 const onTagRowClick = (tag: any) => {
   
+}
+
+const onProcessTag = async (tag: any) => {
+  if (!tag.uuid) {
+    notificationService.error('Cannot process tag: missing UUID')
+    return
+  }
+  try {
+    await api.post(`repository-tags/${tag.uuid}/process/`)
+    notificationService.success('Tag processing started successfully')
+    await fetchRepository()
+  } catch (error: any) {
+    console.error('Error processing tag:', error)
+    notificationService.error('Failed to process tag')
+  }
+}
+
+const getProcessingStatusTooltip = (status: string) => {
+  const statusMap: { [key: string]: string } = {
+    'pending': 'Processing pending',
+    'in_process': 'Processing in progress',
+    'success': 'Processing completed',
+    'error': 'Processing failed',
+    'none': 'Start processing'
+  }
+  return statusMap[status] || 'Start processing'
+}
+
+const getTagStatusColor = (status: string) => {
+  const map: { [key: string]: string } = {
+    'pending': 'grey',
+    'in_process': 'blue',
+    'success': 'green',
+    'error': 'red',
+    'none': 'default',
+  }
+  return map[status] || 'default'
 }
 
 onMounted(fetchRepository)

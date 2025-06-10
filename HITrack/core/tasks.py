@@ -913,3 +913,175 @@ def scan_image_with_grype(self, image_uuid: str):
         except Exception:
             pass
         self.retry(exc=e, countdown=60 * (2 ** self.request.retries))
+
+@celery_app.task()
+def scan_repository_tags(repository_uuid: str):
+    """
+    Task that scans a single repository for new tags.
+    """
+    from .models import Repository, RepositoryTag, ContainerRegistry
+    from .utils.acr import get_tags, get_bearer_token, get_manifest, is_helm_chart
+    from datetime import datetime
+
+    logger.info(f"Starting repository tags scan for repository {repository_uuid}")
+    
+    try:
+        repository = Repository.objects.get(uuid=repository_uuid)
+        
+        # Update status to in_process
+        repository.scan_status = 'in_process'
+        repository.save()
+
+        # Get registry and token
+        registry = repository.container_registry
+        if not registry:
+            logger.warning(f"No registry found for repository {repository.name}")
+            repository.scan_status = 'error'
+            repository.save()
+            return
+
+        token = get_bearer_token(registry.api_url, registry.login, registry.password)
+
+        # Get all tags from registry 
+        all_tags = list(get_tags(registry.api_url, token, repository.name, limit=10))
+        logger.info(f"Found {len(all_tags)} tags for repository {repository.name}")
+
+        # Process each tag
+        for tag_name in all_tags:
+            try:
+                # Check if tag already exists
+                if not RepositoryTag.objects.filter(repository=repository, tag=tag_name).exists():
+                    # Get manifest for the tag
+                    manifest = get_manifest(registry.api_url, token, repository.name, tag_name)
+                    digest = manifest.get('config', {}).get('digest', '').replace('sha256:', '')
+                    
+                    # Create new tag
+                    RepositoryTag.objects.create(
+                        repository=repository,
+                        tag=tag_name,
+                        digest=digest
+                    )
+                    logger.info(f"Created new tag {tag_name} for repository {repository.name}")
+            except Exception as e:
+                logger.error(f"Error processing tag {tag_name} for repository {repository.name}: {str(e)}")
+                continue
+
+        # Update repository status
+        repository.scan_status = 'success'
+        repository.last_scanned = datetime.now()
+        repository.save()
+        logger.info(f"Successfully completed repository tags scan for {repository.name}")
+
+    except Repository.DoesNotExist:
+        logger.error(f"Repository with UUID {repository_uuid} not found")
+    except Exception as e:
+        logger.error(f"Error scanning repository {repository_uuid}: {str(e)}")
+        try:
+            repository = Repository.objects.get(uuid=repository_uuid)
+            repository.scan_status = 'error'
+            repository.save()
+        except Exception:
+            pass
+
+@celery_app.task()
+def process_single_tag(tag_uuid: str):
+    """
+    Process a single repository tag and create an image if it doesn't exist.
+    """
+    from .models import RepositoryTag, Image
+    from .utils.acr import get_manifest, is_helm_chart, get_chart_digest, get_helm_images, get_bearer_token
+
+    logger.info(f"Starting processing of tag {tag_uuid}")
+
+    try:
+        tag = RepositoryTag.objects.select_related('repository', 'repository__container_registry').get(uuid=tag_uuid)
+        # Set status to in_process
+        tag.processing_status = 'in_process'
+        tag.save()
+        repository = tag.repository
+        logger.info(f"Processing tag {tag.tag} from repository {repository.name}")
+
+        # Get registry token if available
+        token = None
+        if repository.container_registry:
+            token = get_bearer_token(
+                repository.container_registry.api_url,
+                repository.container_registry.login,
+                repository.container_registry.password
+            )
+
+        # For Docker images, just create the record
+        if repository.repository_type == 'docker':
+            image_ref = f"{repository.url}:{tag.tag}"
+            image, created = Image.objects.get_or_create(
+                name=image_ref,
+                defaults={
+                    'artifact_reference': image_ref
+                }
+            )
+            image.repository_tags.add(tag)
+            logger.info(f"{'Created' if created else 'Linked'} Docker image {image_ref}")
+        else:
+            # For Helm charts, get manifest to extract images and digest
+            manifest, digest = get_manifest(
+                repository.container_registry.api_url if repository.container_registry else None,
+                token,
+                repository.name,
+                tag.tag
+            )
+
+            if not manifest:
+                logger.warning(f"Could not get manifest for {repository.name}:{tag.tag}")
+                tag.processing_status = 'error'
+                tag.save()
+                return
+
+            if is_helm_chart(manifest):
+                chart_digest = get_chart_digest(manifest)
+                if chart_digest:
+                    for image_ref in get_helm_images(
+                        repository.container_registry.api_url if repository.container_registry else None,
+                        token,
+                        repository.name,
+                        chart_digest
+                    ):
+                        # Create or get image with digest from manifest
+                        image, created = Image.objects.get_or_create(
+                            name=image_ref,
+                            defaults={
+                                'digest': digest,  # Save digest from manifest
+                                'artifact_reference': f"{repository.url}:{tag.tag}"
+                            }
+                        )
+                        image.repository_tags.add(tag)
+                        logger.info(f"{'Created' if created else 'Linked'} Helm image {image_ref} with digest {digest}")
+
+        # Set status to success
+        tag.processing_status = 'success'
+        tag.save()
+
+        return {
+            "status": "success",
+            "tag_uuid": str(tag_uuid),
+            "repository": repository.name,
+            "tag": tag.tag
+        }
+
+    except RepositoryTag.DoesNotExist:
+        logger.error(f"Tag with UUID {tag_uuid} not found")
+        return {
+            "status": "error",
+            "error": f"Tag with UUID {tag_uuid} not found"
+        }
+    except Exception as e:
+        logger.error(f"Error processing tag {tag_uuid}: {str(e)}")
+        try:
+            tag = RepositoryTag.objects.get(uuid=tag_uuid)
+            tag.processing_status = 'error'
+            tag.save()
+        except Exception:
+            pass
+        return {
+            "status": "error",
+            "error": str(e)
+        }

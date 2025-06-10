@@ -94,6 +94,30 @@ class RepositoryViewSet(BaseViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
+    @action(detail=True, methods=['post'])
+    def scan_tags(self, request, uuid=None):
+        repository = self.get_object()
+        if repository.scan_status == 'in_process':
+            return Response({'error': 'Scan already in process'}, status=409)
+        
+        repository.scan_status = 'pending'
+        repository.save()
+        
+        try:
+            from .tasks import scan_repository_tags
+            scan_repository_tags.delay(str(repository.uuid))
+            return Response({
+                'status': 'success',
+                'message': 'Repository tags scan scheduled successfully'
+            })
+        except Exception as e:
+            repository.scan_status = 'error'
+            repository.save()
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
 class RepositoryTagViewSet(BaseViewSet):
     queryset = RepositoryTag.objects.all()
     serializer_class = RepositoryTagSerializer
@@ -107,6 +131,30 @@ class RepositoryTagViewSet(BaseViewSet):
         images = tag.images.all()
         serializer = ImageSerializer(images, many=True)
         return Response(serializer.data)
+
+    @action(detail=True, methods=['post'])
+    def process(self, request, uuid=None):
+        tag = self.get_object()
+        if tag.processing_status == 'in_process':
+            return Response({'error': 'Tag is already being processed'}, status=409)
+        
+        tag.processing_status = 'pending'
+        tag.save()
+        
+        try:
+            from .tasks import process_single_tag
+            process_single_tag.delay(str(tag.uuid))
+            return Response({
+                'status': 'success',
+                'message': 'Tag processing scheduled successfully'
+            })
+        except Exception as e:
+            tag.processing_status = 'error'
+            tag.save()
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 class ImageViewSet(BaseViewSet):
     queryset = Image.objects.all()

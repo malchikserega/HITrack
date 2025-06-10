@@ -51,8 +51,20 @@
                 <td>{{ $formatDate(item.created_at) }}</td>
                 <td>{{ $formatDate(item.updated_at) }}</td>
                 <td>
-                  <v-icon small class="mr-2" color="secondary" @click.stop="onEdit(item)">mdi-pencil</v-icon>
-                  <v-icon small color="red" @click.stop="onDelete(item)">mdi-delete</v-icon>
+                  <v-icon
+                    size="small"
+                    class="mr-1"
+                    color="primary"
+                    :class="{ 'opacity-50': item.scan_status === 'in_process' }"
+                    @click.stop="onScan(item)"
+                  >
+                    <v-tooltip activator="parent" location="top">
+                      {{ getScanStatusTooltip(item.scan_status) }}
+                    </v-tooltip>
+                    mdi-refresh
+                  </v-icon>
+                  <v-icon size="small" class="mr-1" color="secondary" @click.stop="onEdit(item)">mdi-pencil</v-icon>
+                  <v-icon size="small" color="red" @click.stop="onDelete(item)">mdi-delete</v-icon>
                 </td>
               </tr>
             </template>
@@ -136,6 +148,7 @@ const defaultItem = {
   url: '',
   tag_count: 0,
   repository_type: 'docker' as const,
+  scan_status: 'none' as const,
   created_at: '',
   updated_at: ''
 }
@@ -188,6 +201,7 @@ const openDialog = (title: string, item?: Repository) => {
       url: item.url,
       tag_count: item.tag_count,
       repository_type: item.repository_type,
+      scan_status: item.scan_status,
       created_at: item.created_at,
       updated_at: item.updated_at
     }
@@ -279,6 +293,36 @@ const getRepositoryTypeColor = (type: string | undefined) => {
 const onRowClick = (repo: any) => {
   console.log('Clicked repo:', repo);
   router.push(`/repositories/${repo.uuid}`)
+}
+
+const getScanStatusTooltip = (status: string) => {
+  const statusMap: { [key: string]: string } = {
+    'pending': 'Scan pending',
+    'in_process': 'Scan in progress',
+    'success': 'Scan completed',
+    'error': 'Scan failed',
+    'none': 'Start scan'
+  }
+  return statusMap[status] || 'Start scan'
+}
+
+const onScan = async (repo: Repository) => {
+  if (!repo.uuid) {
+    notificationService.error('Cannot scan repository: missing UUID')
+    return
+  }
+  try {
+    await api.post(`repositories/${repo.uuid}/scan_tags/`)
+    notificationService.success('Repository scan started successfully')
+    await fetchRepositories()
+  } catch (error: any) {
+    if (error.response?.status === 409) {
+      notificationService.warning('Scan already in progress')
+    } else {
+      console.error('Error starting repository scan:', error)
+      notificationService.error('Failed to start repository scan')
+    }
+  }
 }
 
 onMounted(() => {
