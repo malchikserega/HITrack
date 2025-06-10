@@ -161,6 +161,7 @@ class ImageViewSet(BaseViewSet):
     filterset_fields = ['repository_tags', 'component_versions']
     search_fields = ['name', 'digest']
     ordering_fields = ['name', 'created_at', 'updated_at']
+    pagination_class = CustomPageNumberPagination
 
     def get_serializer_class(self):
         if self.action == 'list':

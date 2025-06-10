@@ -46,12 +46,10 @@
               :loading="loading"
               class="elevation-1"
               item-class="clickable-row"
-              :page="page"
               :items-per-page="itemsPerPage"
-              :server-items-length="totalItems"
-              :options.sync="tableOptions"
+              :page="page"
               :sort-by.sync="sortBy"
-              @update:options="onOptionsUpdate"
+              hide-default-footer
             >
               <template #item="{ item }">
                 <tr class="clickable-row">
@@ -139,6 +137,26 @@
         </v-col>
       </v-row>
 
+      <div class="d-flex align-center justify-end mt-2 gap-4">
+        <v-select
+          :items="[10, 20, 50, 100]"
+          v-model="itemsPerPage"
+          label="Items per page"
+          style="max-width: 150px"
+          hide-details
+          density="compact"
+          variant="outlined"
+          @update:model-value="onItemsPerPageChange"
+        />
+        <v-pagination
+          v-model="page"
+          :length="pageCount"
+          @update:model-value="fetchImages"
+          :total-visible="7"
+          density="comfortable"
+        />
+      </div>
+
       <v-dialog v-model="dialog" max-width="500px">
         <v-card :title="formTitle">
 
@@ -208,7 +226,6 @@ const page = ref(1)
 const itemsPerPage = ref(10)
 const totalItems = ref(0)
 const sortBy = ref<DataTableSortItem[]>([{ key: 'updated_at', order: 'desc' }])
-const tableOptions = ref({})
 const editedItem = ref<Image>({
   id: undefined,
   uuid: '',
@@ -273,8 +290,8 @@ const fetchImages = async () => {
   loading.value = true
   try {
     const params: any = {
-      page: page.value,
-      page_size: itemsPerPage.value,
+      page: Number(page.value),
+      page_size: Number(itemsPerPage.value),
     }
     if (search.value) params.search = search.value
     if (sortBy.value && sortBy.value.length > 0) {
@@ -282,23 +299,26 @@ const fetchImages = async () => {
     }
     const response = await api.get<PaginatedResponse<Image>>('images/', { params })
     images.value = response.data.results
-    totalItems.value = response.data.count
+    totalItems.value = Number(response.data.count)
   } catch (error) {
-    console.error('Error fetching images:', error)
     notificationService.error('Failed to fetch images')
   } finally {
     loading.value = false
   }
 }
 
-const onOptionsUpdate = (options: any) => {
-  page.value = options.page
-  itemsPerPage.value = options.itemsPerPage
-  sortBy.value = options.sortBy
+const pageCount = computed(() => Math.ceil(totalItems.value / itemsPerPage.value) || 1)
+
+const onItemsPerPageChange = (val: number) => {
+  itemsPerPage.value = val
+  page.value = 1
   fetchImages()
 }
 
-watch([page, itemsPerPage, search, sortBy], fetchImages)
+watch([search, sortBy], () => {
+  page.value = 1
+  fetchImages()
+})
 
 const openDialog = (title: string, item?: Image) => {
   formTitle.value = title
@@ -352,7 +372,6 @@ const save = async () => {
     await fetchImages()
     closeDialog()
   } catch (error) {
-    console.error('Error saving image:', error)
     notificationService.error('Failed to save image')
   } finally {
     saving.value = false
@@ -380,7 +399,6 @@ const deleteItem = async () => {
     await fetchImages()
     notificationService.success('Image deleted successfully')
   } catch (error) {
-    console.error('Error deleting image:', error)
     notificationService.error('Failed to delete image')
   } finally {
     deleting.value = false
@@ -397,7 +415,6 @@ const onEdit = (img: Image) => {
   openDialog('Edit Image', img);
 };
 const onDelete = (img: Image) => {
-  console.log('Delete click:', img);
   confirmDelete(img);
 };
 
@@ -411,7 +428,6 @@ const onRescan = async (img: Image) => {
     await api.post(`images/${img.uuid}/rescan/`)
     notificationService.success('Image rescan scheduled successfully')
   } catch (error) {
-    console.error('Error rescanning image:', error)
     notificationService.error('Failed to rescan image')
   }
 };
