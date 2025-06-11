@@ -25,8 +25,30 @@
               {{ $formatDate(item.updated_at) }}
             </template>
             <template v-slot:item.actions="{ item }">
-              <v-icon small class="mr-2" color="secondary" @click="onEdit(item)">mdi-pencil</v-icon>
-              <v-icon small color="red" @click="onDelete(item)">mdi-delete</v-icon>
+              <v-tooltip text="Edit vulnerability">
+                <template v-slot:activator="{ props }">
+                  <v-btn
+                    v-bind="props"
+                    icon="mdi-pencil"
+                    variant="tonal"
+                    size="x-small"
+                    color="secondary"
+                    @click="onEdit(item)"
+                  />
+                </template>
+              </v-tooltip>
+              <v-tooltip text="Delete vulnerability">
+                <template v-slot:activator="{ props }">
+                  <v-btn
+                    v-bind="props"
+                    icon="mdi-delete"
+                    variant="tonal"
+                    size="x-small"
+                    color="red"
+                    @click="onDelete(item)"
+                  />
+                </template>
+              </v-tooltip>
             </template>
           </v-data-table>
         </v-col>

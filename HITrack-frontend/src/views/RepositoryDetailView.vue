@@ -69,26 +69,35 @@
             </v-chip>
           </template>
           <template #item.actions="{ item }">
-            <v-icon
-              size="small"
-              color="primary"
-              :class="{ 'opacity-50': ['in_process', 'pending'].includes(item.processing_status) }"
-              :disabled="['in_process', 'pending'].includes(item.processing_status)"
-              @click.stop="onProcessTag(item)"
-            >
-              mdi-code-tags
-            </v-icon>
-            <v-icon
-              size="small"
-              color="info"
-              class="ml-2"
-              :class="{ 'opacity-50': ['in_process', 'pending'].includes(item.processing_status) }"
-              :disabled="['in_process', 'pending'].includes(item.processing_status)"
-              @click.stop="onRescanTagImages(item)"
-              title="Rescan all images for this tag"
-            >
-              mdi-cog-refresh
-            </v-icon>
+            <v-tooltip text="Process tag">
+              <template v-slot:activator="{ props }">
+                <v-btn
+                  v-bind="props"
+                  icon="mdi-code-tags"
+                  variant="tonal"
+                  size="x-small"
+                  color="primary"
+                  :class="{ 'opacity-50': ['in_process', 'pending'].includes(item.processing_status) }"
+                  :disabled="['in_process', 'pending'].includes(item.processing_status)"
+                  @click.stop="onProcessTag(item)"
+                />
+              </template>
+            </v-tooltip>
+            <v-tooltip text="Rescan all images for this tag">
+              <template v-slot:activator="{ props }">
+                <v-btn
+                  v-bind="props"
+                  icon="mdi-cog-refresh"
+                  variant="tonal"
+                  size="x-small"
+                  color="info"
+                  class="ml-2"
+                  :class="{ 'opacity-50': ['in_process', 'pending'].includes(item.processing_status) }"
+                  :disabled="['in_process', 'pending'].includes(item.processing_status)"
+                  @click.stop="onRescanTagImages(item)"
+                />
+              </template>
+            </v-tooltip>
           </template>
         </v-data-table>
         <div class="d-flex align-center justify-end mt-2 gap-4">

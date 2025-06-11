@@ -356,7 +356,7 @@ const toggleRepository = (repo: Repository) => {
 
 onMounted(async () => {
   try {
-    const resp = await api.get('acr_registries/')
+    const resp = await api.get('acr/list/')
     acrRegistries.value = resp.data.registries
     if (acrRegistries.value.length === 1) {
       selectedRegistry.value = acrRegistries.value[0].uuid

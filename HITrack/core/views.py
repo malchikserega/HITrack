@@ -1,19 +1,21 @@
 from rest_framework import viewsets, filters, status
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.decorators import action, api_view
+from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.generics import ListAPIView, GenericAPIView
 from django_filters.rest_framework import DjangoFilterBackend
 from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ContainerRegistry
 from .serializers import (
     RepositorySerializer, RepositoryTagSerializer, ImageSerializer, ImageListSerializer,
     ComponentSerializer, ComponentVersionSerializer, VulnerabilitySerializer, ComponentListSerializer,
-    RepositoryListSerializer, RepositoryTagListSerializer
+    RepositoryListSerializer, RepositoryTagListSerializer, ComponentVersionListSerializer,
+    HasACRRegistryResponseSerializer, ListACRRegistriesResponseSerializer,
+    StatsResponseSerializer, JobAddRepositoriesRequestSerializer,
+    JobAddRepositoriesResponseSerializer
 )
 from django.db import models
-from .tasks import scan_repository
 from .pagination import CustomPageNumberPagination
-from django.db.models import Q
-from rest_framework.generics import ListAPIView
+from django.db.models import Q, Count
 
 # Create your views here.
 
@@ -362,7 +364,16 @@ class ComponentVersionViewSet(BaseViewSet):
     serializer_class = ComponentVersionSerializer
     filterset_fields = ['component', 'images', 'vulnerabilities']
     search_fields = ['version', 'component__name']
-    ordering_fields = ['version', 'created_at', 'updated_at']
+    ordering_fields = ['version', 'created_at', 'updated_at', 'vulnerabilities']
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        return qs.annotate(vulnerabilities_count=Count('vulnerabilities'))
+
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return ComponentVersionListSerializer
+        return ComponentVersionSerializer
 
     @action(detail=True, methods=['get'])
     def vulnerabilities(self, request, pk=None):
@@ -414,8 +425,33 @@ class VulnerabilityViewSet(BaseViewSet):
         ).order_by('severity')
         return Response(stats)
 
+class HasACRRegistryView(GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = HasACRRegistryResponseSerializer
+
+    def get(self, request):
+        exists = ContainerRegistry.objects.filter(provider='acr').exists()
+        return Response({'has_acr': exists})
+
+class ListACRRegistriesView(GenericAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = ListACRRegistriesResponseSerializer
+
+    def get(self, request):
+        registries = ContainerRegistry.objects.filter(provider='acr')
+        data = [
+            {
+                'uuid': str(r.uuid),
+                'name': r.name,
+                'api_url': r.api_url
+            }
+            for r in registries
+        ]
+        return Response({'registries': data})
+
 class StatsViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
+    serializer_class = StatsResponseSerializer
 
     def list(self, request):
         data = {
@@ -428,6 +464,7 @@ class StatsViewSet(viewsets.ViewSet):
 
 class JobViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
+    serializer_class = JobAddRepositoriesResponseSerializer
 
     @action(detail=False, methods=['post'], url_path='add-repositories')
     def add_repositories(self, request):
@@ -436,15 +473,13 @@ class JobViewSet(viewsets.ViewSet):
         Repository is uniquely identified by the combination of name and url.
         The registry_uuid should be provided to link repositories to the correct registry.
         """
-        from .models import ContainerRegistry
+        serializer = JobAddRepositoriesRequestSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
         try:
-            repositories = request.data.get('repositories', [])
-            registry_uuid = request.data.get('registry_uuid')
-            if not repositories:
-                return Response(
-                    {'error': 'No repositories provided'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+            repositories = serializer.validated_data['repositories']
+            registry_uuid = serializer.validated_data.get('registry_uuid')
 
             # Get the registry by uuid or fallback to first acr
             registry = None
@@ -489,24 +524,6 @@ class JobViewSet(viewsets.ViewSet):
                 {'error': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
-
-@api_view(['GET'])
-def has_acr_registry(request):
-    exists = ContainerRegistry.objects.filter(provider='acr').exists()
-    return Response({'has_acr': exists})
-
-@api_view(['GET'])
-def list_acr_registries(request):
-    registries = ContainerRegistry.objects.filter(provider='acr')
-    data = [
-        {
-            'uuid': str(r.uuid),
-            'name': r.name,
-            'api_url': r.api_url
-        }
-        for r in registries
-    ]
-    return Response({'registries': data})
 
 class RepositoryTagListForRepositoryView(ListAPIView):
     serializer_class = RepositoryTagListSerializer

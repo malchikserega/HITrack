@@ -110,14 +110,19 @@
                     <span class="nowrap">{{ $formatDate(item.updated_at) }}</span>
                   </td>
                   <td>
-                    <v-icon
-                      size="small"
-                      color="primary"
-                      :class="{ 'opacity-50': item.scan_status === 'in_process' }"
-                      @click.stop="onRescan(item)"
-                    >
-                      mdi-refresh
-                    </v-icon>
+                    <v-tooltip text="Rescan image">
+                      <template v-slot:activator="{ props }">
+                        <v-btn
+                          v-bind="props"
+                          icon="mdi-refresh"
+                          variant="tonal"
+                          size="x-small"
+                          color="primary"
+                          :class="{ 'opacity-50': item.scan_status === 'in_process' }"
+                          @click.stop="onRescan(item)"
+                        />
+                      </template>
+                    </v-tooltip>
                   </td>
                 </tr>
               </template>

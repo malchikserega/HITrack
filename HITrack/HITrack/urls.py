@@ -22,7 +22,7 @@ from rest_framework_simplejwt.views import (
     TokenRefreshView,
     TokenVerifyView,
 )
-from core.views import has_acr_registry, list_acr_registries
+from core.views import HasACRRegistryView, ListACRRegistriesView
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -38,6 +38,7 @@ urlpatterns = [
     path('api/docs/', SpectacularSwaggerView.as_view(url_name='schema'), name='swagger-ui'),
     path('api/redoc/', SpectacularRedocView.as_view(url_name='schema'), name='redoc'),
 
-    path('api/has_acr_registry/', has_acr_registry, name='has_acr_registry'),
-    path('api/acr_registries/', list_acr_registries, name='list_acr_registries'),
+    # ACR registry endpoints
+    path('api/acr/check/', HasACRRegistryView.as_view(), name='has_acr_registry'),
+    path('api/acr/list/', ListACRRegistriesView.as_view(), name='list_acr_registries'),
 ]

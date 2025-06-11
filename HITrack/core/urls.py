@@ -3,7 +3,7 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     RepositoryViewSet, RepositoryTagViewSet, ImageViewSet,
     ComponentViewSet, ComponentVersionViewSet, VulnerabilityViewSet,
-    StatsViewSet, JobViewSet, has_acr_registry, list_acr_registries,
+    StatsViewSet, JobViewSet, HasACRRegistryView, ListACRRegistriesView,
     RepositoryTagListForRepositoryView
 )
 
@@ -19,7 +19,7 @@ router.register(r'jobs', JobViewSet, basename='job')
 
 urlpatterns = [
     path('', include(router.urls)),
-    path('has-acr-registry/', has_acr_registry, name='has-acr-registry'),
-    path('list-acr-registries/', list_acr_registries, name='list-acr-registries'),
+    path('has-acr-registry/', HasACRRegistryView.as_view(), name='has-acr-registry'),
+    path('list-acr-registries/', ListACRRegistriesView.as_view(), name='list-acr-registries'),
     path('repositories/<uuid:repository_uuid>/tags-list/', RepositoryTagListForRepositoryView.as_view(), name='repository-tags-list'),
 ] 

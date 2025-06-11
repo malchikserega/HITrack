@@ -141,15 +141,15 @@
                       {{ item.component.type }}
                     </v-chip>
                   </template>
-                  <template v-slot:item.vulnerabilities="{ item }">
-                    <div style="display: flex; justify-content: center; align-items: center; height: 100%;">
-                      <v-badge
-                        :content="item.vulnerabilities?.length || 0"
-                        color="error"
-                        bordered
-                        style="min-width: 32px;"
-                      />
-                    </div>
+                  <template v-slot:item.vulnerabilities_count="{ item }">
+                    <v-chip
+                      size="small"
+                      :color="item.vulnerabilities_count > 0 ? 'error' : 'success'"
+                      variant="tonal"
+                      class="font-weight-medium"
+                    >
+                      {{ item.vulnerabilities_count }}
+                    </v-chip>
                   </template>
                   <template v-slot:item.created_at="{ item }">
                     {{ $formatDate(item.created_at) }}
@@ -389,7 +389,7 @@ const componentHeaders: any[] = [
   { title: 'Name', key: 'name', sortable: true },
   { title: 'Version', key: 'version', sortable: true },
   { title: 'Type', key: 'type', sortable: true },
-  { title: 'Vulnerabilities', key: 'vulnerabilities', sortable: false },
+  { title: 'Vulnerabilities', key: 'vulnerabilities_count', sortable: false },
   { title: 'Created', key: 'created_at', sortable: true },
   { title: 'Updated', key: 'updated_at', sortable: true },
 ]

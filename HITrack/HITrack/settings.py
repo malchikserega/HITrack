@@ -199,6 +199,15 @@ SPECTACULAR_SETTINGS = {
         'persistAuthorization': True,
         'displayOperationId': True,
     },
+    'ENUM_NAME_OVERRIDES': {
+        'ProcessingStatusEnum': [
+            ('pending', 'Pending'),
+            ('in_process', 'In Process'),
+            ('success', 'Success'),
+            ('error', 'Error'),
+            ('none', 'None'),
+        ],
+    },
 }
 
 

@@ -132,22 +132,21 @@ def get_repositories(api_url: str, token: str, page_size: int = 50, last_repo: s
 
 def get_tags(api_url: str, token: str, repo: str, limit: int = None) -> Generator[str, None, None]:
     """
-    Get all tags for a repository.
+    Get tags for a repository, optionally limited to the most recent ones.
     
     Args:
         api_url (str): ACR API URL
         token (str): Bearer token for authentication
         repo (str): Repository name.
-        limit (int): Optional limit on the number of tags to return.
+        limit (int): Optional limit on the number of tags to return. If None, returns all tags.
         
     Yields:
         str: Tag name.
     """
     count = 0
-    page_size = PAGE_SIZE
-    if limit is not None and limit < PAGE_SIZE:
-        page_size = limit
-    for page in get_paged_data(f"{api_url}/v2/{repo}/tags/list?n={page_size}", token):
+    page_size = limit if limit is not None else PAGE_SIZE
+    # Use orderby=timedesc to get newest tags first
+    for page in get_paged_data(f"{api_url}/v2/{repo}/tags/list?n={page_size}&orderby=timedesc", token):
         if not page or page.get("tags") is None:
             break
         for tag in page.get("tags", []):

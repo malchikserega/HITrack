@@ -51,20 +51,43 @@
                 <td>{{ $formatDate(item.created_at) }}</td>
                 <td>{{ $formatDate(item.updated_at) }}</td>
                 <td>
-                  <v-icon
-                    size="small"
-                    class="mr-1"
-                    color="primary"
-                    :class="{ 'opacity-50': item.scan_status === 'in_process' }"
-                    @click.stop="onScan(item)"
-                  >
-                    <v-tooltip activator="parent" location="top">
-                      {{ getScanStatusTooltip(item.scan_status) }}
-                    </v-tooltip>
-                    mdi-refresh
-                  </v-icon>
-                  <v-icon size="small" class="mr-1" color="secondary" @click.stop="onEdit(item)">mdi-pencil</v-icon>
-                  <v-icon size="small" color="red" @click.stop="onDelete(item)">mdi-delete</v-icon>
+                  <v-tooltip text="Scan repository">
+                    <template v-slot:activator="{ props }">
+                      <v-btn
+                        v-bind="props"
+                        icon="mdi-refresh"
+                        variant="tonal"
+                        size="x-small"
+                        color="primary"
+                        :class="{ 'opacity-50': item.scan_status === 'in_process' }"
+                        @click.stop="onScan(item)"
+                      />
+                    </template>
+                  </v-tooltip>
+                  <v-tooltip text="Edit repository">
+                    <template v-slot:activator="{ props }">
+                      <v-btn
+                        v-bind="props"
+                        icon="mdi-pencil"
+                        variant="tonal"
+                        size="x-small"
+                        color="secondary"
+                        @click.stop="onEdit(item)"
+                      />
+                    </template>
+                  </v-tooltip>
+                  <v-tooltip text="Delete repository">
+                    <template v-slot:activator="{ props }">
+                      <v-btn
+                        v-bind="props"
+                        icon="mdi-delete"
+                        variant="tonal"
+                        size="x-small"
+                        color="red"
+                        @click.stop="onDelete(item)"
+                      />
+                    </template>
+                  </v-tooltip>
                 </td>
               </tr>
             </template>

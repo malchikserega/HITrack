@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from drf_spectacular.utils import extend_schema_field
 from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ComponentVersionVulnerability
 
 
@@ -33,6 +34,7 @@ class ComponentVersionSerializer(serializers.ModelSerializer):
         fields = ['uuid', 'version', 'component', 'images', 'vulnerabilities', 'created_at', 'updated_at']
         read_only_fields = ['created_at', 'updated_at', 'uuid']
 
+    @extend_schema_field(serializers.ListField(child=VulnerabilitySerializer()))
     def get_vulnerabilities(self, obj):
         # Get vulnerabilities with their fix information through the through model
         vulns = []
@@ -94,14 +96,17 @@ class ImageSerializer(serializers.ModelSerializer):
                 vulnerabilities.append(vuln_data)
         return vulnerabilities
 
+    @extend_schema_field(serializers.IntegerField())
     def get_findings(self, obj):
         # Get all vulnerabilities through component versions
         return obj.component_versions.values('vulnerabilities').count()
 
+    @extend_schema_field(serializers.IntegerField())
     def get_unique_findings(self, obj):
         # Count unique vulnerabilities across all components
         return obj.component_versions.values('vulnerabilities').distinct().count()
 
+    @extend_schema_field(serializers.DictField(child=serializers.IntegerField()))
     def get_severity_counts(self, obj):
         from collections import Counter
         # Get all vulnerabilities related to this image through component_versions
@@ -113,10 +118,12 @@ class ImageSerializer(serializers.ModelSerializer):
         all_sevs = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN']
         return {sev: counter.get(sev, 0) for sev in all_sevs}
 
+    @extend_schema_field(serializers.IntegerField())
     def get_components_count(self, obj):
         # Return the number of unique component versions linked to this image
         return obj.component_versions.count()
 
+    @extend_schema_field(serializers.IntegerField())
     def get_fully_fixable_components_count(self, obj):
         count = 0
         for cv in obj.component_versions.all():
@@ -125,17 +132,20 @@ class ImageSerializer(serializers.ModelSerializer):
                 count += 1
         return count
 
+    @extend_schema_field(serializers.IntegerField())
     def get_fixable_findings(self, obj):
         # All fixable vulnerabilities (including duplicates by components)
         fixable_vulns = [v for v in self.get_vulnerabilities(obj) if v['fixable']]
         return len(fixable_vulns)
 
+    @extend_schema_field(serializers.IntegerField())
     def get_fixable_unique_findings(self, obj):
         # Unique fixable vulnerabilities
         fixable_vulns = [v for v in self.get_vulnerabilities(obj) if v['fixable']]
         unique_fixable_vulns = list({v['vulnerability_id']: v for v in fixable_vulns}.values())
         return len(unique_fixable_vulns)
 
+    @extend_schema_field(serializers.DictField(child=serializers.IntegerField()))
     def get_fixable_severity_counts(self, obj):
         from collections import Counter
         from core.models import ComponentVersionVulnerability
@@ -148,6 +158,7 @@ class ImageSerializer(serializers.ModelSerializer):
         all_sevs = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN']
         return {sev: counter.get(sev, 0) for sev in all_sevs}
 
+    @extend_schema_field(serializers.DictField(child=serializers.IntegerField()))
     def get_unique_severity_counts(self, obj):
         from collections import Counter
         qs = obj.component_versions.values_list('vulnerabilities__uuid', 'vulnerabilities__severity')
@@ -161,6 +172,7 @@ class ImageSerializer(serializers.ModelSerializer):
         all_sevs = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN']
         return {sev: counter.get(sev, 0) for sev in all_sevs}
 
+    @extend_schema_field(serializers.DictField(child=serializers.IntegerField()))
     def get_fixable_unique_severity_counts(self, obj):
         from collections import Counter
         from core.models import ComponentVersionVulnerability
@@ -190,17 +202,21 @@ class ImageListSerializer(serializers.ModelSerializer):
         fields = ['uuid', 'name', 'digest', 'scan_status', 'has_sbom', 'findings', 'unique_findings', 'components_count', 'updated_at']
         read_only_fields = ['uuid', 'updated_at']
 
+    @extend_schema_field(serializers.BooleanField())
     def get_has_sbom(self, obj):
         return bool(obj.sbom_data)
 
+    @extend_schema_field(serializers.IntegerField())
     def get_findings(self, obj):
         # Count all vulnerabilities, including duplicates in different components
         return obj.component_versions.values('vulnerabilities').count()
 
+    @extend_schema_field(serializers.IntegerField())
     def get_unique_findings(self, obj):
         # Count unique vulnerabilities across all components
         return obj.component_versions.values('vulnerabilities').distinct().count()
 
+    @extend_schema_field(serializers.IntegerField())
     def get_components_count(self, obj):
         return obj.component_versions.count()
 
@@ -213,9 +229,11 @@ class TagImageShortSerializer(serializers.ModelSerializer):
         model = Image
         fields = ['uuid', 'findings', 'components_count', 'name']
 
+    @extend_schema_field(serializers.IntegerField())
     def get_findings(self, obj):
         return obj.component_versions.values('vulnerabilities').count()
 
+    @extend_schema_field(serializers.IntegerField())
     def get_components_count(self, obj):
         return obj.component_versions.count()
 
@@ -231,16 +249,19 @@ class RepositoryTagSerializer(serializers.ModelSerializer):
         fields = ['uuid', 'tag', 'repository', 'images', 'created_at', 'updated_at', 'vulnerabilities_count', 'processing_status', 'findings', 'components']
         read_only_fields = ['created_at', 'updated_at', 'uuid']
 
+    @extend_schema_field(serializers.IntegerField())
     def get_vulnerabilities_count(self, obj):
         from core.models import Vulnerability
         return Vulnerability.objects.filter(
             component_versions__images__repository_tags=obj
         ).distinct().count()
 
+    @extend_schema_field(serializers.IntegerField())
     def get_findings(self, obj):
         # Сумма всех findings по images
         return sum(img.component_versions.values('vulnerabilities').count() for img in obj.images.all())
 
+    @extend_schema_field(serializers.IntegerField())
     def get_components(self, obj):
         # Сумма всех components_count по images
         return sum(img.component_versions.count() for img in obj.images.all())
@@ -255,6 +276,7 @@ class RepositorySerializer(serializers.ModelSerializer):
         fields = ['uuid', 'name', 'url', 'repository_type', 'tags', 'tag_count', 'created_at', 'updated_at']
         read_only_fields = ['created_at', 'updated_at', 'uuid']
 
+    @extend_schema_field(serializers.IntegerField())
     def get_tag_count(self, obj):
         return obj.tags.count()
 
@@ -267,6 +289,7 @@ class RepositoryListSerializer(serializers.ModelSerializer):
         fields = ['uuid', 'name', 'url', 'repository_type', 'tag_count', 'created_at', 'updated_at']
         read_only_fields = ['uuid', 'created_at', 'updated_at']
 
+    @extend_schema_field(serializers.IntegerField())
     def get_tag_count(self, obj):
         return obj.tags.count()
 
@@ -280,8 +303,61 @@ class RepositoryTagListSerializer(serializers.ModelSerializer):
         fields = ['uuid', 'tag', 'created_at', 'processing_status', 'findings', 'components']
         read_only_fields = ['created_at', 'uuid']
 
+    @extend_schema_field(serializers.IntegerField())
     def get_findings(self, obj):
         return sum(img.component_versions.values('vulnerabilities').count() for img in obj.images.all())
 
+    @extend_schema_field(serializers.IntegerField())
     def get_components(self, obj):
         return sum(img.component_versions.count() for img in obj.images.all())
+
+
+class ComponentShortSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Component
+        fields = ['uuid', 'name', 'type']
+        read_only_fields = ['uuid']
+
+
+class ComponentVersionListSerializer(serializers.ModelSerializer):
+    component = ComponentShortSerializer(read_only=True)
+    vulnerabilities_count = serializers.IntegerField(read_only=True)
+    class Meta:
+        model = ComponentVersion
+        fields = ['uuid', 'version', 'component', 'created_at', 'updated_at', 'vulnerabilities_count']
+        read_only_fields = ['uuid', 'created_at', 'updated_at']
+
+
+class HasACRRegistryResponseSerializer(serializers.Serializer):
+    has_acr = serializers.BooleanField()
+
+class ACRRegistrySerializer(serializers.Serializer):
+    uuid = serializers.UUIDField()
+    name = serializers.CharField()
+    api_url = serializers.URLField()
+
+class ListACRRegistriesResponseSerializer(serializers.Serializer):
+    registries = ACRRegistrySerializer(many=True)
+
+class StatsResponseSerializer(serializers.Serializer):
+    repositories = serializers.IntegerField()
+    images = serializers.IntegerField()
+    vulnerabilities = serializers.IntegerField()
+    components = serializers.IntegerField()
+
+class JobAddRepositoriesRequestSerializer(serializers.Serializer):
+    repositories = serializers.ListField(
+        child=serializers.DictField(
+            child=serializers.CharField()
+        )
+    )
+    registry_uuid = serializers.UUIDField(required=False)
+
+class JobAddRepositoriesResponseSerializer(serializers.Serializer):
+    status = serializers.CharField()
+    message = serializers.CharField()
+    results = serializers.ListField(
+        child=serializers.DictField(
+            child=serializers.CharField()
+        )
+    )
