@@ -300,8 +300,8 @@ class RepositoryTagListSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = RepositoryTag
-        fields = ['uuid', 'tag', 'created_at', 'processing_status', 'findings', 'components']
-        read_only_fields = ['created_at', 'uuid']
+        fields = ['uuid', 'tag', 'created_at', 'updated_at', 'processing_status', 'findings', 'components']
+        read_only_fields = ['created_at', 'updated_at', 'uuid']
 
     @extend_schema_field(serializers.IntegerField())
     def get_findings(self, obj):

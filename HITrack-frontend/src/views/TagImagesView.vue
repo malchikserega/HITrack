@@ -263,8 +263,12 @@ const onRescan = async (image: Image) => {
     await api.post(`images/${image.uuid}/rescan/`)
     notificationService.success('Image rescan started successfully')
     await fetchImages()
-  } catch (error) {
-    notificationService.error('Failed to start image rescan')
+  } catch (error: any) {
+    if (error.response?.status === 409) {
+      notificationService.warning(error.response.data.error || 'Image is already being scanned')
+    } else {
+      notificationService.error('Failed to start image rescan')
+    }
   }
 }
 

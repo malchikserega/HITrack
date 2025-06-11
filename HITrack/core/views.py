@@ -16,6 +16,8 @@ from .serializers import (
 from django.db import models
 from .pagination import CustomPageNumberPagination
 from django.db.models import Q, Count
+from django.utils import timezone
+from datetime import timedelta
 
 # Create your views here.
 
@@ -103,7 +105,10 @@ class RepositoryViewSet(BaseViewSet):
     def scan_tags(self, request, uuid=None):
         repository = self.get_object()
         if repository.scan_status == 'in_process':
-            return Response({'error': 'Scan already in process'}, status=409)
+            return Response(
+                {'error': 'Repository is already being scanned'}, 
+                status=status.HTTP_409_CONFLICT
+            )
         
         repository.scan_status = 'pending'
         repository.save()
@@ -150,10 +155,10 @@ class RepositoryViewSet(BaseViewSet):
     @action(detail=True, methods=['get'], url_path='tags-graph')
     def tags_graph(self, request, uuid=None):
         """
-        Returns 30 latest tags for repository for use in charts (fields: uuid, tag, findings, components, created_at)
+        Returns 30 tags for repository for use in charts (fields: uuid, tag, findings, components, created_at)
         """
         repository = self.get_object()
-        tags = repository.tags.order_by('-created_at')[:30]
+        tags = repository.tags.order_by('-tag')[:30]
         serializer = RepositoryTagListSerializer(tags, many=True)
         return Response(serializer.data)
 
@@ -164,6 +169,15 @@ class RepositoryTagViewSet(BaseViewSet):
     search_fields = ['tag', 'repository__name']
     ordering_fields = ['tag', 'created_at', 'updated_at']
     lookup_field = 'uuid'
+
+    def _check_time_restriction(self, tag):
+        """Check if 5 minutes have passed since last update"""
+        if tag.updated_at:
+            time_diff = timezone.now() - tag.updated_at
+            if time_diff < timedelta(minutes=5):
+                remaining_seconds = int((timedelta(minutes=5) - time_diff).total_seconds())
+                return False, f"Please wait {remaining_seconds} seconds before trying again"
+        return True, None
 
     @action(detail=True, methods=['get'])
     def images(self, request, uuid=None):
@@ -212,6 +226,13 @@ class RepositoryTagViewSet(BaseViewSet):
     @action(detail=True, methods=['post'], url_path='rescan-images')
     def rescan_images(self, request, uuid=None):
         tag = self.get_object()
+        can_rescan, message = self._check_time_restriction(tag)
+        if not can_rescan:
+            return Response(
+                {'error': message},
+                status=status.HTTP_429_TOO_MANY_REQUESTS
+            )
+
         images = tag.images.all()
         started = 0
         from .tasks import generate_sbom_and_create_components
@@ -257,7 +278,10 @@ class ImageViewSet(BaseViewSet):
     def rescan(self, request, uuid=None):
         image = self.get_object()
         if image.scan_status == 'in_process':
-            return Response({'error': 'Scan already in process'}, status=409)
+            return Response(
+                {'error': 'Image is already being scanned'}, 
+                status=status.HTTP_409_CONFLICT
+            )
         image.scan_status = 'pending'
         image.save()
         try:
@@ -355,7 +379,7 @@ class ComponentViewSet(viewsets.ReadOnlyModelViewSet):
         ).prefetch_related(
             'images',
             'vulnerabilities'
-        ).all()
+        ).all().order_by('-version')
         serializer = ComponentVersionSerializer(versions, many=True)
         return Response(serializer.data)
 
@@ -530,8 +554,8 @@ class RepositoryTagListForRepositoryView(ListAPIView):
     pagination_class = CustomPageNumberPagination
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['tag']
-    ordering_fields = ['created_at', 'tag']
-    ordering = ['-created_at']
+    ordering_fields = ['created_at', 'updated_at', 'tag']
+    ordering = ['-updated_at']
 
     def get_queryset(self):
         repository_uuid = self.kwargs['repository_uuid']

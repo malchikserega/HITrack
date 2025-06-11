@@ -47,7 +47,7 @@
           />
         </div>
         <v-data-table
-          :headers="tagHeaders"
+          :headers="headers"
           :items="tags"
           :loading="tagsLoading"
           :items-per-page="tagsPerPage"
@@ -69,7 +69,7 @@
             </v-chip>
           </template>
           <template #item.actions="{ item }">
-            <v-tooltip text="Process tag">
+            <v-tooltip :text="getActionTooltip(item, 'process')">
               <template v-slot:activator="{ props }">
                 <v-btn
                   v-bind="props"
@@ -77,13 +77,12 @@
                   variant="tonal"
                   size="x-small"
                   color="primary"
-                  :class="{ 'opacity-50': ['in_process', 'pending'].includes(item.processing_status) }"
-                  :disabled="['in_process', 'pending'].includes(item.processing_status)"
+                  :disabled="isActionDisabled(item, 'process')"
                   @click.stop="onProcessTag(item)"
                 />
               </template>
             </v-tooltip>
-            <v-tooltip text="Rescan all images for this tag">
+            <v-tooltip :text="getActionTooltip(item, 'rescan')">
               <template v-slot:activator="{ props }">
                 <v-btn
                   v-bind="props"
@@ -92,12 +91,14 @@
                   size="x-small"
                   color="info"
                   class="ml-2"
-                  :class="{ 'opacity-50': ['in_process', 'pending'].includes(item.processing_status) }"
-                  :disabled="['in_process', 'pending'].includes(item.processing_status)"
+                  :disabled="isActionDisabled(item, 'rescan')"
                   @click.stop="onRescanTagImages(item)"
                 />
               </template>
             </v-tooltip>
+          </template>
+          <template v-slot:item.updated_at="{ item }">
+            {{ $formatDate(item.updated_at) }}
           </template>
         </v-data-table>
         <div class="d-flex align-center justify-end mt-2 gap-4">
@@ -152,12 +153,12 @@ const router = useRouter()
 const repository = ref<any>(null)
 const loading = ref(true)
 
-const tagHeaders = [
-  { title: 'Tag', key: 'tag' },
-  { title: 'Status', key: 'processing_status', sortable: false },
-  { title: 'Vulnerabilities', key: 'findings' },
-  { title: 'Components', key: 'components' },
-  { title: 'Created', key: 'created_at' },
+const headers = [
+  { title: 'Tag', key: 'tag', sortable: true },
+  { title: 'Status', key: 'processing_status', sortable: true },
+  { title: 'Vulnerabilities', key: 'findings', sortable: true },
+  { title: 'Components', key: 'components', sortable: true },
+  { title: 'Updated', key: 'updated_at', sortable: true },
   { title: 'Actions', key: 'actions', sortable: false }
 ]
 
@@ -168,7 +169,7 @@ const tagsPage = ref(1)
 const tagsPerPage = ref(10)
 const tagsTotal = ref(0)
 interface SortItem { key: string; order: 'asc' | 'desc' }
-const tagsSortBy = ref<SortItem[]>([{ key: 'created_at', order: 'desc' }])
+const tagsSortBy = ref<SortItem[]>([{ key: 'updated_at', order: 'desc' }])
 const tagsPageCount = computed(() => Math.ceil(tagsTotal.value / tagsPerPage.value) || 1)
 
 const tagsForCharts = ref<any[]>([])
@@ -298,13 +299,44 @@ const navigateToTagImages = (item: any) => {
   router.push({ name: 'tag-images', params: { uuid: item.uuid } })
 }
 
+const isActionDisabled = (item: any, action: 'process' | 'rescan') => {
+  if (['in_process', 'pending'].includes(item.processing_status)) {
+    return true
+  }
+  if (action === 'rescan' && item.updated_at) {
+    const lastUpdate = new Date(item.updated_at)
+    const now = new Date()
+    const diffMinutes = (now.getTime() - lastUpdate.getTime()) / (1000 * 60)
+    return diffMinutes < 5
+  }
+  return false
+}
+
+const getActionTooltip = (item: any, action: 'process' | 'rescan') => {
+  const baseMessage = action === 'process' ? 'Process tag' : 'Rescan all images for this tag'
+  
+  if (['in_process', 'pending'].includes(item.processing_status)) {
+    return `${baseMessage} (Tag is already queued for processing)`
+  }
+  if (action === 'rescan' && item.updated_at) {
+    const lastUpdate = new Date(item.updated_at)
+    const now = new Date()
+    const diffMinutes = (now.getTime() - lastUpdate.getTime()) / (1000 * 60)
+    if (diffMinutes < 5) {
+      const remainingSeconds = Math.ceil((5 - diffMinutes) * 60)
+      return `${baseMessage} (Please wait ${remainingSeconds} seconds before trying again)`
+    }
+  }
+  return baseMessage
+}
+
 const onProcessTag = async (tag: any) => {
   if (!tag.uuid) {
     notificationService.error('Cannot process tag: missing UUID')
     return
   }
-  if (['in_process', 'pending'].includes(tag.processing_status)) {
-    notificationService.warning('Tag is already queued for processing')
+  if (isActionDisabled(tag, 'process')) {
+    notificationService.warning(getActionTooltip(tag, 'process'))
     return
   }
   try {
@@ -319,12 +351,20 @@ const onProcessTag = async (tag: any) => {
 
 const onRescanTagImages = async (tag: any) => {
   if (!tag.uuid) return
+  if (isActionDisabled(tag, 'rescan')) {
+    notificationService.warning(getActionTooltip(tag, 'rescan'))
+    return
+  }
   try {
     const resp = await api.post(`repository-tags/${tag.uuid}/rescan-images/`)
     notificationService.success(resp.data.message || 'Rescan started')
     fetchTags()
-  } catch (e) {
-    notificationService.error('Failed to start rescan for tag images')
+  } catch (e: any) {
+    if (e.response?.status === 429) {
+      notificationService.warning(e.response.data.error || 'Please wait before trying again')
+    } else {
+      notificationService.error('Failed to start rescan for tag images')
+    }
   }
 }
 

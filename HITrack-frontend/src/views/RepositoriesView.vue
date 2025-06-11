@@ -51,43 +51,48 @@
                 <td>{{ $formatDate(item.created_at) }}</td>
                 <td>{{ $formatDate(item.updated_at) }}</td>
                 <td>
-                  <v-tooltip text="Scan repository">
-                    <template v-slot:activator="{ props }">
-                      <v-btn
-                        v-bind="props"
-                        icon="mdi-refresh"
-                        variant="tonal"
-                        size="x-small"
-                        color="primary"
-                        :class="{ 'opacity-50': item.scan_status === 'in_process' }"
-                        @click.stop="onScan(item)"
-                      />
-                    </template>
-                  </v-tooltip>
-                  <v-tooltip text="Edit repository">
-                    <template v-slot:activator="{ props }">
-                      <v-btn
-                        v-bind="props"
-                        icon="mdi-pencil"
-                        variant="tonal"
-                        size="x-small"
-                        color="secondary"
-                        @click.stop="onEdit(item)"
-                      />
-                    </template>
-                  </v-tooltip>
-                  <v-tooltip text="Delete repository">
-                    <template v-slot:activator="{ props }">
-                      <v-btn
-                        v-bind="props"
-                        icon="mdi-delete"
-                        variant="tonal"
-                        size="x-small"
-                        color="red"
-                        @click.stop="onDelete(item)"
-                      />
-                    </template>
-                  </v-tooltip>
+                  <div style="display: flex; flex-direction: row; gap: 8px; justify-content: center; align-items: center;">
+                    <v-tooltip :text="getScanTooltip(item)" location="top">
+                      <template v-slot:activator="{ props }">
+                        <div v-bind="props">
+                          <v-btn
+                            icon="mdi-refresh"
+                            variant="tonal"
+                            size="x-small"
+                            color="primary"
+                            :disabled="isScanDisabled(item)"
+                            @click.stop="onScan(item)"
+                          />
+                        </div>
+                      </template>
+                    </v-tooltip>
+                    <v-tooltip text="Edit repository" location="top">
+                      <template v-slot:activator="{ props }">
+                        <div v-bind="props">
+                          <v-btn
+                            icon="mdi-pencil"
+                            variant="tonal"
+                            size="x-small"
+                            color="secondary"
+                            @click.stop="onEdit(item)"
+                          />
+                        </div>
+                      </template>
+                    </v-tooltip>
+                    <v-tooltip text="Delete repository" location="top">
+                      <template v-slot:activator="{ props }">
+                        <div v-bind="props">
+                          <v-btn
+                            icon="mdi-delete"
+                            variant="tonal"
+                            size="x-small"
+                            color="red"
+                            @click.stop="onDelete(item)"
+                          />
+                        </div>
+                      </template>
+                    </v-tooltip>
+                  </div>
                 </td>
               </tr>
             </template>
@@ -329,9 +334,42 @@ const getScanStatusTooltip = (status: string) => {
   return statusMap[status] || 'Start scan'
 }
 
+const isScanDisabled = (repo: Repository) => {
+  if (repo.scan_status === 'in_process') {
+    return true
+  }
+  if (repo.updated_at) {
+    const lastUpdate = new Date(repo.updated_at)
+    const now = new Date()
+    const diffMinutes = (now.getTime() - lastUpdate.getTime()) / (1000 * 60)
+    return diffMinutes < 5
+  }
+  return false
+}
+
+const getScanTooltip = (repo: Repository) => {
+  if (repo.scan_status === 'in_process') {
+    return 'Repository is already being scanned'
+  }
+  if (repo.updated_at) {
+    const lastUpdate = new Date(repo.updated_at)
+    const now = new Date()
+    const diffMinutes = (now.getTime() - lastUpdate.getTime()) / (1000 * 60)
+    if (diffMinutes < 5) {
+      const remainingSeconds = Math.ceil((5 - diffMinutes) * 60)
+      return `Please wait ${remainingSeconds} seconds before scanning again`
+    }
+  }
+  return 'Scan repository'
+}
+
 const onScan = async (repo: Repository) => {
   if (!repo.uuid) {
     notificationService.error('Cannot scan repository: missing UUID')
+    return
+  }
+  if (isScanDisabled(repo)) {
+    notificationService.warning(getScanTooltip(repo))
     return
   }
   try {
@@ -340,7 +378,7 @@ const onScan = async (repo: Repository) => {
     await fetchRepositories()
   } catch (error: any) {
     if (error.response?.status === 409) {
-      notificationService.warning('Scan already in progress')
+      notificationService.warning(error.response.data.error || 'Repository is already being scanned')
     } else {
       console.error('Error starting repository scan:', error)
       notificationService.error('Failed to start repository scan')
