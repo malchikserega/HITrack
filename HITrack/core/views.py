@@ -364,7 +364,7 @@ class ComponentVersionViewSet(BaseViewSet):
     serializer_class = ComponentVersionSerializer
     filterset_fields = ['component', 'images', 'vulnerabilities']
     search_fields = ['version', 'component__name']
-    ordering_fields = ['version', 'created_at', 'updated_at', 'vulnerabilities']
+    ordering_fields = ['version', 'created_at', 'updated_at', 'vulnerabilities_count']
 
     def get_queryset(self):
         qs = super().get_queryset()

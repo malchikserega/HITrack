@@ -141,7 +141,7 @@
                       {{ item.component.type }}
                     </v-chip>
                   </template>
-                  <template v-slot:item.vulnerabilities_count="{ item }">
+                  <template v-slot:item.vulnerabilities_count="{ item }: { item: ComponentVersion }">
                     <v-chip
                       size="small"
                       :color="item.vulnerabilities_count > 0 ? 'error' : 'success'"
@@ -385,14 +385,14 @@ const componentsSortDesc = ref<boolean[]>([])
 const componentsSearch = ref('')
 const componentsPageCount = computed(() => Math.ceil(componentsTotal.value / componentsPerPage.value))
 
-const componentHeaders: any[] = [
+const componentHeaders = [
   { title: 'Name', key: 'name', sortable: true },
   { title: 'Version', key: 'version', sortable: true },
   { title: 'Type', key: 'type', sortable: true },
-  { title: 'Vulnerabilities', key: 'vulnerabilities_count', sortable: false },
+  { title: 'Vulnerabilities', key: 'vulnerabilities_count', sortable: true },
   { title: 'Created', key: 'created_at', sortable: true },
   { title: 'Updated', key: 'updated_at', sortable: true },
-]
+] as const
 
 const fetchComponents = async () => {
   if (!image.value) {
@@ -405,11 +405,22 @@ const fetchComponents = async () => {
   }
   componentsLoading.value = true
   try {
+    // Get the first sort field and direction
+    const sortField = componentsSortBy.value[0]
+    const sortDesc = componentsSortDesc.value[0]
+    
+    // Build ordering parameter
+    let ordering = undefined
+    if (sortField) {
+      const prefix = sortDesc ? '-' : ''
+      ordering = `${prefix}${sortField}`
+    }
+
     const params = {
       images: image.value.uuid,
       page: componentsPage.value,
       page_size: componentsPerPage.value,
-      ordering: componentsSortBy.value.length ? `${componentsSortDesc.value[0] ? '-' : ''}${componentsSortBy.value[0]}` : undefined,
+      ordering,
       search: componentsSearch.value || undefined
     }
     console.log('fetchComponents: sending request to', `/component-versions/`, params)
