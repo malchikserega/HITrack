@@ -124,7 +124,7 @@ onMounted(fetchRepositories)
 }
 .matrix-table th, .matrix-table td {
   border: 1px solid #e0e0e0;
-  padding: 4px 8px;
+  padding: 4px 3px;
   text-align: center;
   white-space: nowrap;
 }
