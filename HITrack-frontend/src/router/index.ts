@@ -73,6 +73,12 @@ const router = createRouter({
         requiresAuth: true,
         title: 'Tag Images'
       }
+    },
+    {
+      path: '/component-matrix',
+      name: 'component-matrix',
+      component: () => import('../views/ComponentMatrixView.vue'),
+      meta: { requiresAuth: true }
     }
   ]
 })

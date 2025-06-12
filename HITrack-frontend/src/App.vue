@@ -79,7 +79,8 @@ const menuItems = [
   { title: 'Components', path: '/components' },
   { title: 'Vulnerabilities', path: '/vulnerabilities' },
   { title: 'Azure Container Registry', path: '/acr' },
-  { title: 'Report Generator', path: '/reports' }
+  { title: 'Report Generator', path: '/reports' },
+  { title: 'Component Matrix', path: '/component-matrix' }
 ]
 
 const notifications = ref<Array<{
