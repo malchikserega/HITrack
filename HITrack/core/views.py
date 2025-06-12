@@ -226,13 +226,6 @@ class RepositoryTagViewSet(BaseViewSet):
     @action(detail=True, methods=['post'], url_path='rescan-images')
     def rescan_images(self, request, uuid=None):
         tag = self.get_object()
-        can_rescan, message = self._check_time_restriction(tag)
-        if not can_rescan:
-            return Response(
-                {'error': message},
-                status=status.HTTP_429_TOO_MANY_REQUESTS
-            )
-
         images = tag.images.all()
         started = 0
         from .tasks import generate_sbom_and_create_components

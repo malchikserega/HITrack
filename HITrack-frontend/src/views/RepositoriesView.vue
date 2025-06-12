@@ -9,7 +9,31 @@
           </v-btn>
         </v-col>
       </v-row>
-
+      <v-row>
+        <v-col cols="12" class="d-flex align-center mb-2">
+          <v-text-field
+            v-model="repositoriesSearch"
+            append-inner-icon="mdi-magnify"
+            label="Search repositories"
+            hide-details
+            density="compact"
+            class="mr-4"
+            style="max-width: 300px;"
+            @keyup.enter="fetchRepositories"
+            @click:append-inner="fetchRepositories"
+          />
+          <v-spacer></v-spacer>
+          <v-select
+            :items="[10, 20, 50, 100]"
+            v-model="itemsPerPage"
+            label="Items per page"
+            style="max-width: 150px"
+            hide-details
+            density="compact"
+            variant="outlined"
+          />
+        </v-col>
+      </v-row>
       <v-row>
         <v-col cols="12">
           <v-data-table
@@ -19,10 +43,14 @@
             class="elevation-1"
             hover
             density="comfortable"
-            :header-props="{
-              color: 'primary',
-              class: 'text-uppercase font-weight-bold'
-            }"
+            :items-per-page="itemsPerPage"
+            :page="page"
+            :sort-by.sync="sortBy"
+            :server-items-length="totalItems"
+            :footer-props="{ showFirstLastPage: true, itemsPerPageOptions: [10, 20, 50, 100] }"
+            @update:page="page = $event"
+            @update:items-per-page="itemsPerPage = $event"
+            @update:sort-by="sortBy = $event"
           >
             <template #item="{ item }">
               <tr class="clickable-row" @click="onRowClick(item)">
@@ -99,6 +127,17 @@
           </v-data-table>
         </v-col>
       </v-row>
+      <v-row>
+        <v-col cols="12" class="d-flex align-center justify-end mt-2 gap-4">
+          <v-pagination
+            v-model="page"
+            :length="Math.ceil(totalItems / itemsPerPage) || 1"
+            @update:model-value="fetchRepositories"
+            :total-visible="7"
+            density="comfortable"
+          />
+        </v-col>
+      </v-row>
 
       <v-dialog v-model="dialog" max-width="500px">
         <v-card :title="formTitle">
@@ -150,11 +189,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
 import api from '../plugins/axios'
 import { notificationService } from '../plugins/notifications'
 import type { Repository, PaginatedResponse } from '../types/interfaces'
 import { useRouter } from 'vue-router'
+
+interface SortItem { key: string; order: 'asc' | 'desc' }
 
 const router = useRouter()
 const repositories = ref<Repository[]>([])
@@ -162,8 +203,7 @@ const loading = ref(false)
 const page = ref(1)
 const itemsPerPage = ref(10)
 const totalItems = ref(0)
-const sortBy = ref<string[]>([])
-const sortDesc = ref<boolean[]>([])
+const sortBy = ref<SortItem[]>([{ key: 'name', order: 'asc' }])
 const repositoriesSearch = ref('')
 const saving = ref(false)
 const deleting = ref(false)
@@ -184,11 +224,11 @@ const editedItem = ref<Repository>({...defaultItem})
 const itemToDelete = ref<Repository | null>(null)
 
 const headers: any[] = [
-  { title: 'Name', key: 'name' },
-  { title: 'URL', key: 'url' },
-  { title: 'Tags', key: 'tag_count', align: 'center' },
-  { title: 'Created', key: 'created_at' },
-  { title: 'Updated', key: 'updated_at' },
+  { title: 'Name', key: 'name', sortable: true },
+  { title: 'URL', key: 'url', sortable: true },
+  { title: 'Tags', key: 'tag_count', align: 'center', sortable: true },
+  { title: 'Created', key: 'created_at', sortable: true },
+  { title: 'Updated', key: 'updated_at', sortable: true },
   { title: 'Actions', key: 'actions', sortable: false }
 ]
 
@@ -209,8 +249,17 @@ const formTitle = ref('New Repository')
 const fetchRepositories = async () => {
   loading.value = true
   try {
-    const response = await api.get<PaginatedResponse<Repository>>('repositories/')
+    const params: any = {
+      page: page.value,
+      page_size: itemsPerPage.value
+    }
+    if (repositoriesSearch.value) params.search = repositoriesSearch.value
+    if (sortBy.value.length > 0) {
+      params.ordering = sortBy.value.map(s => s.order === 'desc' ? `-${s.key}` : s.key).join(',')
+    }
+    const response = await api.get<PaginatedResponse<Repository>>('repositories/', { params })
     repositories.value = response.data.results
+    totalItems.value = response.data.count
   } catch (error) {
     console.error('Error fetching repositories:', error)
     notificationService.error('Failed to fetch repositories')
@@ -218,6 +267,8 @@ const fetchRepositories = async () => {
     loading.value = false
   }
 }
+
+watch([page, itemsPerPage, repositoriesSearch, sortBy], fetchRepositories)
 
 const openDialog = (title: string, item?: Repository) => {
   formTitle.value = title
@@ -319,7 +370,6 @@ const getRepositoryTypeColor = (type: string | undefined) => {
 }
 
 const onRowClick = (repo: any) => {
-  console.log('Clicked repo:', repo);
   router.push(`/repositories/${repo.uuid}`)
 }
 
@@ -335,30 +385,12 @@ const getScanStatusTooltip = (status: string) => {
 }
 
 const isScanDisabled = (repo: Repository) => {
-  if (repo.scan_status === 'in_process') {
-    return true
-  }
-  if (repo.updated_at) {
-    const lastUpdate = new Date(repo.updated_at)
-    const now = new Date()
-    const diffMinutes = (now.getTime() - lastUpdate.getTime()) / (1000 * 60)
-    return diffMinutes < 5
-  }
-  return false
+  return repo.scan_status === 'in_process'
 }
 
 const getScanTooltip = (repo: Repository) => {
   if (repo.scan_status === 'in_process') {
     return 'Repository is already being scanned'
-  }
-  if (repo.updated_at) {
-    const lastUpdate = new Date(repo.updated_at)
-    const now = new Date()
-    const diffMinutes = (now.getTime() - lastUpdate.getTime()) / (1000 * 60)
-    if (diffMinutes < 5) {
-      const remainingSeconds = Math.ceil((5 - diffMinutes) * 60)
-      return `Please wait ${remainingSeconds} seconds before scanning again`
-    }
   }
   return 'Scan repository'
 }

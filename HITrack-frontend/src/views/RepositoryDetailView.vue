@@ -303,29 +303,13 @@ const isActionDisabled = (item: any, action: 'process' | 'rescan') => {
   if (['in_process', 'pending'].includes(item.processing_status)) {
     return true
   }
-  if (action === 'rescan' && item.updated_at) {
-    const lastUpdate = new Date(item.updated_at)
-    const now = new Date()
-    const diffMinutes = (now.getTime() - lastUpdate.getTime()) / (1000 * 60)
-    return diffMinutes < 5
-  }
   return false
 }
 
 const getActionTooltip = (item: any, action: 'process' | 'rescan') => {
   const baseMessage = action === 'process' ? 'Process tag' : 'Rescan all images for this tag'
-  
   if (['in_process', 'pending'].includes(item.processing_status)) {
     return `${baseMessage} (Tag is already queued for processing)`
-  }
-  if (action === 'rescan' && item.updated_at) {
-    const lastUpdate = new Date(item.updated_at)
-    const now = new Date()
-    const diffMinutes = (now.getTime() - lastUpdate.getTime()) / (1000 * 60)
-    if (diffMinutes < 5) {
-      const remainingSeconds = Math.ceil((5 - diffMinutes) * 60)
-      return `${baseMessage} (Please wait ${remainingSeconds} seconds before trying again)`
-    }
   }
   return baseMessage
 }
