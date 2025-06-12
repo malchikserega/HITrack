@@ -4,7 +4,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.generics import ListAPIView, GenericAPIView
 from django_filters.rest_framework import DjangoFilterBackend
-from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ContainerRegistry
+from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ContainerRegistry, ComponentVersionVulnerability
 from .serializers import (
     RepositorySerializer, RepositoryTagSerializer, ImageSerializer, ImageListSerializer,
     ComponentSerializer, ComponentVersionSerializer, VulnerabilitySerializer, ComponentListSerializer,
@@ -17,7 +17,13 @@ from django.db import models
 from .pagination import CustomPageNumberPagination
 from django.db.models import Q, Count
 from django.utils import timezone
-from datetime import timedelta
+from datetime import timedelta, datetime
+import pandas as pd
+from io import BytesIO
+from rest_framework.views import APIView
+from django.http import HttpResponse
+from openpyxl import Workbook
+from core.models import ComponentVersionVulnerability
 
 # Create your views here.
 
@@ -559,3 +565,71 @@ class RepositoryTagListForRepositoryView(ListAPIView):
     def get_queryset(self):
         repository_uuid = self.kwargs['repository_uuid']
         return RepositoryTag.objects.filter(repository__uuid=repository_uuid)
+
+class ReportGeneratorView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        """
+        Generate a vulnerability report for selected images.
+        Returns an Excel file with vulnerability data.
+        """
+        image_uuids = request.data.get('image_uuids', [])
+        if not image_uuids:
+            return Response(
+                {'error': 'No images selected'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            images = Image.objects.filter(uuid__in=image_uuids)
+
+            # Create Excel file in memory
+            output = BytesIO()
+            wb = Workbook()
+            ws = wb.active
+            ws.title = 'Vulnerability Report'
+            ws.append([
+                'Image Name', 'Component Name', 'Component Version',
+                'Vulnerability ID', 'Vulnerability Severity', 'Fixed In'
+            ])
+
+            for image in images:
+                findings_qs = ComponentVersionVulnerability.objects.filter(
+                    component_version__images=image
+                ).select_related('component_version', 'vulnerability', 'component_version__component')
+                if findings_qs.exists():
+                    for cvv in findings_qs:
+                        ws.append([
+                            image.name,
+                            cvv.component_version.component.name,
+                            cvv.component_version.version,
+                            cvv.vulnerability.vulnerability_id,
+                            cvv.vulnerability.severity,
+                            cvv.fix if cvv.fixable else 'No fix available'
+                        ])
+                else:
+                    ws.append([
+                        image.name, '', '', '', '', ''
+                    ])
+
+            wb.save(output)
+            output.seek(0)
+
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            filename = f"vulnerability_report_{timestamp}.xlsx"
+
+            response = HttpResponse(
+                output.getvalue(),
+                content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            )
+            response['Content-Disposition'] = f'attachment; filename="{filename}"'
+            response['Access-Control-Expose-Headers'] = 'Content-Disposition'
+            return response
+
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )

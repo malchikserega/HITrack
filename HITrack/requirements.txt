@@ -16,3 +16,5 @@ drf-nested-routers==0.94.1
 django-filter
 redis
 gunicorn
+openpyxl
+xlsxwriter

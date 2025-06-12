@@ -4,7 +4,7 @@ from .views import (
     RepositoryViewSet, RepositoryTagViewSet, ImageViewSet,
     ComponentViewSet, ComponentVersionViewSet, VulnerabilityViewSet,
     StatsViewSet, JobViewSet, HasACRRegistryView, ListACRRegistriesView,
-    RepositoryTagListForRepositoryView
+    RepositoryTagListForRepositoryView, ReportGeneratorView
 )
 
 router = DefaultRouter()
@@ -22,4 +22,5 @@ urlpatterns = [
     path('has-acr-registry/', HasACRRegistryView.as_view(), name='has-acr-registry'),
     path('list-acr-registries/', ListACRRegistriesView.as_view(), name='list-acr-registries'),
     path('repositories/<uuid:repository_uuid>/tags-list/', RepositoryTagListForRepositoryView.as_view(), name='repository-tags-list'),
+    path('reports/generate/', ReportGeneratorView.as_view(), name='generate-report'),
 ] 
