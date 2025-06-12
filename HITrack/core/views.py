@@ -18,7 +18,6 @@ from .pagination import CustomPageNumberPagination
 from django.db.models import Q, Count
 from django.utils import timezone
 from datetime import timedelta, datetime
-import pandas as pd
 from io import BytesIO
 from rest_framework.views import APIView
 from django.http import HttpResponse
