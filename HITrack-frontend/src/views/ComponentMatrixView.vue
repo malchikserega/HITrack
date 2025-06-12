@@ -119,8 +119,8 @@ onMounted(fetchRepositories)
 }
 .matrix-table {
   border-collapse: collapse;
-  font-size: 0.85rem;
-  min-width: 900px;
+  font-size: 0.65rem;
+  min-width: 200px;
 }
 .matrix-table th, .matrix-table td {
   border: 1px solid #e0e0e0;
@@ -141,6 +141,7 @@ onMounted(fetchRepositories)
   background: #fff;
   z-index: 3;
   font-weight: 700;
+  text-align: left !important;
 }
 .matrix-table tr:hover td {
   background: #f5f5f5;

@@ -645,60 +645,83 @@ class ComponentMatrixView(APIView):
         if not repo_uuids:
             return Response({'error': 'No repositories selected'}, status=400)
 
-        # Get latest tag for each repo (by created_at)
-        from core.models import Repository, RepositoryTag, Image, ComponentVersion
-        columns = []
-        images_by_col = {}
-        for repo_uuid in repo_uuids:
-            tag = RepositoryTag.objects.filter(repository__uuid=repo_uuid).order_by('-created_at').first()
-            if not tag:
-                continue
-            # Only images with SBOM
-            image = tag.images.filter(sbom_data__isnull=False).order_by('-updated_at').first()
-            if not image:
-                continue
-            col_label = f"{tag.repository.name}:{tag.tag}"
-            columns.append({'repo': tag.repository.name, 'tag': tag.tag, 'label': col_label})
-            images_by_col[col_label] = image
+        # Get latest tag for each repo with a single query
+        from core.models import Repository, RepositoryTag, Image, ComponentVersion, ComponentVersionVulnerability
+        from django.db.models import Max, Prefetch
 
-        # Collect all unique components across all images
+        # Get all relevant tags with their repositories in one query
+        tags = RepositoryTag.objects.filter(
+            repository__uuid__in=repo_uuids
+        ).select_related('repository').order_by('repository__uuid', '-created_at')
+
+        # Group tags by repository to get the latest tag for each
+        latest_tags = {}
+        for tag in tags:
+            if tag.repository.uuid not in latest_tags:
+                latest_tags[tag.repository.uuid] = tag
+
+        # Get all relevant images with SBOM in one query
+        images = Image.objects.filter(
+            repository_tags__in=latest_tags.values(),
+            sbom_data__isnull=False
+        ).prefetch_related(
+            'repository_tags',
+            'repository_tags__repository',
+            Prefetch(
+                'component_versions',
+                queryset=ComponentVersion.objects.select_related('component')
+            )
+        ).order_by('-updated_at')
+
+        # Group images by repository to get the latest image for each
+        latest_images = {}
+        for image in images:
+            # Get the repository UUID from the first repository tag
+            repo_tag = image.repository_tags.first()
+            if not repo_tag or repo_tag.repository.uuid not in latest_tags:
+                continue
+                
+            repo_uuid = repo_tag.repository.uuid
+            if repo_uuid not in latest_images:
+                latest_images[repo_uuid] = image
+
+        # Build columns and collect all component versions in one go
+        columns = []
         component_set = set()
         image_components = {}
-        for col_label, image in images_by_col.items():
-            cvs = image.component_versions.select_related('component').all()
+        
+        for repo_uuid, image in latest_images.items():
+            if repo_uuid not in latest_tags:
+                continue
+                
+            tag = latest_tags[repo_uuid]
+            col_label = f"{tag.repository.name}:{tag.tag}"
+            columns.append({'repo': tag.repository.name, 'tag': tag.tag, 'label': col_label})
+            
+            # Get all component versions for this image with their vulnerabilities
+            cvs = image.component_versions.all()
             image_components[col_label] = {}
+            
             for cv in cvs:
                 cname = cv.component.name
                 component_set.add(cname)
-                # Check if this component version has vulnerabilities in this image
-                has_vuln = cv.componentversionvulnerability_set.exists()
                 image_components[col_label][cname] = {
                     'version': cv.version,
-                    'has_vuln': has_vuln
+                    'has_vuln': cv.componentversionvulnerability_set.exists()
                 }
 
         components = sorted(component_set)
-        # Build matrix: {component: {col_label: {versions, has_vuln}}}
+
+        # Build matrix using the pre-fetched data
         matrix = {}
         for cname in components:
             matrix[cname] = {}
             for col in columns:
-                tag = RepositoryTag.objects.filter(repository__name=col['repo'], tag=col['tag']).order_by('-created_at').first()
-                if not tag:
-                    matrix[cname][col['label']] = {'version': '', 'has_vuln': False}
-                    continue
-                images = tag.images.filter(sbom_data__isnull=False)
-                versions = set()
-                has_vuln = False
-                for image in images:
-                    cvs = image.component_versions.select_related('component').filter(component__name=cname)
-                    for cv in cvs:
-                        versions.add(cv.version)
-                        # Check for vulnerabilities for this component version in this image
-                        if cv.componentversionvulnerability_set.exists():
-                            has_vuln = True
-                version_str = ', '.join(sorted(versions)) if versions else ''
-                matrix[cname][col['label']] = {'version': version_str, 'has_vuln': has_vuln}
+                col_label = col['label']
+                if col_label in image_components and cname in image_components[col_label]:
+                    matrix[cname][col_label] = image_components[col_label][cname]
+                else:
+                    matrix[cname][col_label] = {'version': '', 'has_vuln': False}
 
         return Response({
             'components': components,
