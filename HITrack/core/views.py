@@ -665,8 +665,11 @@ class ComponentMatrixView(APIView):
             repository_tags__in=latest_tags.values(),
             sbom_data__isnull=False
         ).prefetch_related(
-            'repository_tags',
-            'repository_tags__repository',
+            Prefetch(
+                'repository_tags',
+                queryset=RepositoryTag.objects.select_related('repository').order_by('-created_at'),
+                to_attr='ordered_tags'
+            ),
             Prefetch(
                 'component_versions',
                 queryset=ComponentVersion.objects.select_related('component')
@@ -676,12 +679,13 @@ class ComponentMatrixView(APIView):
         # Group images by repository to get the latest image for each
         latest_images = {}
         for image in images:
-            # Get the repository UUID from the first repository tag
-            repo_tag = image.repository_tags.first()
-            if not repo_tag or repo_tag.repository.uuid not in latest_tags:
+            # Get the latest repository tag for this image
+            if not hasattr(image, 'ordered_tags') or not image.ordered_tags:
                 continue
                 
+            repo_tag = image.ordered_tags[0]  # First tag is the latest due to ordering
             repo_uuid = repo_tag.repository.uuid
+            
             if repo_uuid not in latest_images:
                 latest_images[repo_uuid] = image
 
