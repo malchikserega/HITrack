@@ -647,12 +647,12 @@ class ComponentMatrixView(APIView):
 
         # Get latest tag for each repo with a single query
         from core.models import Repository, RepositoryTag, Image, ComponentVersion, ComponentVersionVulnerability
-        from django.db.models import Max, Prefetch
+        from django.db.models import Max, Prefetch, Subquery, OuterRef
 
         # Get all relevant tags with their repositories in one query
         tags = RepositoryTag.objects.filter(
             repository__uuid__in=repo_uuids
-        ).select_related('repository').order_by('repository__uuid', '-created_at')
+        ).select_related('repository').order_by('repository__uuid', '-tag')
 
         # Group tags by repository to get the latest tag for each
         latest_tags = {}
@@ -667,8 +667,10 @@ class ComponentMatrixView(APIView):
         ).prefetch_related(
             Prefetch(
                 'repository_tags',
-                queryset=RepositoryTag.objects.select_related('repository').order_by('-created_at'),
-                to_attr='ordered_tags'
+                queryset=RepositoryTag.objects.select_related('repository')
+                .order_by('-tag')
+                .only('tag', 'repository__name', 'repository__uuid')[:1],  # Get only the latest tag
+                to_attr='latest_tag'
             ),
             Prefetch(
                 'component_versions',
@@ -680,10 +682,10 @@ class ComponentMatrixView(APIView):
         latest_images = {}
         for image in images:
             # Get the latest repository tag for this image
-            if not hasattr(image, 'ordered_tags') or not image.ordered_tags:
+            if not hasattr(image, 'latest_tag') or not image.latest_tag:
                 continue
                 
-            repo_tag = image.ordered_tags[0]  # First tag is the latest due to ordering
+            repo_tag = image.latest_tag[0]  # We know there's only one tag due to [:1]
             repo_uuid = repo_tag.repository.uuid
             
             if repo_uuid not in latest_images:
