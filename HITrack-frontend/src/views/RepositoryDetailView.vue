@@ -344,7 +344,9 @@ const onRescanTagImages = async (tag: any) => {
     notificationService.success(resp.data.message || 'Rescan started')
     fetchTags()
   } catch (e: any) {
-    if (e.response?.status === 429) {
+    if (e.response?.status === 409) {
+      notificationService.warning(e.response.data.error || 'At least one image is already being scanned or queued for scanning')
+    } else if (e.response?.status === 429) {
       notificationService.warning(e.response.data.error || 'Please wait before trying again')
     } else {
       notificationService.error('Failed to start rescan for tag images')

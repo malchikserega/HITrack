@@ -227,6 +227,12 @@ class RepositoryTagViewSet(BaseViewSet):
     def rescan_images(self, request, uuid=None):
         tag = self.get_object()
         images = tag.images.all()
+        # Check if any image is already being scanned or queued
+        if images.filter(scan_status__in=['in_process', 'pending']).exists():
+            return Response(
+                {'error': 'At least one image is already being scanned or queued for scanning'},
+                status=status.HTTP_409_CONFLICT
+            )
         started = 0
         from .tasks import generate_sbom_and_create_components
         for image in images:
@@ -270,9 +276,9 @@ class ImageViewSet(BaseViewSet):
     @action(detail=True, methods=['post'])
     def rescan(self, request, uuid=None):
         image = self.get_object()
-        if image.scan_status == 'in_process':
+        if image.scan_status in ['in_process', 'pending']:
             return Response(
-                {'error': 'Image is already being scanned'}, 
+                {'error': 'Image is already being scanned or queued for scanning'}, 
                 status=status.HTTP_409_CONFLICT
             )
         image.scan_status = 'pending'
