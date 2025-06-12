@@ -30,6 +30,7 @@
                   class="elevation-1"
                   hover
                   density="comfortable"
+                  @click:row="onRowClick"
                 >
                   <template v-slot:item.findings="{ item }">
                     <v-chip
@@ -235,6 +236,15 @@ watch([search, sortBy], () => {
   page.value = 1
   debouncedFetchImages()
 })
+
+const onRowClick = (event: MouseEvent, { item }: { item: any }) => {
+  const idx = selectedImages.value.indexOf(item.uuid)
+  if (idx === -1) {
+    selectedImages.value.push(item.uuid)
+  } else {
+    selectedImages.value.splice(idx, 1)
+  }
+}
 
 onMounted(() => {
   fetchImages()
