@@ -399,3 +399,13 @@ class JobAddRepositoriesResponseSerializer(serializers.Serializer):
             child=serializers.CharField()
         )
     )
+
+class ImageDropdownSerializer(serializers.ModelSerializer):
+    has_sbom = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Image
+        fields = ['uuid', 'name', 'has_sbom']
+
+    def get_has_sbom(self, obj):
+        return bool(obj.sbom_data)

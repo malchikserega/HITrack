@@ -6,7 +6,18 @@
           <h1 class="text-h4 mb-4 font-weight-black">Component Matrix</h1>
           <v-card class="mb-4 d-flex flex-column wide-card">
             <v-card-text>
+              <v-select
+                v-model="comparisonType"
+                :items="[
+                  { title: 'Repository Comparison', value: 'repository' },
+                  { title: 'Image Comparison', value: 'image' }
+                ]"
+                label="Comparison Type"
+                class="mb-4"
+              />
+              
               <v-autocomplete
+                v-if="comparisonType === 'repository'"
                 v-model="selectedRepos"
                 :items="repositories"
                 item-title="name"
@@ -19,7 +30,46 @@
                 :loading="reposLoading"
                 :disabled="reposLoading"
               />
-              <v-btn color="primary" :disabled="selectedRepos.length === 0 || loading" @click="fetchMatrix" :loading="loading">
+
+              <v-autocomplete
+                v-else
+                v-model="selectedImages"
+                :items="images"
+                item-title="name"
+                item-value="uuid"
+                label="Select images"
+                multiple
+                chips
+                clearable
+                class="mb-4"
+                :loading="imagesLoading"
+                :disabled="imagesLoading"
+              >
+                <template v-slot:item="{ props, item }">
+                  <v-list-item v-bind="props">
+                    <template v-slot:prepend>
+                      <v-chip
+                        :color="item.raw.has_sbom ? 'success' : 'error'"
+                        size="x-small"
+                        class="mr-2"
+                      >
+                        <v-icon size="small" class="mr-1">
+                          {{ item.raw.has_sbom ? 'mdi-check' : 'mdi-alert' }}
+                        </v-icon>
+                        {{ item.raw.has_sbom ? 'SBOM' : 'No SBOM' }}
+                      </v-chip>
+                    </template>
+                  </v-list-item>
+                </template>
+              </v-autocomplete>
+              <v-btn 
+                color="primary" 
+                :disabled="(comparisonType === 'repository' && selectedRepos.length === 0) || 
+                          (comparisonType === 'image' && selectedImages.length === 0) || 
+                          loading" 
+                @click="fetchMatrix" 
+                :loading="loading"
+              >
                 Build Matrix
               </v-btn>
             </v-card-text>
@@ -27,6 +77,28 @@
 
           <v-card v-if="matrixData" class="wide-card">
             <v-card-text>
+              <div class="d-flex align-center mb-2">
+                <v-text-field
+                  v-model="searchQuery"
+                  label="Search components"
+                  prepend-inner-icon="mdi-magnify"
+                  clearable
+                  class="mb-4"
+                  density="compact"
+                />
+                <v-spacer />
+                <v-btn
+                  class="ml-2"
+                  color="secondary"
+                  variant="text"
+                  :disabled="!matrixData"
+                  @click="exportMatrixToExcel"
+                  style="min-width: 0;"
+                >
+                  <v-icon>mdi-file-chart-outline</v-icon>
+                  <span style="opacity: 0.6; font-size: 0.9em; margin-left: 4px;">xlsx</span>
+                </v-btn>
+              </div>
               <div class="matrix-scroll">
                 <table class="matrix-table">
                   <thead>
@@ -36,7 +108,7 @@
                     </tr>
                   </thead>
                   <tbody>
-                    <tr v-for="component in matrixData.components" :key="component">
+                    <tr v-for="component in filteredComponents" :key="component">
                       <td class="sticky-col">{{ component }}</td>
                       <td
                         v-for="col in matrixData.columns"
@@ -99,15 +171,37 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, watch, computed } from 'vue'
 import api from '../plugins/axios'
 import { notificationService } from '../plugins/notifications'
+import * as XLSX from 'xlsx'
 
+const comparisonType = ref('repository')
 const repositories = ref<any[]>([])
+const images = ref<any[]>([])
 const reposLoading = ref(false)
+const imagesLoading = ref(false)
 const selectedRepos = ref<string[]>([])
+const selectedImages = ref<string[]>([])
 const loading = ref(false)
 const matrixData = ref<any | null>(null)
+const searchQuery = ref('')
+
+// Computed property for filtered components
+const filteredComponents = computed(() => {
+  if (!matrixData.value) return []
+  if (!searchQuery.value) return matrixData.value.components
+  const query = searchQuery.value.toLowerCase()
+  return matrixData.value.components.filter((component: string) => 
+    component.toLowerCase().includes(query)
+  )
+})
+
+watch(comparisonType, () => {
+  selectedRepos.value = []
+  selectedImages.value = []
+  matrixData.value = null
+})
 
 const fetchRepositories = async () => {
   reposLoading.value = true
@@ -118,6 +212,18 @@ const fetchRepositories = async () => {
     notificationService.error('Failed to fetch repositories')
   } finally {
     reposLoading.value = false
+  }
+}
+
+const fetchImages = async () => {
+  imagesLoading.value = true
+  try {
+    const resp = await api.get('images/', { params: { page_size: 1000, dropdown: 1 } })
+    images.value = resp.data.results
+  } catch (e) {
+    notificationService.error('Failed to fetch images')
+  } finally {
+    imagesLoading.value = false
   }
 }
 
@@ -142,12 +248,18 @@ const getVersionStatusIcon = (versionData: any) => {
 }
 
 const fetchMatrix = async () => {
-  if (selectedRepos.value.length === 0) return
+  if (comparisonType.value === 'repository' && selectedRepos.value.length === 0) return
+  if (comparisonType.value === 'image' && selectedImages.value.length === 0) return
   loading.value = true
   try {
-    const resp = await api.post('component-matrix/', {
-      repository_uuids: selectedRepos.value
-    })
+    const data = {
+      type: comparisonType.value,
+      ...(comparisonType.value === 'repository' 
+        ? { repository_uuids: selectedRepos.value }
+        : { image_uuids: selectedImages.value }
+      )
+    }
+    const resp = await api.post('component-matrix/', data)
     matrixData.value = resp.data
   } catch (e) {
     notificationService.error('Failed to fetch component matrix')
@@ -156,7 +268,31 @@ const fetchMatrix = async () => {
   }
 }
 
-onMounted(fetchRepositories)
+const exportMatrixToExcel = () => {
+  if (!matrixData.value) return
+  const header = ['Component', ...matrixData.value.columns.map((col: any) => col.label)]
+  const rows = matrixData.value.components.map((component: string) => {
+    const row = [component]
+    matrixData.value.columns.forEach((col: any) => {
+      const cell = matrixData.value.matrix[component][col.label]
+      let value = cell.version || ''
+      if (cell.has_vuln) value += ' (vuln)'
+      if (cell.latest_version && cell.version !== cell.latest_version) value += ` (latest: ${cell.latest_version})`
+      row.push(value)
+    })
+    return row
+  })
+  const worksheet = XLSX.utils.aoa_to_sheet([header, ...rows])
+  worksheet['!cols'] = header.map(() => ({ wch: 40 }))
+  const workbook = XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(workbook, worksheet, 'Component Matrix')
+  XLSX.writeFile(workbook, 'component_matrix.xlsx')
+}
+
+onMounted(() => {
+  fetchRepositories()
+  fetchImages()
+})
 </script>
 
 <style scoped>

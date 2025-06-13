@@ -1,0 +1,131 @@
+/* Component Matrix styles */
+.table-responsive {
+    margin-top: 1rem;
+}
+
+#componentMatrix {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+#componentMatrix th,
+#componentMatrix td {
+    padding: 0.5rem;
+    border: 1px solid #dee2e6;
+    vertical-align: middle;
+}
+
+#componentMatrix th {
+    background-color: #f8f9fa;
+    font-weight: 600;
+    text-align: center;
+    position: sticky;
+    top: 0;
+    z-index: 1;
+}
+
+#componentMatrix th:first-child {
+    text-align: left;
+    position: sticky;
+    left: 0;
+    z-index: 2;
+    background-color: #f8f9fa;
+}
+
+#componentMatrix td:first-child {
+    position: sticky;
+    left: 0;
+    background-color: #fff;
+    z-index: 1;
+    font-weight: 500;
+}
+
+#componentMatrix tr:hover td:first-child {
+    background-color: #f8f9fa;
+}
+
+/* Version cell styles */
+.version-cell {
+    text-align: center;
+}
+
+.version-cell .text-danger {
+    color: #dc3545;
+}
+
+.version-cell .text-warning {
+    color: #ffc107;
+}
+
+/* Select2 customization */
+.select2-container {
+    width: 100% !important;
+}
+
+.select2-container--default .select2-selection--multiple {
+    border-color: #ced4da;
+}
+
+.select2-container--default.select2-container--focus .select2-selection--multiple {
+    border-color: #80bdff;
+    box-shadow: 0 0 0 0.2rem rgba(0, 123, 255, 0.25);
+}
+
+/* Card styles */
+.card {
+    box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+}
+
+.card-body {
+    padding: 1.25rem;
+}
+
+/* Form styles */
+.form-group {
+    margin-bottom: 1rem;
+}
+
+.form-group label {
+    font-weight: 500;
+    margin-bottom: 0.5rem;
+}
+
+/* Button styles */
+.btn-primary {
+    background-color: #007bff;
+    border-color: #007bff;
+}
+
+.btn-primary:hover {
+    background-color: #0069d9;
+    border-color: #0062cc;
+}
+
+/* Loading indicator */
+.loading {
+    position: relative;
+}
+
+.loading::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(255, 255, 255, 0.8);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+}
+
+.loading::before {
+    content: 'Loading...';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 1001;
+    font-weight: 500;
+} 
