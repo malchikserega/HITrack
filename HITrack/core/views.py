@@ -11,7 +11,7 @@ from .serializers import (
     RepositoryListSerializer, RepositoryTagListSerializer, ComponentVersionListSerializer,
     HasACRRegistryResponseSerializer, ListACRRegistriesResponseSerializer,
     StatsResponseSerializer, JobAddRepositoriesRequestSerializer,
-    JobAddRepositoriesResponseSerializer
+    JobAddRepositoriesResponseSerializer, ImageDropdownSerializer
 )
 from django.db import models
 from .pagination import CustomPageNumberPagination
@@ -23,6 +23,7 @@ from rest_framework.views import APIView
 from django.http import HttpResponse
 from openpyxl import Workbook
 from core.models import ComponentVersionVulnerability
+from django.shortcuts import render
 
 # Create your views here.
 
@@ -265,6 +266,8 @@ class ImageViewSet(BaseViewSet):
     pagination_class = CustomPageNumberPagination
 
     def get_serializer_class(self):
+        if self.action == 'list' and self.request and self.request.query_params.get('dropdown') == '1':
+            return ImageDropdownSerializer
         if self.action == 'list':
             return ImageListSerializer
         return ImageSerializer
@@ -658,84 +661,140 @@ class ComponentMatrixView(APIView):
 
     def post(self, request):
         """
-        Generate a component matrix for selected repositories.
-        Returns JSON: columns are repo:tag, rows are components, cells are versions.
+        Generate a component matrix for selected repositories or images.
+        Returns JSON: columns are repo:tag or image names, rows are components, cells are versions.
+        
+        Request body:
+        {
+            "type": "repository" | "image",  # Type of comparison
+            "repository_uuids": ["uuid1", "uuid2"],  # For repository comparison
+            "image_uuids": ["uuid1", "uuid2"]  # For image comparison
+        }
         """
+        comparison_type = request.data.get('type', 'repository')
         repo_uuids = request.data.get('repository_uuids', [])
-        if not repo_uuids:
-            return Response({'error': 'No repositories selected'}, status=400)
+        image_uuids = request.data.get('image_uuids', [])
 
-        # Get latest tag for each repo with a single query
+        if comparison_type == 'repository' and not repo_uuids:
+            return Response({'error': 'No repositories selected'}, status=400)
+        elif comparison_type == 'image' and not image_uuids:
+            return Response({'error': 'No images selected'}, status=400)
+
+        # Get all relevant data with a single query
         from core.models import Repository, RepositoryTag, Image, ComponentVersion, ComponentVersionVulnerability
         from django.db.models import Max, Prefetch, Subquery, OuterRef
 
-        # Get all relevant tags with their repositories in one query
-        tags = RepositoryTag.objects.filter(
-            repository__uuid__in=repo_uuids
-        ).select_related('repository').order_by('repository__uuid', '-tag')
+        if comparison_type == 'repository':
+            # Get all relevant tags with their repositories in one query
+            tags = RepositoryTag.objects.filter(
+                repository__uuid__in=repo_uuids
+            ).select_related('repository').order_by('repository__uuid', '-tag')
 
-        # Group tags by repository to get the latest tag for each
-        latest_tags = {}
-        for tag in tags:
-            if tag.repository.uuid not in latest_tags:
-                latest_tags[tag.repository.uuid] = tag
+            # Group tags by repository to get the latest tag for each
+            latest_tags = {}
+            for tag in tags:
+                if tag.repository.uuid not in latest_tags:
+                    latest_tags[tag.repository.uuid] = tag
 
-        # Get all relevant images with SBOM in one query
-        images = Image.objects.filter(
-            repository_tags__in=latest_tags.values(),
-            sbom_data__isnull=False
-        ).prefetch_related(
-            Prefetch(
-                'repository_tags',
-                queryset=RepositoryTag.objects.select_related('repository')
-                .order_by('-tag')
-                .only('tag', 'repository__name', 'repository__uuid')[:1],  # Get only the latest tag
-                to_attr='latest_tag'
-            ),
-            Prefetch(
+            # Get all relevant images with SBOM in one query
+            images = Image.objects.filter(
+                repository_tags__in=latest_tags.values(),
+                sbom_data__isnull=False
+            ).prefetch_related(
+                Prefetch(
+                    'repository_tags',
+                    queryset=RepositoryTag.objects.select_related('repository')
+                    .order_by('-tag')
+                    .only('tag', 'repository__name', 'repository__uuid')[:1],  # Get only the latest tag
+                    to_attr='latest_tag'
+                ),
+                Prefetch(
+                    'component_versions',
+                    queryset=ComponentVersion.objects.select_related('component')
+                )
+            ).order_by('-updated_at')
+
+            # Group images by repository to get the latest image for each
+            latest_images = {}
+            for image in images:
+                # Get the latest repository tag for this image
+                if not hasattr(image, 'latest_tag') or not image.latest_tag:
+                    continue
+                    
+                repo_tag = image.latest_tag[0]  # We know there's only one tag due to [:1]
+                repo_uuid = repo_tag.repository.uuid
+                
+                if repo_uuid not in latest_images:
+                    latest_images[repo_uuid] = image
+
+            # Build columns and collect all component versions in one go
+            columns = []
+            component_set = set()
+            image_components = {}
+            
+            for repo_uuid, image in latest_images.items():
+                if repo_uuid not in latest_tags:
+                    continue
+                    
+                tag = latest_tags[repo_uuid]
+                col_label = f"{tag.repository.name}:{tag.tag}"
+                columns.append({
+                    'repo': tag.repository.name,
+                    'tag': tag.tag,
+                    'label': col_label,
+                    'type': 'repository'
+                })
+                
+                # Get all component versions for this image with their vulnerabilities
+                cvs = image.component_versions.all()
+                image_components[col_label] = {}
+                
+                for cv in cvs:
+                    cname = cv.component.name
+                    component_set.add(cname)
+                    image_components[col_label][cname] = {
+                        'version': cv.version,
+                        'has_vuln': cv.componentversionvulnerability_set.exists(),
+                        'latest_version': cv.latest_version
+                    }
+
+        else:  # comparison_type == 'image'
+            # Get all relevant images with SBOM in one query
+            images = Image.objects.filter(
+                uuid__in=image_uuids,
+                sbom_data__isnull=False
+            ).prefetch_related(
                 'component_versions',
-                queryset=ComponentVersion.objects.select_related('component')
-            )
-        ).order_by('-updated_at')
+                'component_versions__component',
+                'component_versions__componentversionvulnerability_set'
+            ).order_by('-updated_at')
 
-        # Group images by repository to get the latest image for each
-        latest_images = {}
-        for image in images:
-            # Get the latest repository tag for this image
-            if not hasattr(image, 'latest_tag') or not image.latest_tag:
-                continue
+            # Build columns and collect all component versions in one go
+            columns = []
+            component_set = set()
+            image_components = {}
+            
+            for image in images:
+                col_label = image.name
+                columns.append({
+                    'name': image.name,
+                    'digest': image.digest,
+                    'label': col_label,
+                    'type': 'image'
+                })
                 
-            repo_tag = image.latest_tag[0]  # We know there's only one tag due to [:1]
-            repo_uuid = repo_tag.repository.uuid
-            
-            if repo_uuid not in latest_images:
-                latest_images[repo_uuid] = image
-
-        # Build columns and collect all component versions in one go
-        columns = []
-        component_set = set()
-        image_components = {}
-        
-        for repo_uuid, image in latest_images.items():
-            if repo_uuid not in latest_tags:
-                continue
+                # Get all component versions for this image with their vulnerabilities
+                cvs = image.component_versions.all()
+                image_components[col_label] = {}
                 
-            tag = latest_tags[repo_uuid]
-            col_label = f"{tag.repository.name}:{tag.tag}"
-            columns.append({'repo': tag.repository.name, 'tag': tag.tag, 'label': col_label})
-            
-            # Get all component versions for this image with their vulnerabilities
-            cvs = image.component_versions.all()
-            image_components[col_label] = {}
-            
-            for cv in cvs:
-                cname = cv.component.name
-                component_set.add(cname)
-                image_components[col_label][cname] = {
-                    'version': cv.version,
-                    'has_vuln': cv.componentversionvulnerability_set.exists(),
-                    'latest_version': cv.latest_version
-                }
+                for cv in cvs:
+                    cname = cv.component.name
+                    component_set.add(cname)
+                    image_components[col_label][cname] = {
+                        'version': cv.version,
+                        'has_vuln': cv.componentversionvulnerability_set.exists(),
+                        'latest_version': cv.latest_version
+                    }
 
         components = sorted(component_set)
 
@@ -753,5 +812,6 @@ class ComponentMatrixView(APIView):
         return Response({
             'components': components,
             'columns': columns,
-            'matrix': matrix
+            'matrix': matrix,
+            'type': comparison_type
         })

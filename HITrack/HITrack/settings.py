@@ -180,8 +180,8 @@ REST_FRAMEWORK = {
         'rest_framework.throttling.UserRateThrottle'
     ],
     'DEFAULT_THROTTLE_RATES': {
-        'anon': '10/day',
-        'user': '1000/day'
+        'anon': '1000/day',
+        'user': '10000/day'
     },
     'EXCEPTION_HANDLER': 'rest_framework.views.exception_handler',
     'DEFAULT_TIMEOUT': TIMEOUT,
