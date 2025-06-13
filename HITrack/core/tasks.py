@@ -1256,11 +1256,11 @@ def process_single_tag(tag_uuid: str):
         }
 
 @celery_app.task()
-def delete_old_repository_tags():
+def delete_old_repository_tags(days: int = 1):
     """
-    Delete all RepositoryTag objects older than 2 days.
+    Delete all RepositoryTag objects older than `days` days.
     """
     from .models import RepositoryTag
-    cutoff = timezone.now() - timedelta(days=1)
+    cutoff = timezone.now() - timedelta(days=days)
     deleted_count, _ = RepositoryTag.objects.filter(created_at__lt=cutoff).delete()
-    return f"Deleted {deleted_count} old repository tags"
+    return f"Deleted {deleted_count} old repository tags older than {days} days"
