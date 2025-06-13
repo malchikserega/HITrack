@@ -3,6 +3,8 @@ from __future__ import absolute_import, unicode_literals
 from hitrack_celery.celery import celery_app
 import logging
 import re
+from datetime import timedelta
+from django.utils import timezone
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -1252,3 +1254,13 @@ def process_single_tag(tag_uuid: str):
             "status": "error",
             "error": str(e)
         }
+
+@celery_app.task()
+def delete_old_repository_tags():
+    """
+    Delete all RepositoryTag objects older than 2 days.
+    """
+    from .models import RepositoryTag
+    cutoff = timezone.now() - timedelta(days=1)
+    deleted_count, _ = RepositoryTag.objects.filter(created_at__lt=cutoff).delete()
+    return f"Deleted {deleted_count} old repository tags"
