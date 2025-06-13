@@ -784,40 +784,71 @@ def update_components_latest_versions(image_uuid: str):
 def process_grype_scan_results(image_uuid: str, scan_results: dict):
     """
     Process Grype scan results for an image and update the database with vulnerability information.
-    
-    This function:
-    1. Creates new vulnerabilities if they don't exist
-    2. Updates existing vulnerabilities if they already exist
-    3. Links vulnerabilities to component versions through ComponentVersionVulnerability
-    4. Links component versions to images
-    
-    A vulnerability can be linked to multiple component versions,
-    and a component version can have multiple vulnerabilities.
-    
-    Args:
-        image_uuid (str): UUID of the Image to process
-        scan_results (dict): Grype scan results in JSON format
+    Optimized for bulk operations and safe parallel execution.
     """
     from .models import Image, Component, ComponentVersion, Vulnerability, ComponentVersionVulnerability
+    from django.db import IntegrityError
     import logging
 
     logger = logging.getLogger(__name__)
     logger.info(f"Processing Grype scan results for image {image_uuid}")
 
     try:
-        # Get the image
         image = Image.objects.get(uuid=image_uuid)
-        
-        # Process each match (vulnerability) in the scan results
-        for match in scan_results.get('matches', []):
-            # Extract vulnerability information
+        matches = scan_results.get('matches', [])
+
+        # Collect unique names/versions/ids
+        component_names = set()
+        component_versions_set = set()
+        vuln_ids = set()
+        for match in matches:
+            artifact = match.get('artifact', {})
+            component_name = artifact.get('name')
+            component_version = artifact.get('version')
+            if component_name:
+                component_names.add(component_name)
+            if component_name and component_version:
+                component_versions_set.add((component_name, component_version))
+            vulnerability_data = match.get('vulnerability', {})
+            vuln_id = vulnerability_data.get('id', '')
+            if vuln_id:
+                vuln_ids.add(vuln_id)
+
+        # Bulk create Components
+        existing_components = {c.name: c for c in Component.objects.filter(name__in=component_names)}
+        new_components = [Component(name=name) for name in component_names if name not in existing_components]
+        Component.objects.bulk_create(new_components, ignore_conflicts=True)
+        # Refresh cache
+        existing_components = {c.name: c for c in Component.objects.filter(name__in=component_names)}
+
+        # Bulk create Vulnerabilities
+        existing_vulns = {v.vulnerability_id: v for v in Vulnerability.objects.filter(vulnerability_id__in=vuln_ids)}
+        new_vulns = [Vulnerability(vulnerability_id=vid) for vid in vuln_ids if vid not in existing_vulns]
+        Vulnerability.objects.bulk_create(new_vulns, ignore_conflicts=True)
+        existing_vulns = {v.vulnerability_id: v for v in Vulnerability.objects.filter(vulnerability_id__in=vuln_ids)}
+
+        # Bulk create ComponentVersions
+        existing_versions = {(cv.component.name, cv.version): cv for cv in ComponentVersion.objects.filter(
+            component__name__in=component_names,
+            version__in=[v for _, v in component_versions_set]
+        ).select_related('component')}
+        new_versions = [
+            ComponentVersion(component=existing_components[name], version=version)
+            for (name, version) in component_versions_set if (name, version) not in existing_versions
+        ]
+        ComponentVersion.objects.bulk_create(new_versions, ignore_conflicts=True)
+        existing_versions = {(cv.component.name, cv.version): cv for cv in ComponentVersion.objects.filter(
+            component__name__in=component_names,
+            version__in=[v for _, v in component_versions_set]
+        ).select_related('component')}
+
+        # Process each match
+        for match in matches:
             vulnerability_data = match.get('vulnerability', {})
             vuln_id = vulnerability_data.get('id', '')
             severity = vulnerability_data.get('severity', 'UNKNOWN').upper()
             description = vulnerability_data.get('description', '')
-            
-            # Determine vulnerability type from ID
-            vuln_type = 'CVE'  # Default type
+            vuln_type = 'CVE'
             if vuln_id.startswith('GHSA-'):
                 vuln_type = 'GHSA'
             elif vuln_id.startswith('RUSTSEC-'):
@@ -826,29 +857,21 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
                 vuln_type = 'PYSEC'
             elif vuln_id.startswith('NPM-'):
                 vuln_type = 'NPM'
-            # Add more vulnerability types as needed
-            
-            # Extract EPSS score - handle both old and new format
             epss_score = 0.0
             epss_data = vulnerability_data.get('epss', [])
             if isinstance(epss_data, list) and epss_data:
-                # New format: list of EPSS data
                 epss_score = epss_data[0].get('epss', 0.0)
             elif isinstance(epss_data, (int, float)):
-                # Old format: direct number
                 epss_score = float(epss_data)
-            
-            # Extract fix info from Grype report
             fix_data = vulnerability_data.get('fix', {})
             fix_versions = fix_data.get('versions', []) if isinstance(fix_data, dict) else []
             fix_state = fix_data.get('state', '') if isinstance(fix_data, dict) else ''
-            # fixable is True if there are fix versions, or state is present and not 'wont-fix'/'not-fixed' (case-insensitive)
             fixable = bool(fix_versions) or (bool(fix_state) and fix_state.lower() not in ['wont-fix', 'not-fixed', ''])
-            fixable = bool(fixable)  # Ensure only True/False
+            fixable = bool(fixable)
             fix_str = ', '.join(fix_versions) if fix_versions else (fix_state or '')
-            
-            # Get or create vulnerability using the new field names
-            vulnerability, created = Vulnerability.objects.get_or_create(
+
+            # Get or create vulnerability (safe for parallel)
+            vulnerability, _ = Vulnerability.objects.get_or_create(
                 vulnerability_id=vuln_id,
                 defaults={
                     'vulnerability_type': vuln_type,
@@ -857,89 +880,84 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
                     'epss': epss_score
                 }
             )
-            
-            # Update vulnerability if it already existed
-            if not created:
+            # Update fields if needed
+            updated = False
+            if vulnerability.severity != severity:
                 vulnerability.severity = severity
+                updated = True
+            if vulnerability.description != description:
                 vulnerability.description = description
+                updated = True
+            if vulnerability.epss != epss_score:
                 vulnerability.epss = epss_score
+                updated = True
+            if updated:
                 vulnerability.save()
-                # logger.info(f"Updated existing vulnerability {vuln_id}")
-            else:
-                logger.info(f"Created new vulnerability {vuln_id} of type {vuln_type}")
-            
-            # Get the affected component information
+
             artifact = match.get('artifact', {})
             component_name = artifact.get('name')
             component_type = artifact.get('type', 'unknown')
             component_version = artifact.get('version')
             purl = artifact.get('purl')
-            
+            cpes = artifact.get('cpes', [])
+
             if component_name and component_version:
-                # Get or create component
-                component, component_created = Component.objects.get_or_create(
+                # Get or create component (safe for parallel)
+                component, _ = Component.objects.get_or_create(
                     name=component_name,
-                    defaults={
-                        'type': component_type
-                    }
+                    defaults={'type': component_type}
                 )
-                
-                if component_created:
-                    logger.info(f"Created new component {component_name}")
-                
-                # Get or create component version
-                component_version_obj, version_created = ComponentVersion.objects.get_or_create(
+                # Update type if needed
+                if component.type == 'unknown' and component_type != 'unknown':
+                    component.type = component_type
+                    component.save()
+                # Get or create component version (safe for parallel)
+                component_version_obj, _ = ComponentVersion.objects.get_or_create(
                     version=component_version,
                     component=component,
-                    defaults={
-                        'purl': purl,
-                        'cpes': artifact.get('cpes', [])
-                    }
+                    defaults={'purl': purl, 'cpes': cpes}
                 )
-                
-                if version_created:
-                    logger.info(f"Created new version {component_version} for component {component_name}")
-                else:
-                    # Update purl and cpes if they are missing
-                    if (purl and not component_version_obj.purl) or \
-                       (artifact.get('cpes') and not component_version_obj.cpes):
-                        component_version_obj.purl = purl or component_version_obj.purl
-                        component_version_obj.cpes = artifact.get('cpes', []) or component_version_obj.cpes
-                        component_version_obj.save()
-                        logger.info(f"Updated purl/cpes for version {component_version} of component {component_name}")
-                
-                # Link component version to image if not already linked
-                if image not in component_version_obj.images.all():
+                # Update purl/cpes if needed
+                updated = False
+                if purl and not component_version_obj.purl:
+                    component_version_obj.purl = purl
+                    updated = True
+                if cpes and not component_version_obj.cpes:
+                    component_version_obj.cpes = cpes
+                    updated = True
+                if updated:
+                    component_version_obj.save()
+                # Link image to component version
+                if not component_version_obj.images.filter(pk=image.pk).exists():
                     component_version_obj.images.add(image)
                     logger.info(f"Linked component version {component_version} to image {image.name}")
-                
-                # Create or update the through model relationship with fix information
-                cvv, cvv_created = ComponentVersionVulnerability.objects.get_or_create(
+                # Get or create CVV (safe for parallel)
+                cvv, _ = ComponentVersionVulnerability.objects.get_or_create(
                     component_version=component_version_obj,
                     vulnerability=vulnerability,
-                    defaults={
-                        'fixable': fixable,
-                        'fix': fix_str
-                    }
+                    defaults={'fixable': fixable, 'fix': fix_str}
                 )
-                
-                if not cvv_created:
-                    # Update fix information if it already existed
-                    cvv.fixable = fixable
-                    cvv.fix = fix_str
-                    cvv.save()
-                
-        # Update image scan status
+                # Update fix info if needed
+                if not _:
+                    updated = False
+                    if cvv.fixable != fixable:
+                        cvv.fixable = fixable
+                        updated = True
+                    if cvv.fix != fix_str:
+                        cvv.fix = fix_str
+                        updated = True
+                    if updated:
+                        cvv.save()
+
         image.scan_status = 'success'
         image.save()
-        
         logger.info(f"Successfully processed Grype scan results for image {image_uuid}")
         return {
             "status": "success",
             "image_uuid": str(image_uuid),
-            "vulnerabilities_processed": len(scan_results.get('matches', []))
+            "vulnerabilities_processed": len(matches)
         }
-        
+
     except Image.DoesNotExist:
         logger.error(f"Image with UUID {image_uuid} not found")
         return {
@@ -948,9 +966,12 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
         }
     except Exception as e:
         logger.error(f"Error processing Grype scan results for image {image_uuid}: {str(e)}")
-        if image:
+        try:
+            image = Image.objects.get(uuid=image_uuid)
             image.scan_status = 'error'
             image.save()
+        except Exception:
+            pass
         return {
             "status": "error",
             "error": str(e)
