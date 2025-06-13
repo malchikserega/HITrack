@@ -671,67 +671,46 @@ def update_components_latest_versions(image_uuid: str):
     start_time = time.time()
 
     try:
-        # Get image with prefetched related data
-        image = Image.objects.prefetch_related(
-            'component_versions'
-        ).get(uuid=image_uuid)
-        
-        # Get all component versions for this image
+        image = Image.objects.prefetch_related('component_versions').get(uuid=image_uuid)
         component_versions = image.component_versions.all()
-        
         logger.info(f"Found {component_versions.count()} component versions to process")
-        
         updated_count = 0
         for component_version in component_versions:
             try:
                 if not component_version.purl:
                     logger.debug(f"No PURL found for component version {component_version.component.name}:{component_version.version}")
                     continue
-                
                 logger.debug(f"Processing component version {component_version.component.name}:{component_version.version}")
-                
-                # Parse PURL
                 parts = component_version.purl.split("/")
                 if len(parts) < 2:
                     continue
-                    
                 package_type = parts[0].split(":")[1] if ":" in parts[0] else None
                 if not package_type:
                     continue
-                    
-                # Extract package name and normalize it
                 package_name = parts[1].lower()
                 if len(parts) > 2:
                     package_name = f"{package_name}/{parts[2].lower()}"
-                    
-                # Remove version from package name if present (for NuGet)
                 if "@" in package_name:
                     package_name = package_name.split("@")[0]
-                    
                 logger.debug(f"Processing PURL: {component_version.purl}")
                 logger.debug(f"Package type: {package_type}, Package name: {package_name}")
-                
-                # Get latest version based on package type
                 latest_version = None
                 if package_type == "pypi":
                     url = f"https://pypi.org/pypi/{package_name}/json"
                     r = requests.get(url, timeout=5)
                     if r.ok:
                         latest_version = r.json()["info"]["version"]
-                        
                 elif package_type == "npm":
                     url = f"https://registry.npmjs.org/{package_name}"
                     r = requests.get(url, timeout=5)
                     if r.ok:
                         latest_version = r.json()["dist-tags"]["latest"]
-                        
                 elif package_type == "nuget":
                     url = f"https://api.nuget.org/v3-flatcontainer/{package_name}/index.json"
                     r = requests.get(url, timeout=5)
                     if r.ok:
                         versions = r.json().get("versions", [])
                         latest_version = versions[-1] if versions else None
-                        
                 elif package_type == "deb":
                     try:
                         output = subprocess.check_output(["apt-cache", "policy", package_name], text=True, timeout=5)
@@ -741,16 +720,13 @@ def update_components_latest_versions(image_uuid: str):
                                 break
                     except Exception:
                         continue
-                        
                 elif package_type == "golang":
                     if package_name == "stdlib":
                         url = "https://golang.org/dl/?mode=json"
                         r = requests.get(url, timeout=5)
                         if r.ok:
                             versions = r.json()
-                            stable_versions = [v['version'] for v in versions 
-                                             if not v['version'].endswith('beta') 
-                                             and not v['version'].endswith('rc')]
+                            stable_versions = [v['version'] for v in versions if not v['version'].endswith('beta') and not v['version'].endswith('rc')]
                             if stable_versions:
                                 latest_version = max(stable_versions).replace('go', '')
                     else:
@@ -759,28 +735,38 @@ def update_components_latest_versions(image_uuid: str):
                         if r.ok:
                             data = r.json()
                             latest_version = data.get('Version', '').replace('v', '')
-                
                 if latest_version:
-                    component_version.latest_version = latest_version
-                    component_version.save()
-                    updated_count += 1
-                    logger.info(f"Updated latest version for {component_version.component.name}:{component_version.version} to {latest_version}")
-
+                    now = timezone.now()
+                    # Only update if never updated or more than 4 days have passed
+                    if (
+                        not component_version.latest_version_updated_at or
+                        (now - component_version.latest_version_updated_at).days > 4
+                    ):
+                        component_version.latest_version = latest_version
+                        component_version.latest_version_updated_at = now
+                        component_version.save()
+                        updated_count += 1
+                        logger.info(
+                            f"Updated latest version for {component_version.component.name}:{component_version.version} to {latest_version} (updated_at={now})"
+                        )
+                    else:
+                        logger.info(
+                            f"Skipped update for {component_version.component.name}:{component_version.version} (last updated {component_version.latest_version_updated_at})"
+                        )
             except Exception as e:
-                logger.warning(f"Error processing component version {component_version.component.name}:{component_version.version}: {str(e)}")
+                logger.warning(
+                    f"Error processing component version {component_version.component.name}:{component_version.version}: {str(e)}"
+                )
                 continue
-        
         total_time = time.time() - start_time
         logger.info(f"Latest versions update completed in {total_time:.2f} seconds")
         logger.info(f"Updated latest versions for {updated_count} component versions")
-        
         return {
             "status": "success",
             "image_uuid": str(image_uuid),
             "component_versions_updated": updated_count,
             "processing_time": total_time
         }
-        
     except Image.DoesNotExist:
         logger.error(f"Image with UUID {image_uuid} not found")
         return {

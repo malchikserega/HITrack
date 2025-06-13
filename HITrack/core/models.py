@@ -125,7 +125,8 @@ class Component(models.Model):
 class ComponentVersion(models.Model):
     uuid = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     version = models.CharField(max_length=255)
-    latest_version = models.CharField(max_length=255, null=True, blank=True)
+    latest_version = models.CharField(max_length=255, blank=True, null=True)
+    latest_version_updated_at = models.DateTimeField(null=True, blank=True)
     component = models.ForeignKey(Component, on_delete=models.CASCADE, related_name='versions', to_field='uuid')
     images = models.ManyToManyField(Image, related_name='component_versions', blank=True)
     # Use through model to store fixable/fix for each ComponentVersion+Vulnerability pair
