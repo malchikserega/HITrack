@@ -677,6 +677,16 @@ def update_components_latest_versions(image_uuid: str):
         updated_count = 0
         for component_version in component_versions:
             try:
+                now = timezone.now()
+                # Skip update if already updated within the last 4 days
+                if (
+                    component_version.latest_version_updated_at and
+                    (now - component_version.latest_version_updated_at).days <= 4
+                ):
+                    logger.info(
+                        f"Skipped update for {component_version.component.name}:{component_version.version} (last updated {component_version.latest_version_updated_at})"
+                    )
+                    continue
                 if not component_version.purl:
                     logger.debug(f"No PURL found for component version {component_version.component.name}:{component_version.version}")
                     continue
@@ -736,23 +746,13 @@ def update_components_latest_versions(image_uuid: str):
                             data = r.json()
                             latest_version = data.get('Version', '').replace('v', '')
                 if latest_version:
-                    now = timezone.now()
-                    # Only update if never updated or more than 4 days have passed
-                    if (
-                        not component_version.latest_version_updated_at or
-                        (now - component_version.latest_version_updated_at).days > 4
-                    ):
-                        component_version.latest_version = latest_version
-                        component_version.latest_version_updated_at = now
-                        component_version.save()
-                        updated_count += 1
-                        logger.info(
-                            f"Updated latest version for {component_version.component.name}:{component_version.version} to {latest_version} (updated_at={now})"
-                        )
-                    else:
-                        logger.info(
-                            f"Skipped update for {component_version.component.name}:{component_version.version} (last updated {component_version.latest_version_updated_at})"
-                        )
+                    component_version.latest_version = latest_version
+                    component_version.latest_version_updated_at = now
+                    component_version.save()
+                    updated_count += 1
+                    logger.info(
+                        f"Updated latest version for {component_version.component.name}:{component_version.version} to {latest_version} (updated_at={now})"
+                    )
             except Exception as e:
                 logger.warning(
                     f"Error processing component version {component_version.component.name}:{component_version.version}: {str(e)}"
