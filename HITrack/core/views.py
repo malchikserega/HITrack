@@ -269,6 +269,26 @@ class ImageViewSet(BaseViewSet):
             return ImageListSerializer
         return ImageSerializer
 
+    @action(detail=True, methods=['post'])
+    def update_latest_versions(self, request, uuid=None):
+        """
+        Update latest versions for all components in this image.
+        This will check all package registries for the latest available versions.
+        """
+        image = self.get_object()
+        try:
+            from .tasks import update_components_latest_versions
+            update_components_latest_versions.delay(str(image.uuid))
+            return Response({
+                'status': 'success',
+                'message': 'Latest versions update scheduled successfully'
+            })
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
     @action(detail=True, methods=['get'])
     def vulnerabilities(self, request, pk=None):
         image = self.get_object()
@@ -713,7 +733,8 @@ class ComponentMatrixView(APIView):
                 component_set.add(cname)
                 image_components[col_label][cname] = {
                     'version': cv.version,
-                    'has_vuln': cv.componentversionvulnerability_set.exists()
+                    'has_vuln': cv.componentversionvulnerability_set.exists(),
+                    'latest_version': cv.latest_version
                 }
 
         components = sorted(component_set)
@@ -727,7 +748,7 @@ class ComponentMatrixView(APIView):
                 if col_label in image_components and cname in image_components[col_label]:
                     matrix[cname][col_label] = image_components[col_label][cname]
                 else:
-                    matrix[cname][col_label] = {'version': '', 'has_vuln': False}
+                    matrix[cname][col_label] = {'version': '', 'has_vuln': False, 'latest_version': None}
 
         return Response({
             'components': components,

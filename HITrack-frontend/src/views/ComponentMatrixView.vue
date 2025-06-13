@@ -38,15 +38,53 @@
                   <tbody>
                     <tr v-for="component in matrixData.components" :key="component">
                       <td class="sticky-col">{{ component }}</td>
-                      <td v-for="col in matrixData.columns" :key="col.label">
-                        <v-chip
-                          v-if="matrixData.matrix[component][col.label].version"
-                          :color="matrixData.matrix[component][col.label].has_vuln ? 'error' : 'primary'"
-                          size="small"
-                          class="font-weight-medium"
-                        >
-                          {{ matrixData.matrix[component][col.label].version }}
-                        </v-chip>
+                      <td
+                        v-for="col in matrixData.columns"
+                        :key="col.label"
+                        :class="getCellBgClass(matrixData.matrix[component][col.label])"
+                      >
+                        <div class="d-flex align-center justify-center">
+                          <v-chip
+                            v-if="matrixData.matrix[component][col.label].version"
+                            color="primary"
+                            size="small"
+                            class="font-weight-medium mr-1"
+                          >
+                            {{ matrixData.matrix[component][col.label].version }}
+                            <v-tooltip v-if="matrixData.matrix[component][col.label].has_vuln" location="top">
+                              <template #activator="{ props }">
+                                <v-icon
+                                  v-bind="props"
+                                  color="error"
+                                  size="x-small"
+                                  class="ml-1"
+                                  style="vertical-align: middle;"
+                                >
+                                  mdi-spider
+                                </v-icon>
+                              </template>
+                              Vulnerable
+                            </v-tooltip>
+                          </v-chip>
+                          <v-tooltip v-if="matrixData.matrix[component][col.label].version && matrixData.matrix[component][col.label].latest_version" location="top">
+                            <template #activator="{ props }">
+                              <v-icon
+                                v-if="matrixData.matrix[component][col.label].latest_version"
+                                v-bind="props"
+                                :color="getVersionStatusColor(matrixData.matrix[component][col.label])"
+                                size="small"
+                              >
+                                {{ getVersionStatusIcon(matrixData.matrix[component][col.label]) }}
+                              </v-icon>
+                            </template>
+                            <span v-if="matrixData.matrix[component][col.label].version !== matrixData.matrix[component][col.label].latest_version">
+                              New version available: {{ matrixData.matrix[component][col.label].latest_version }}
+                            </span>
+                            <span v-else>
+                              Version is up to date
+                            </span>
+                          </v-tooltip>
+                        </div>
                       </td>
                     </tr>
                   </tbody>
@@ -81,6 +119,26 @@ const fetchRepositories = async () => {
   } finally {
     reposLoading.value = false
   }
+}
+
+const getCellBgClass = (versionData: any) => {
+  if (!versionData || !versionData.version || !versionData.latest_version) return ''
+  if (versionData.version === versionData.latest_version) {
+    return 'cell-up-to-date'
+  }
+  return 'cell-outdated'
+}
+
+const getVersionStatusColor = (versionData: any) => {
+  if (!versionData.latest_version) return ''
+  if (versionData.version === versionData.latest_version) return 'success'
+  return 'error'
+}
+
+const getVersionStatusIcon = (versionData: any) => {
+  if (!versionData.latest_version) return ''
+  if (versionData.version === versionData.latest_version) return 'mdi-check'
+  return 'mdi-arrow-up-bold'
 }
 
 const fetchMatrix = async () => {
@@ -120,11 +178,11 @@ onMounted(fetchRepositories)
 .matrix-table {
   border-collapse: collapse;
   font-size: 0.65rem;
-  min-width: 200px;
+  min-width: 250px;
 }
 .matrix-table th, .matrix-table td {
   border: 1px solid #e0e0e0;
-  padding: 4px 3px;
+  padding: 4px 10px;
   text-align: center;
   white-space: nowrap;
 }
@@ -145,5 +203,11 @@ onMounted(fetchRepositories)
 }
 .matrix-table tr:hover td {
   background: #f5f5f5;
+}
+.cell-up-to-date {
+  background-color: #e8f5e9 !important;
+}
+.cell-outdated {
+  background-color: #ffebee !important;
 }
 </style> 

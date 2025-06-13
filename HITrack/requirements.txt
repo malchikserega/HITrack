@@ -17,4 +17,5 @@ django-filter
 redis
 gunicorn
 openpyxl
+packaging
 xlsxwriter

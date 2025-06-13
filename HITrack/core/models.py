@@ -115,18 +115,17 @@ class Component(models.Model):
     uuid = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=255)
     type = models.CharField(max_length=50, default='unknown')
-    purl = models.CharField(max_length=255, blank=True, null=True)
-    cpes = models.JSONField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
-        return self.name
+        return f"{self.name} ({self.type})"
 
 
 class ComponentVersion(models.Model):
     uuid = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     version = models.CharField(max_length=255)
+    latest_version = models.CharField(max_length=255, null=True, blank=True)
     component = models.ForeignKey(Component, on_delete=models.CASCADE, related_name='versions', to_field='uuid')
     images = models.ManyToManyField(Image, related_name='component_versions', blank=True)
     # Use through model to store fixable/fix for each ComponentVersion+Vulnerability pair
@@ -136,6 +135,8 @@ class ComponentVersion(models.Model):
         related_name='component_versions',
         blank=True
     )
+    purl = models.CharField(max_length=512, null=True, blank=True)
+    cpes = models.JSONField(default=list, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

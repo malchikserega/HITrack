@@ -125,6 +125,18 @@
                     </v-tooltip>
                     <v-tooltip location="top">
                       <template #activator="{ props }">
+                        <v-icon
+                          small
+                          class="mr-2"
+                          color="info"
+                          v-bind="props"
+                          @click.stop="onUpdateLatestVersions(item)"
+                        >mdi-update</v-icon>
+                      </template>
+                      <span>Update latest versions</span>
+                    </v-tooltip>
+                    <v-tooltip location="top">
+                      <template #activator="{ props }">
                         <v-icon small color="red" v-bind="props" @click.stop="onDelete(item)">mdi-delete</v-icon>
                       </template>
                       <span>Delete image</span>
@@ -431,6 +443,15 @@ const onRescan = async (img: Image) => {
     notificationService.error('Failed to rescan image')
   }
 };
+
+const onUpdateLatestVersions = async (item: Image) => {
+  try {
+    await api.post(`images/${item.uuid}/update_latest_versions/`)
+    notificationService.success('Latest versions update scheduled successfully')
+  } catch (error) {
+    notificationService.error('Failed to schedule latest versions update')
+  }
+}
 
 const formatDigest = (digest: string) => {
   if (!digest) return ''

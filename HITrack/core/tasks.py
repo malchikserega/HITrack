@@ -481,12 +481,6 @@ def parse_sbom_and_create_components(image_uuid: str):
             
             logger.info(f"Processing batch {current_batch}/{total_batches} ({len(batch)} artifacts)")
             
-            # Prepare data for bulk operations
-            components_to_create = []
-            components_to_update = []
-            component_versions_to_create = []
-            component_versions_to_update = []
-            
             # Collect unique component names and versions
             component_data = {}
             skipped_artifacts = 0
@@ -501,14 +495,18 @@ def parse_sbom_and_create_components(image_uuid: str):
                     skipped_artifacts += 1
                     continue
 
-                component_data[name] = {
-                    'name': name,
-                    'type': type,
+                if name not in component_data:
+                    component_data[name] = {
+                        'name': name,
+                        'type': type,
+                        'versions': {},
+                        'purl': purl
+                    }
+
+                component_data[name]['versions'][version] = {
                     'purl': purl,
-                    'cpes': cpes,
-                    'versions': set()
+                    'cpes': cpes
                 }
-                component_data[name]['versions'].add(version)
 
             if skipped_artifacts:
                 logger.warning(f"Skipped {skipped_artifacts} artifacts in batch {current_batch} due to missing name or version")
@@ -532,25 +530,25 @@ def parse_sbom_and_create_components(image_uuid: str):
             }
             logger.info(f"Found {len(existing_versions)} existing component versions in batch {current_batch}")
 
+            # Initialize lists for bulk operations
+            components_to_create = []
+            components_to_update = []
+            component_versions_to_create = []
+            component_versions_to_update = []
+
             # Prepare components for creation/update
             for name, data in component_data.items():
                 if name in existing_components:
                     component = existing_components[name]
                     # Update component if needed
-                    if (data['purl'] and not component.purl) or \
-                       (data['cpes'] and not component.cpes) or \
-                       (data['type'] != 'unknown' and component.type == 'unknown'):
-                        component.purl = data['purl'] or component.purl
-                        component.cpes = data['cpes'] or component.cpes
-                        component.type = data['type'] if component.type == 'unknown' else component.type
+                    if data['type'] != 'unknown' and component.type == 'unknown':
+                        component.type = data['type']
                         components_to_update.append(component)
                 else:
                     # Create new component
                     components_to_create.append(Component(
                         name=name,
-                        type=data['type'],
-                        purl=data['purl'],
-                        cpes=data['cpes']
+                        type=data['type']
                     ))
 
             logger.info(f"Prepared {len(components_to_create)} components for creation and {len(components_to_update)} for update in batch {current_batch}")
@@ -567,7 +565,7 @@ def parse_sbom_and_create_components(image_uuid: str):
                 if components_to_update:
                     Component.objects.bulk_update(
                         components_to_update,
-                        ['purl', 'cpes', 'type']
+                        ['type']
                     )
                     components_updated += len(components_to_update)
                     logger.info(f"Updated {len(components_to_update)} existing components in batch {current_batch}")
@@ -575,13 +573,23 @@ def parse_sbom_and_create_components(image_uuid: str):
                 # Prepare component versions
                 for name, data in component_data.items():
                     component = existing_components[name]
-                    for version in data['versions']:
+                    for version, version_data in data['versions'].items():
                         version_key = f"{name}:{version}"
                         if version_key not in existing_versions:
                             component_versions_to_create.append(ComponentVersion(
                                 component=component,
-                                version=version
+                                version=version,
+                                purl=version_data['purl'],
+                                cpes=version_data['cpes']
                             ))
+                        else:
+                            # Update existing version if purl or cpes are missing
+                            version_obj = existing_versions[version_key]
+                            if (version_data['purl'] and not version_obj.purl) or \
+                               (version_data['cpes'] and not version_obj.cpes):
+                                version_obj.purl = version_data['purl'] or version_obj.purl
+                                version_obj.cpes = version_data['cpes'] or version_obj.cpes
+                                component_versions_to_update.append(version_obj)
 
                 logger.info(f"Prepared {len(component_versions_to_create)} component versions for creation in batch {current_batch}")
 
@@ -601,7 +609,7 @@ def parse_sbom_and_create_components(image_uuid: str):
                 links_created = 0
                 for name, data in component_data.items():
                     component = existing_components[name]
-                    for version in data['versions']:
+                    for version, version_data in data['versions'].items():
                         version_key = f"{name}:{version}"
                         version_obj = existing_versions[version_key]
                         if version_obj not in image_versions:
@@ -640,6 +648,145 @@ def parse_sbom_and_create_components(image_uuid: str):
         }
     except Exception as e:
         logger.error(f"Error parsing SBOM for image {image_uuid}: {str(e)}")
+        return {
+            "status": "error",
+            "error": str(e)
+        }
+
+@celery_app.task()
+def update_components_latest_versions(image_uuid: str):
+    """
+    Update latest versions for all component versions in an image.
+    This task can be triggered manually through the API.
+    """
+    from .models import Image, ComponentVersion
+    import time
+    import requests
+    import subprocess
+    from packaging.version import parse as parse_version
+
+    logger.info(f"Starting latest versions update for image {image_uuid}")
+    start_time = time.time()
+
+    try:
+        # Get image with prefetched related data
+        image = Image.objects.prefetch_related(
+            'component_versions'
+        ).get(uuid=image_uuid)
+        
+        # Get all component versions for this image
+        component_versions = image.component_versions.all()
+        
+        logger.info(f"Found {component_versions.count()} component versions to process")
+        
+        updated_count = 0
+        for component_version in component_versions:
+            try:
+                if not component_version.purl:
+                    logger.debug(f"No PURL found for component version {component_version.component.name}:{component_version.version}")
+                    continue
+                
+                logger.debug(f"Processing component version {component_version.component.name}:{component_version.version}")
+                
+                # Parse PURL
+                parts = component_version.purl.split("/")
+                if len(parts) < 2:
+                    continue
+                    
+                package_type = parts[0].split(":")[1] if ":" in parts[0] else None
+                if not package_type:
+                    continue
+                    
+                # Extract package name and normalize it
+                package_name = parts[1].lower()
+                if len(parts) > 2:
+                    package_name = f"{package_name}/{parts[2].lower()}"
+                    
+                # Remove version from package name if present (for NuGet)
+                if "@" in package_name:
+                    package_name = package_name.split("@")[0]
+                    
+                logger.debug(f"Processing PURL: {component_version.purl}")
+                logger.debug(f"Package type: {package_type}, Package name: {package_name}")
+                
+                # Get latest version based on package type
+                latest_version = None
+                if package_type == "pypi":
+                    url = f"https://pypi.org/pypi/{package_name}/json"
+                    r = requests.get(url, timeout=5)
+                    if r.ok:
+                        latest_version = r.json()["info"]["version"]
+                        
+                elif package_type == "npm":
+                    url = f"https://registry.npmjs.org/{package_name}"
+                    r = requests.get(url, timeout=5)
+                    if r.ok:
+                        latest_version = r.json()["dist-tags"]["latest"]
+                        
+                elif package_type == "nuget":
+                    url = f"https://api.nuget.org/v3-flatcontainer/{package_name}/index.json"
+                    r = requests.get(url, timeout=5)
+                    if r.ok:
+                        versions = r.json().get("versions", [])
+                        latest_version = versions[-1] if versions else None
+                        
+                elif package_type == "deb":
+                    try:
+                        output = subprocess.check_output(["apt-cache", "policy", package_name], text=True, timeout=5)
+                        for line in output.splitlines():
+                            if "Candidate:" in line:
+                                latest_version = line.split(":")[1].strip()
+                                break
+                    except Exception:
+                        continue
+                        
+                elif package_type == "golang":
+                    if package_name == "stdlib":
+                        url = "https://golang.org/dl/?mode=json"
+                        r = requests.get(url, timeout=5)
+                        if r.ok:
+                            versions = r.json()
+                            stable_versions = [v['version'] for v in versions 
+                                             if not v['version'].endswith('beta') 
+                                             and not v['version'].endswith('rc')]
+                            if stable_versions:
+                                latest_version = max(stable_versions).replace('go', '')
+                    else:
+                        url = f"https://proxy.golang.org/{package_name}/@latest"
+                        r = requests.get(url, timeout=5)
+                        if r.ok:
+                            data = r.json()
+                            latest_version = data.get('Version', '').replace('v', '')
+                
+                if latest_version:
+                    component_version.latest_version = latest_version
+                    component_version.save()
+                    updated_count += 1
+                    logger.info(f"Updated latest version for {component_version.component.name}:{component_version.version} to {latest_version}")
+
+            except Exception as e:
+                logger.warning(f"Error processing component version {component_version.component.name}:{component_version.version}: {str(e)}")
+                continue
+        
+        total_time = time.time() - start_time
+        logger.info(f"Latest versions update completed in {total_time:.2f} seconds")
+        logger.info(f"Updated latest versions for {updated_count} component versions")
+        
+        return {
+            "status": "success",
+            "image_uuid": str(image_uuid),
+            "component_versions_updated": updated_count,
+            "processing_time": total_time
+        }
+        
+    except Image.DoesNotExist:
+        logger.error(f"Image with UUID {image_uuid} not found")
+        return {
+            "status": "error",
+            "error": f"Image with UUID {image_uuid} not found"
+        }
+    except Exception as e:
+        logger.error(f"Error updating latest versions for image {image_uuid}: {str(e)}")
         return {
             "status": "error",
             "error": str(e)
@@ -745,9 +892,7 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
                 component, component_created = Component.objects.get_or_create(
                     name=component_name,
                     defaults={
-                        'type': component_type,
-                        'purl': purl,
-                        'cpes': artifact.get('cpes', [])
+                        'type': component_type
                     }
                 )
                 
@@ -757,11 +902,23 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
                 # Get or create component version
                 component_version_obj, version_created = ComponentVersion.objects.get_or_create(
                     version=component_version,
-                    component=component
+                    component=component,
+                    defaults={
+                        'purl': purl,
+                        'cpes': artifact.get('cpes', [])
+                    }
                 )
                 
                 if version_created:
                     logger.info(f"Created new version {component_version} for component {component_name}")
+                else:
+                    # Update purl and cpes if they are missing
+                    if (purl and not component_version_obj.purl) or \
+                       (artifact.get('cpes') and not component_version_obj.cpes):
+                        component_version_obj.purl = purl or component_version_obj.purl
+                        component_version_obj.cpes = artifact.get('cpes', []) or component_version_obj.cpes
+                        component_version_obj.save()
+                        logger.info(f"Updated purl/cpes for version {component_version} of component {component_name}")
                 
                 # Link component version to image if not already linked
                 if image not in component_version_obj.images.all():
