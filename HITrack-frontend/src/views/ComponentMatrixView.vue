@@ -31,6 +31,51 @@
                 :disabled="reposLoading"
               />
 
+              <template v-if="comparisonType === 'repository' && selectedRepos.length > 0">
+                <v-card v-for="repo in selectedRepos" :key="repo" class="mb-4">
+                  <v-card-text>
+                    <div class="d-flex align-center mb-2">
+                      <span class="text-subtitle-1 font-weight-medium">{{ getRepoName(repo) }}</span>
+                      <v-spacer></v-spacer>
+                      <v-btn
+                        size="small"
+                        color="primary"
+                        variant="text"
+                        @click="loadTags(repo)"
+                        :loading="loadingTags[repo]"
+                      >
+                        <v-icon>mdi-refresh</v-icon>
+                      </v-btn>
+                    </div>
+                    <v-autocomplete
+                      v-model="selectedTags[repo]"
+                      :items="availableTags[repo] || []"
+                      item-title="tag"
+                      item-value="tag"
+                      label="Select tag"
+                      :loading="loadingTags[repo]"
+                      :disabled="loadingTags[repo]"
+                      clearable
+                    >
+                      <template v-slot:item="{ props, item }">
+                        <v-list-item v-bind="props">
+                          <v-chip
+                            :color="getProcessingStatusColor(item.raw.processing_status)"
+                            size="x-small"
+                            class="mr-2"
+                          >
+                            <v-icon size="x-small" class="mr-1">
+                              {{ getProcessingStatusIcon(item.raw.processing_status) }}
+                            </v-icon>
+                            Processing — {{ item.raw.processing_status }}
+                          </v-chip>
+                        </v-list-item>
+                      </template>
+                    </v-autocomplete>
+                  </v-card-text>
+                </v-card>
+              </template>
+
               <v-autocomplete
                 v-else
                 v-model="selectedImages"
@@ -186,6 +231,9 @@ const selectedImages = ref<string[]>([])
 const loading = ref(false)
 const matrixData = ref<any | null>(null)
 const searchQuery = ref('')
+const selectedTags = ref<{ [key: string]: string }>({})
+const availableTags = ref<{ [key: string]: any[] }>({})
+const loadingTags = ref<{ [key: string]: boolean }>({})
 
 // Computed property for filtered components
 const filteredComponents = computed(() => {
@@ -247,15 +295,62 @@ const getVersionStatusIcon = (versionData: any) => {
   return 'mdi-arrow-up-bold'
 }
 
+const getRepoName = (uuid: string) => {
+  const repo = repositories.value.find(r => r.uuid === uuid)
+  return repo ? repo.name : uuid
+}
+
+const loadTags = async (repoUuid: string) => {
+  loadingTags.value[repoUuid] = true
+  try {
+    const resp = await api.get(`repositories/${repoUuid}/tags-list/`)
+    availableTags.value[repoUuid] = resp.data.results || []
+  } catch (e) {
+    notificationService.error('Failed to fetch repository tags')
+    availableTags.value[repoUuid] = []
+  } finally {
+    loadingTags.value[repoUuid] = false
+  }
+}
+
+watch(selectedRepos, (newRepos, oldRepos) => {
+  // Load tags for newly selected repos
+  newRepos.forEach(repo => {
+    if (!oldRepos.includes(repo)) {
+      loadTags(repo)
+    }
+  })
+  
+  // Clear tags for unselected repos
+  oldRepos.forEach(repo => {
+    if (!newRepos.includes(repo)) {
+      delete selectedTags.value[repo]
+      delete availableTags.value[repo]
+    }
+  })
+})
+
 const fetchMatrix = async () => {
   if (comparisonType.value === 'repository' && selectedRepos.value.length === 0) return
   if (comparisonType.value === 'image' && selectedImages.value.length === 0) return
+
+  if (comparisonType.value === 'repository') {
+    const missingTagRepo = selectedRepos.value.find(repo => !selectedTags.value[repo])
+    if (missingTagRepo) {
+      notificationService.error('Please select a tag for each repository')
+      return
+    }
+  }
+
   loading.value = true
   try {
     const data = {
       type: comparisonType.value,
       ...(comparisonType.value === 'repository' 
-        ? { repository_uuids: selectedRepos.value }
+        ? { repository_tags: selectedRepos.value.map(repo => ({
+            repo_uuid: repo,
+            tag: selectedTags.value[repo]
+          })) }
         : { image_uuids: selectedImages.value }
       )
     }
@@ -287,6 +382,26 @@ const exportMatrixToExcel = () => {
   const workbook = XLSX.utils.book_new()
   XLSX.utils.book_append_sheet(workbook, worksheet, 'Component Matrix')
   XLSX.writeFile(workbook, 'component_matrix.xlsx')
+}
+
+function getProcessingStatusColor(status: string) {
+  switch (status) {
+    case 'success': return 'success';
+    case 'pending': return 'warning';
+    case 'in_process': return 'info';
+    case 'error': return 'error';
+    default: return 'grey';
+  }
+}
+
+function getProcessingStatusIcon(status: string) {
+  switch (status) {
+    case 'success': return 'mdi-check-circle';
+    case 'pending': return 'mdi-timer-sand';
+    case 'in_process': return 'mdi-progress-clock';
+    case 'error': return 'mdi-alert-circle';
+    default: return 'mdi-help-circle';
+  }
 }
 
 onMounted(() => {
