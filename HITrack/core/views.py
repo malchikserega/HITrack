@@ -627,19 +627,24 @@ class ReportGeneratorView(APIView):
             ws = wb.active
             ws.title = 'Vulnerability Report'
             ws.append([
-                'Image Name', 'Component Name', 'Component Version',
+                'Image Name', 'Component Name', 'Component Type', 'Component Version',
                 'Vulnerability ID', 'Vulnerability Severity', 'Fixed In'
             ])
 
             for image in images:
                 findings_qs = ComponentVersionVulnerability.objects.filter(
                     component_version__images=image
-                ).select_related('component_version', 'vulnerability', 'component_version__component')
+                ).select_related(
+                    'component_version',
+                    'component_version__component',
+                    'vulnerability'
+                )
                 if findings_qs.exists():
                     for cvv in findings_qs:
                         ws.append([
                             image.name,
                             cvv.component_version.component.name,
+                            cvv.component_version.component.type,
                             cvv.component_version.version,
                             cvv.vulnerability.vulnerability_id,
                             cvv.vulnerability.severity,
@@ -647,7 +652,7 @@ class ReportGeneratorView(APIView):
                         ])
                 else:
                     ws.append([
-                        image.name, '', '', '', '', ''
+                        image.name, '', '', '', '', '', ''
                     ])
 
             wb.save(output)
