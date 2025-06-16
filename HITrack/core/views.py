@@ -386,6 +386,21 @@ class ImageViewSet(BaseViewSet):
         serializer = ComponentVersionSerializer(page, many=True)
         return paginator.get_paginated_response(serializer.data)
 
+    @action(detail=True, methods=['post'], url_path='rescan-grype')
+    def rescan_grype(self, request, uuid=None):
+        """
+        Re-analyze SBOM for this image using Grype.
+        """
+        image = self.get_object()
+        if not image.sbom_data:
+            return Response({'error': 'No SBOM data available for this image.'}, status=400)
+        try:
+            from .tasks import scan_image_with_grype
+            scan_image_with_grype.delay(str(image.uuid))
+            return Response({'status': 'success', 'message': 'Grype scan scheduled successfully'})
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
+
 class ComponentViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Component.objects.all()
     filterset_fields = ['name', 'type']

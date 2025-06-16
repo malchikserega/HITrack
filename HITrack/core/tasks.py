@@ -1163,9 +1163,11 @@ def scan_repository_tags(repository_uuid: str):
 def process_single_tag(tag_uuid: str):
     """
     Process a single repository tag and create an image if it doesn't exist.
+    After processing, trigger SBOM scan for all images linked to this tag.
     """
     from .models import RepositoryTag, Image
     from .utils.acr import get_manifest, is_helm_chart, get_chart_digest, get_helm_images, get_bearer_token
+    from .tasks import generate_sbom_and_create_components
 
     logger.info(f"Starting processing of tag {tag_uuid}")
 
@@ -1236,11 +1238,28 @@ def process_single_tag(tag_uuid: str):
         tag.processing_status = 'success'
         tag.save()
 
+        # Trigger SBOM scan for all images linked to this tag
+        images = tag.images.all()
+        started = 0
+        for image in images:
+            if image.scan_status not in ['in_process', 'pending']:
+                image.scan_status = 'pending'
+                image.save()
+                repo_tag = image.repository_tags.first()
+                art_type = repo_tag.repository.repository_type if repo_tag else 'docker'
+                generate_sbom_and_create_components.delay(
+                    image_uuid=str(image.uuid),
+                    art_type=art_type
+                )
+                started += 1
+        logger.info(f"Triggered SBOM scan for {started} images for tag {tag.tag}")
+
         return {
             "status": "success",
             "tag_uuid": str(tag_uuid),
-            "repository": repository.name,
-            "tag": tag.tag
+            "repository": tag.repository.name,
+            "tag": tag.tag,
+            "images_scanned": started
         }
 
     except RepositoryTag.DoesNotExist:
