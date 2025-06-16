@@ -90,8 +90,8 @@
                 class="mb-4"
                 :loading="imagesLoading"
                 :disabled="imagesLoading"
-                :search="imagesSearch"
-                @update:search="val => imagesSearch.value = val"
+                :search="imagesSearchRef"
+                @update:search="val => imagesSearchRef = val"
               >
                 <template #item="{ item, props }">
                   <v-list-item v-bind="props">
@@ -111,15 +111,15 @@
                 </template>
                 <template #selection="{ item, index }">
                   <v-chip
-                    :key="item.uuid"
-                    :color="item.has_sbom === true || item.has_sbom === 'true' ? 'success' : 'error'"
+                    :key="item.raw.uuid"
+                    :color="item.raw.has_sbom === true || item.raw.has_sbom === 'true' ? 'success' : 'error'"
                     size="small"
                     class="mr-1"
                   >
                     <v-icon size="small" class="mr-1">
-                      {{ item.has_sbom === true || item.has_sbom === 'true' ? 'mdi-check' : 'mdi-alert' }}
+                      {{ item.raw.has_sbom === true || item.raw.has_sbom === 'true' ? 'mdi-check' : 'mdi-alert' }}
                     </v-icon>
-                    {{ item.name }}
+                    {{ item.raw.name }}
                   </v-chip>
                 </template>
               </v-autocomplete>
@@ -233,6 +233,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, watch, computed } from 'vue'
+import type { Ref } from 'vue'
 import api from '../plugins/axios'
 import { notificationService } from '../plugins/notifications'
 import * as XLSX from 'xlsx'
@@ -245,7 +246,7 @@ const imagesLoading = ref(false)
 const imagesPage = ref(1)
 const imagesPageSize = 100
 const imagesTotal = ref(0)
-const imagesSearch = ref('')
+const imagesSearchRef = ref('')
 const imagesMenu = ref<HTMLElement | null>(null)
 const selectedRepos = ref<string[]>([])
 const selectedImages = ref<string[]>([])
@@ -300,7 +301,7 @@ const fetchImages = async (reset = false) => {
       page_size: imagesPageSize,
       dropdown: 1,
     }
-    if (imagesSearch.value) params.search = imagesSearch.value
+    if (imagesSearchRef.value) params.search = imagesSearchRef.value
     const resp = await api.get('images/', { params })
     if (reset) {
       images.value = resp.data.results
@@ -360,7 +361,6 @@ watch(selectedRepos, (newRepos, oldRepos) => {
       loadTags(repo)
     }
   })
-  
   // Clear tags for unselected repos
   oldRepos.forEach(repo => {
     if (!newRepos.includes(repo)) {
@@ -457,6 +457,10 @@ const onImagesScroll = (e: Event) => {
   }
 }
 
+watch(imagesSearchRef, () => {
+  fetchImages(true)
+})
+
 onMounted(() => {
   fetchRepositories()
 })
@@ -513,4 +517,4 @@ onMounted(() => {
 .cell-outdated {
   background-color: #ffebee !important;
 }
-</style> 
+</style>
