@@ -104,12 +104,6 @@
                   <td>
                     <v-tooltip location="top">
                       <template #activator="{ props }">
-                        <v-icon small class="mr-2" color="secondary" v-bind="props" @click.stop="onEdit(item)">mdi-pencil</v-icon>
-                      </template>
-                      <span>Edit image</span>
-                    </v-tooltip>
-                    <v-tooltip location="top">
-                      <template #activator="{ props }">
                         <v-icon
                           small
                           class="mr-2"
@@ -134,6 +128,18 @@
                         >mdi-update</v-icon>
                       </template>
                       <span>Update latest versions</span>
+                    </v-tooltip>
+                    <v-tooltip location="top">
+                      <template #activator="{ props }">
+                        <v-icon
+                          small
+                          class="mr-2"
+                          color="warning"
+                          v-bind="props"
+                          @click.stop="onRescanGrype(item)"
+                        >mdi-bug</v-icon>
+                      </template>
+                      <span>Reanalyze SBOM</span>
                     </v-tooltip>
                     <v-tooltip location="top">
                       <template #activator="{ props }">
@@ -423,9 +429,6 @@ const closeDelete = () => {
   itemToDelete.value = null
 }
 
-const onEdit = (img: Image) => {
-  openDialog('Edit Image', img);
-};
 const onDelete = (img: Image) => {
   confirmDelete(img);
 };
@@ -447,9 +450,22 @@ const onRescan = async (img: Image) => {
 const onUpdateLatestVersions = async (item: Image) => {
   try {
     await api.post(`images/${item.uuid}/update_latest_versions/`)
-    notificationService.success('Latest versions update scheduled successfully')
-  } catch (error) {
-    notificationService.error('Failed to schedule latest versions update')
+    notificationService.success('Latest versions update started successfully')
+    await fetchImages()
+  } catch (error: any) {
+    notificationService.error(error.response?.data?.error || 'Failed to update latest versions')
+  }
+}
+
+const onRescanGrype = async (image: Image) => {
+  if (!image.uuid) return
+  try {
+    await api.post(`images/${image.uuid}/rescan-grype/`)
+    notificationService.success('Grype scan scheduled successfully')
+    fetchImages()
+  } catch (e: any) {
+    const msg = e?.response?.data?.error || 'Failed to schedule Grype scan'
+    notificationService.error(msg)
   }
 }
 
