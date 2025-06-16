@@ -170,7 +170,18 @@
                   </thead>
                   <tbody>
                     <tr v-for="component in filteredComponents" :key="component">
-                      <td class="sticky-col">{{ component }}</td>
+                      <td class="sticky-col">
+                        <div class="d-flex align-center">
+                          {{ component }}
+                          <v-chip
+                            size="x-small"
+                            :color="getTypeColor(matrixData.component_types[component])"
+                            class="mr-2"
+                          >
+                            {{ matrixData.component_types[component] }}
+                          </v-chip>
+                        </div>
+                      </td>
                       <td
                         v-for="col in matrixData.columns"
                         :key="col.label"
@@ -407,16 +418,19 @@ const fetchMatrix = async () => {
 
 const exportMatrixToExcel = () => {
   if (!matrixData.value) return
-  const header = ['Component', ...matrixData.value.columns.map((col: any) => col.label)]
+  const header = ['Component', 'Type', ...matrixData.value.columns.map((col: any) => col.label)]
   const rows = matrixData.value.components.map((component: string) => {
-    const row = [component]
-    matrixData.value.columns.forEach((col: any) => {
-      const cell = matrixData.value.matrix[component][col.label]
-      let value = cell.version || ''
-      if (cell.has_vuln) value += ' (vuln)'
-      if (cell.latest_version && cell.version !== cell.latest_version) value += ` (latest: ${cell.latest_version})`
-      row.push(value)
-    })
+    const row = [
+      component,
+      matrixData.value.component_types[component] || 'unknown',
+      ...matrixData.value.columns.map((col: any) => {
+        const cell = matrixData.value.matrix[component][col.label]
+        let value = cell.version || ''
+        if (cell.has_vuln) value += ' (vuln)'
+        if (cell.latest_version && cell.version !== cell.latest_version) value += ` (latest: ${cell.latest_version})`
+        return value
+      })
+    ]
     return row
   })
   const worksheet = XLSX.utils.aoa_to_sheet([header, ...rows])
@@ -460,6 +474,21 @@ const onImagesScroll = (e: Event) => {
 watch(imagesSearchRef, () => {
   fetchImages(true)
 })
+
+const getTypeColor = (type: string | undefined) => {
+  if (!type) return 'grey'
+  const colors: { [key: string]: string } = {
+    'unknown': 'grey',
+    'npm': 'red',
+    'pypi': 'blue',
+    'maven': 'green',
+    'gem': 'purple',
+    'go': 'cyan',
+    'nuget': 'orange',
+    'deb': 'grey'
+  }
+  return colors[type.toLowerCase()] || 'grey'
+}
 
 onMounted(() => {
   fetchRepositories()

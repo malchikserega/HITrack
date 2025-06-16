@@ -796,9 +796,15 @@ class ComponentMatrixView(APIView):
                 else:
                     matrix[cname][col_label] = {'version': '', 'has_vuln': False, 'latest_version': None}
 
+        # Get component types
+        component_types = {}
+        for component in Component.objects.filter(name__in=components):
+            component_types[component.name] = component.type
+
         return Response({
             'components': components,
             'columns': columns,
             'matrix': matrix,
-            'type': comparison_type
+            'type': comparison_type,
+            'component_types': component_types
         })
