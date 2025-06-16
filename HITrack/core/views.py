@@ -700,13 +700,11 @@ class ComponentMatrixView(APIView):
         from django.db.models import Max, Prefetch, Subquery, OuterRef
 
         if comparison_type == 'repository':
-            # Get all relevant tags with their repositories in one query
             tags = RepositoryTag.objects.filter(
                 repository__uuid__in=[rt['repo_uuid'] for rt in repo_tags],
                 tag__in=[rt['tag'] for rt in repo_tags]
             ).select_related('repository').order_by('repository__uuid', '-tag')
 
-            # Create a mapping of repo_uuid:tag to RepositoryTag object
             tag_mapping = {
                 f"{tag.repository.uuid}:{tag.tag}": tag
                 for tag in tags
@@ -715,16 +713,18 @@ class ComponentMatrixView(APIView):
             columns = []
             component_set = set()
             image_components = {}
-            
+            seen_col_labels = set()
             for repo_tag in repo_tags:
                 repo_uuid = repo_tag['repo_uuid']
                 tag_name = repo_tag['tag']
                 tag_key = f"{repo_uuid}:{tag_name}"
-                
                 tag = tag_mapping.get(tag_key)
                 if not tag:
                     continue
                 col_label = f"{tag.repository.name}:{tag.tag}"
+                if col_label in seen_col_labels:
+                    continue  # avoid duplicate columns
+                seen_col_labels.add(col_label)
                 columns.append({
                     'repo': tag.repository.name,
                     'tag': tag.tag,
@@ -744,8 +744,6 @@ class ComponentMatrixView(APIView):
                                 'has_vuln': cv.componentversionvulnerability_set.exists(),
                                 'latest_version': cv.latest_version
                             }
-                # Если не найдено ни одного image — колонка будет пустой
-                # (image_components[col_label] = {})
 
         else:  # comparison_type == 'image'
             # Get all relevant images with SBOM in one query

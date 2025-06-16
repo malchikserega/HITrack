@@ -52,10 +52,11 @@
                       :items="availableTags[repo] || []"
                       item-title="tag"
                       item-value="tag"
-                      label="Select tag"
+                      label="Select tag(s)"
                       :loading="loadingTags[repo]"
                       :disabled="loadingTags[repo]"
                       clearable
+                      multiple
                     >
                       <template v-slot:item="{ props, item }">
                         <v-list-item v-bind="props">
@@ -77,7 +78,7 @@
               </template>
 
               <v-autocomplete
-                v-else
+                v-if="comparisonType === 'image'"
                 v-model="selectedImages"
                 :items="images"
                 item-title="name"
@@ -231,7 +232,7 @@ const selectedImages = ref<string[]>([])
 const loading = ref(false)
 const matrixData = ref<any | null>(null)
 const searchQuery = ref('')
-const selectedTags = ref<{ [key: string]: string }>({})
+const selectedTags = ref<{ [key: string]: string[] }>({})
 const availableTags = ref<{ [key: string]: any[] }>({})
 const loadingTags = ref<{ [key: string]: boolean }>({})
 
@@ -249,6 +250,9 @@ watch(comparisonType, () => {
   selectedRepos.value = []
   selectedImages.value = []
   matrixData.value = null
+  if (comparisonType.value === 'image') {
+    fetchImages()
+  }
 })
 
 const fetchRepositories = async () => {
@@ -335,7 +339,7 @@ const fetchMatrix = async () => {
   if (comparisonType.value === 'image' && selectedImages.value.length === 0) return
 
   if (comparisonType.value === 'repository') {
-    const missingTagRepo = selectedRepos.value.find(repo => !selectedTags.value[repo])
+    const missingTagRepo = selectedRepos.value.find(repo => !selectedTags.value[repo] || selectedTags.value[repo].length === 0)
     if (missingTagRepo) {
       notificationService.error('Please select a tag for each repository')
       return
@@ -347,10 +351,12 @@ const fetchMatrix = async () => {
     const data = {
       type: comparisonType.value,
       ...(comparisonType.value === 'repository' 
-        ? { repository_tags: selectedRepos.value.map(repo => ({
-            repo_uuid: repo,
-            tag: selectedTags.value[repo]
-          })) }
+        ? { repository_tags: selectedRepos.value.flatMap(repo =>
+            (selectedTags.value[repo] || []).map(tag => ({
+              repo_uuid: repo,
+              tag
+            }))
+          ) }
         : { image_uuids: selectedImages.value }
       )
     }
@@ -406,7 +412,6 @@ function getProcessingStatusIcon(status: string) {
 
 onMounted(() => {
   fetchRepositories()
-  fetchImages()
 })
 </script>
 
