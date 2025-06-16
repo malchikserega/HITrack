@@ -25,7 +25,7 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
     import json
     import tempfile
     import os
-    from .utils.acr import get_bearer_token
+    from .utils.acr import get_bearer_token, get_acr_image_digest
 
     logger.info(f"Starting SBOM generation for image {image_uuid}")
     
@@ -339,7 +339,7 @@ def process_all_tags():
     This task can be manually triggered.
     """
     from .models import Repository, RepositoryTag, Image
-    from .utils.acr import get_manifest, is_helm_chart, get_chart_digest, get_helm_images, get_bearer_token
+    from .utils.acr import get_manifest, is_helm_chart, get_chart_digest, get_helm_images, get_bearer_token, get_acr_image_digest
 
     logger.info("Starting processing of all tags from active repositories")
 
@@ -397,16 +397,25 @@ def process_all_tags():
                                 repository.name,
                                 chart_digest
                             ):
-                                # Create or get image with digest from manifest
+                                # Get image digest from ACR
+                                image_digest = None
+                                if repository.container_registry and repository.container_registry.provider == 'acr':
+                                    image_digest = get_acr_image_digest(
+                                        repository.container_registry.api_url,
+                                        token,
+                                        image_ref
+                                    )
+                                
+                                # Create or get image with proper digest
                                 image, created = Image.objects.get_or_create(
                                     name=image_ref,
                                     defaults={
-                                        'digest': digest,  # Save digest from manifest
+                                        'digest': image_digest,  # Use actual image digest
                                         'artifact_reference': f"{repository.url}:{repo_tag.tag}"
                                     }
                                 )
                                 image.repository_tags.add(repo_tag)
-                                logger.info(f"{'Created' if created else 'Linked'} Helm image {image_ref} with digest {digest}")
+                                logger.info(f"{'Created' if created else 'Linked'} Helm image {image_ref} with digest {image_digest}")
 
                 processed_tags.append(repo_tag.tag)
 
@@ -1166,7 +1175,7 @@ def process_single_tag(tag_uuid: str):
     After processing, trigger SBOM scan for all images linked to this tag.
     """
     from .models import RepositoryTag, Image
-    from .utils.acr import get_manifest, is_helm_chart, get_chart_digest, get_helm_images, get_bearer_token
+    from .utils.acr import get_manifest, is_helm_chart, get_chart_digest, get_helm_images, get_bearer_token, get_acr_image_digest
     from .tasks import generate_sbom_and_create_components
 
     logger.info(f"Starting processing of tag {tag_uuid}")
@@ -1223,16 +1232,25 @@ def process_single_tag(tag_uuid: str):
                         repository.name,
                         chart_digest
                     ):
-                        # Create or get image with digest from manifest
+                        # Get image digest from ACR
+                        image_digest = None
+                        if repository.container_registry and repository.container_registry.provider == 'acr':
+                            image_digest = get_acr_image_digest(
+                                repository.container_registry.api_url,
+                                token,
+                                image_ref
+                            )
+                        
+                        # Create or get image with proper digest
                         image, created = Image.objects.get_or_create(
                             name=image_ref,
                             defaults={
-                                'digest': digest,  # Save digest from manifest
+                                'digest': image_digest,  # Use actual image digest
                                 'artifact_reference': f"{repository.url}:{tag.tag}"
                             }
                         )
                         image.repository_tags.add(tag)
-                        logger.info(f"{'Created' if created else 'Linked'} Helm image {image_ref} with digest {digest}")
+                        logger.info(f"{'Created' if created else 'Linked'} Helm image {image_ref} with digest {image_digest}")
 
         # Set status to success
         tag.processing_status = 'success'
