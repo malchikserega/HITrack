@@ -90,22 +90,37 @@
                 class="mb-4"
                 :loading="imagesLoading"
                 :disabled="imagesLoading"
+                :search="imagesSearch"
+                @update:search="val => imagesSearch.value = val"
               >
-                <template v-slot:item="{ props, item }">
+                <template #item="{ item, props }">
                   <v-list-item v-bind="props">
-                    <template v-slot:prepend>
+                    <template #prepend>
                       <v-chip
-                        :color="item.raw.has_sbom ? 'success' : 'error'"
+                        :color="item.raw.has_sbom === true || item.raw.has_sbom === 'true' ? 'success' : 'error'"
                         size="x-small"
                         class="mr-2"
                       >
                         <v-icon size="small" class="mr-1">
-                          {{ item.raw.has_sbom ? 'mdi-check' : 'mdi-alert' }}
+                          {{ item.raw.has_sbom === true || item.raw.has_sbom === 'true' ? 'mdi-check' : 'mdi-alert' }}
                         </v-icon>
-                        {{ item.raw.has_sbom ? 'SBOM' : 'No SBOM' }}
+                        {{ item.raw.has_sbom === true || item.raw.has_sbom === 'true' ? 'SBOM' : 'No SBOM' }}
                       </v-chip>
                     </template>
                   </v-list-item>
+                </template>
+                <template #selection="{ item, index }">
+                  <v-chip
+                    :key="item.uuid"
+                    :color="item.has_sbom === true || item.has_sbom === 'true' ? 'success' : 'error'"
+                    size="small"
+                    class="mr-1"
+                  >
+                    <v-icon size="small" class="mr-1">
+                      {{ item.has_sbom === true || item.has_sbom === 'true' ? 'mdi-check' : 'mdi-alert' }}
+                    </v-icon>
+                    {{ item.name }}
+                  </v-chip>
                 </template>
               </v-autocomplete>
               <v-btn 
@@ -227,6 +242,11 @@ const repositories = ref<any[]>([])
 const images = ref<any[]>([])
 const reposLoading = ref(false)
 const imagesLoading = ref(false)
+const imagesPage = ref(1)
+const imagesPageSize = 100
+const imagesTotal = ref(0)
+const imagesSearch = ref('')
+const imagesMenu = ref<HTMLElement | null>(null)
 const selectedRepos = ref<string[]>([])
 const selectedImages = ref<string[]>([])
 const loading = ref(false)
@@ -251,14 +271,14 @@ watch(comparisonType, () => {
   selectedImages.value = []
   matrixData.value = null
   if (comparisonType.value === 'image') {
-    fetchImages()
+    fetchImages(true)
   }
 })
 
 const fetchRepositories = async () => {
   reposLoading.value = true
   try {
-    const resp = await api.get('repositories/', { params: { page_size: 1000 } })
+    const resp = await api.get('repositories/', { params: { page_size: 100 } })
     repositories.value = resp.data.results
   } catch (e) {
     notificationService.error('Failed to fetch repositories')
@@ -267,11 +287,27 @@ const fetchRepositories = async () => {
   }
 }
 
-const fetchImages = async () => {
+const fetchImages = async (reset = false) => {
+  if (imagesLoading.value) return
   imagesLoading.value = true
   try {
-    const resp = await api.get('images/', { params: { page_size: 1000, dropdown: 1 } })
-    images.value = resp.data.results
+    if (reset) {
+      images.value = []
+      imagesPage.value = 1
+    }
+    const params: any = {
+      page: imagesPage.value,
+      page_size: imagesPageSize,
+      dropdown: 1,
+    }
+    if (imagesSearch.value) params.search = imagesSearch.value
+    const resp = await api.get('images/', { params })
+    if (reset) {
+      images.value = resp.data.results
+    } else {
+      images.value = [...images.value, ...resp.data.results]
+    }
+    imagesTotal.value = resp.data.count
   } catch (e) {
     notificationService.error('Failed to fetch images')
   } finally {
@@ -407,6 +443,17 @@ function getProcessingStatusIcon(status: string) {
     case 'in_process': return 'mdi-progress-clock';
     case 'error': return 'mdi-alert-circle';
     default: return 'mdi-help-circle';
+  }
+}
+
+const onImagesScroll = (e: Event) => {
+  const el = e.target as HTMLElement
+  if (!el) return
+  if (el.scrollTop + el.clientHeight >= el.scrollHeight - 10) {
+    if (images.value.length < imagesTotal.value && !imagesLoading.value) {
+      imagesPage.value += 1
+      fetchImages()
+    }
   }
 }
 
