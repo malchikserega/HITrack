@@ -125,7 +125,7 @@ function startMatrixRain() {
     ctx.fillStyle = '#39FF14'
     columns.forEach((col, i) => {
       const text = matrixChars[Math.floor(Math.random() * matrixChars.length)]
-      ctx.fillText(text, col * fontSize, drops[i] * fontSize)
+      ctx?.fillText(text, col * fontSize, drops[i] * fontSize)
       if (drops[i] * fontSize > canvas.height && Math.random() > 0.975) {
         drops[i] = 0
       }
