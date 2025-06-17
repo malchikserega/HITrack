@@ -77,6 +77,13 @@
                 </v-card>
               </template>
 
+              <v-text-field
+                v-if="comparisonType === 'image'"
+                v-model="imagesSearchRef"
+                label="Search images"
+                class="mb-2"
+                @input="onImagesSearch"
+              />
               <v-autocomplete
                 v-if="comparisonType === 'image'"
                 v-model="selectedImages"
@@ -90,39 +97,9 @@
                 class="mb-4"
                 :loading="imagesLoading"
                 :disabled="imagesLoading"
-                :search="imagesSearchRef"
-                @update:search="val => imagesSearchRef = val"
-              >
-                <template #item="{ item, props }">
-                  <v-list-item v-bind="props">
-                    <template #prepend>
-                      <v-chip
-                        :color="item.raw.has_sbom === true || item.raw.has_sbom === 'true' ? 'success' : 'error'"
-                        size="x-small"
-                        class="mr-2"
-                      >
-                        <v-icon size="small" class="mr-1">
-                          {{ item.raw.has_sbom === true || item.raw.has_sbom === 'true' ? 'mdi-check' : 'mdi-alert' }}
-                        </v-icon>
-                        {{ item.raw.has_sbom === true || item.raw.has_sbom === 'true' ? 'SBOM' : 'No SBOM' }}
-                      </v-chip>
-                    </template>
-                  </v-list-item>
-                </template>
-                <template #selection="{ item, index }">
-                  <v-chip
-                    :key="item.raw.uuid"
-                    :color="item.raw.has_sbom === true || item.raw.has_sbom === 'true' ? 'success' : 'error'"
-                    size="small"
-                    class="mr-1"
-                  >
-                    <v-icon size="small" class="mr-1">
-                      {{ item.raw.has_sbom === true || item.raw.has_sbom === 'true' ? 'mdi-check' : 'mdi-alert' }}
-                    </v-icon>
-                    {{ item.raw.name }}
-                  </v-chip>
-                </template>
-              </v-autocomplete>
+                hide-no-data
+                hide-selected
+              />
               <v-btn 
                 color="primary" 
                 :disabled="(comparisonType === 'repository' && selectedRepos.length === 0) || 
@@ -269,7 +246,6 @@ const imagesLoading = ref(false)
 const imagesPage = ref(1)
 const imagesPageSize = 100
 const imagesTotal = ref(0)
-const imagesSearchRef = ref('')
 const imagesMenu = ref<HTMLElement | null>(null)
 const selectedRepos = ref<string[]>([])
 const selectedImages = ref<string[]>([])
@@ -279,6 +255,7 @@ const searchQuery = ref('')
 const selectedTags = ref<{ [key: string]: string[] }>({})
 const availableTags = ref<{ [key: string]: any[] }>({})
 const loadingTags = ref<{ [key: string]: boolean }>({})
+const imagesSearchRef = ref('')
 
 // Computed property for filtered components
 const filteredComponents = computed(() => {
@@ -311,7 +288,7 @@ const fetchRepositories = async () => {
   }
 }
 
-const fetchImages = async (reset = false) => {
+const fetchImages = async (reset = false, search = '') => {
   if (imagesLoading.value) return
   imagesLoading.value = true
   try {
@@ -324,7 +301,7 @@ const fetchImages = async (reset = false) => {
       page_size: imagesPageSize,
       dropdown: 1,
     }
-    if (imagesSearchRef.value) params.search = imagesSearchRef.value
+    if (search) params.search = search
     const resp = await api.get('images/', { params })
     if (reset) {
       images.value = resp.data.results
@@ -332,6 +309,9 @@ const fetchImages = async (reset = false) => {
       images.value = [...images.value, ...resp.data.results]
     }
     imagesTotal.value = resp.data.count
+    if (search !== undefined && search !== null) {
+      imagesSearchRef.value = search
+    }
   } catch (e) {
     notificationService.error('Failed to fetch images')
   } finally {
@@ -520,9 +500,19 @@ const onImagesScroll = (e: Event) => {
   }
 }
 
-watch(imagesSearchRef, () => {
-  fetchImages(true)
-})
+// Local debounce implementation
+function debounce<T extends (...args: any[]) => void>(fn: T, delay: number) {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  return (...args: Parameters<T>) => {
+    if (timeout) clearTimeout(timeout);
+    timeout = setTimeout(() => fn(...args), delay);
+  };
+}
+
+const debouncedFetchImages = debounce((val: string) => fetchImages(true, val), 300)
+function onImagesSearch() {
+  debouncedFetchImages(imagesSearchRef.value)
+}
 
 const getTypeColor = (type: string | undefined) => {
   if (!type) return 'grey'
@@ -538,6 +528,19 @@ const getTypeColor = (type: string | undefined) => {
   }
   return colors[type.toLowerCase()] || 'grey'
 }
+
+const imagesWithSearch = computed(() => {
+  if (
+    imagesSearchRef.value &&
+    !images.value.some(img => img.name === imagesSearchRef.value)
+  ) {
+    return [
+      { uuid: '__search__', name: imagesSearchRef.value, has_sbom: false },
+      ...images.value,
+    ]
+  }
+  return images.value
+})
 
 onMounted(() => {
   fetchRepositories()

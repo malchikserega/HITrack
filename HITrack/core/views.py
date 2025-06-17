@@ -261,9 +261,10 @@ class RepositoryTagViewSet(BaseViewSet):
 class ImageViewSet(BaseViewSet):
     queryset = Image.objects.all()
     filterset_fields = ['repository_tags', 'component_versions']
-    search_fields = ['name', 'digest']
+    search_fields = ['name']
     ordering_fields = ['name', 'created_at', 'updated_at']
     pagination_class = CustomPageNumberPagination
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
 
     def get_serializer_class(self):
         if self.action == 'list' and self.request and self.request.query_params.get('dropdown') == '1':
@@ -271,6 +272,10 @@ class ImageViewSet(BaseViewSet):
         if self.action == 'list':
             return ImageListSerializer
         return ImageSerializer
+
+    def get_queryset(self):
+        # Always apply search and filters, even for dropdown
+        return super().get_queryset()
 
     @action(detail=True, methods=['post'])
     def update_latest_versions(self, request, uuid=None):
