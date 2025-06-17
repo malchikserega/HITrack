@@ -159,6 +159,17 @@
                   <v-icon>mdi-file-chart-outline</v-icon>
                   <span style="opacity: 0.6; font-size: 0.9em; margin-left: 4px;">xlsx</span>
                 </v-btn>
+                <v-btn
+                  class="ml-2"
+                  color="secondary"
+                  variant="text"
+                  :disabled="!matrixData"
+                  @click="exportMatrixToImage"
+                  style="min-width: 0;"
+                >
+                  <v-icon>mdi-image</v-icon>
+                  <span style="opacity: 0.6; font-size: 0.9em; margin-left: 4px;">png</span>
+                </v-btn>
               </div>
               <div class="matrix-scroll">
                 <table class="matrix-table">
@@ -248,6 +259,7 @@ import type { Ref } from 'vue'
 import api from '../plugins/axios'
 import { notificationService } from '../plugins/notifications'
 import * as XLSX from 'xlsx'
+import html2canvas from 'html2canvas'
 
 const comparisonType = ref('repository')
 const repositories = ref<any[]>([])
@@ -438,6 +450,43 @@ const exportMatrixToExcel = () => {
   const workbook = XLSX.utils.book_new()
   XLSX.utils.book_append_sheet(workbook, worksheet, 'Component Matrix')
   XLSX.writeFile(workbook, 'component_matrix.xlsx')
+}
+
+const exportMatrixToImage = async () => {
+  if (!matrixData.value) return
+  
+  try {
+    const table = document.querySelector('.matrix-table')
+    if (!table) return
+
+    // Set a higher scale for better resolution
+    const canvas = await html2canvas(table as HTMLElement, {
+      scale: 2, // Higher scale for better resolution
+      useCORS: true, // Enable CORS for images
+      logging: false, // Disable logging
+      backgroundColor: '#ffffff', // White background
+      windowWidth: table.scrollWidth,
+      windowHeight: table.scrollHeight,
+    })
+
+    // Convert canvas to blob
+    canvas.toBlob((blob) => {
+      if (!blob) return
+      
+      // Create download link
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = 'component_matrix.png'
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      URL.revokeObjectURL(url)
+    }, 'image/png', 1.0)
+  } catch (error) {
+    notificationService.error('Failed to generate image')
+    console.error('Error generating image:', error)
+  }
 }
 
 function getProcessingStatusColor(status: string) {
