@@ -18,6 +18,12 @@
         </v-app-bar-title>
       </router-link>
       <v-spacer></v-spacer>
+      <v-btn v-if="isMatrix" icon @click="toggleMatrix" class="mr-2">
+        <v-icon>{{ isMatrix ? 'mdi-alpha-m' : 'mdi-alpha-m' }}</v-icon>
+      </v-btn>
+      <v-btn v-if="isMatrix" icon @click="toggleMatrixAnimation" class="mr-2">
+        <v-icon>{{ matrixAnimation ? 'mdi-animation' : 'mdi-animation-outline' }}</v-icon>
+      </v-btn>
       <template v-if="isAuthenticated">
         <v-btn @click="handleLogout" text>
           Logout
@@ -56,14 +62,19 @@
         </template>
       </v-snackbar>
     </div>
+
+    <div ref="matrixBgRef" class="matrix-bg" :style="{ display: isMatrix && matrixAnimation ? 'block' : 'none' }">
+      <canvas ref="matrixCanvasRef" id="matrix-canvas" style="width:100vw;height:100vh;display:block;"></canvas>
+    </div>
   </v-app>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch, onUnmounted, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useAuthStore } from './stores/auth'
 import { notificationService } from './plugins/notifications'
+import { useTheme } from 'vuetify'
 
 const router = useRouter()
 const route = useRoute()
@@ -71,6 +82,95 @@ const authStore = useAuthStore()
 
 const isAuthenticated = computed(() => authStore.isAuthenticated)
 const drawer = ref(false)
+
+const theme = useTheme()
+
+// Matrix mode
+const isMatrix = computed(() => theme.global.name.value === 'matrix')
+function toggleMatrix() {
+  theme.global.name.value = isMatrix.value ? 'light' : 'matrix'
+}
+
+// Matrix animation
+const matrixAnimation = ref(false)
+function toggleMatrixAnimation() {
+  matrixAnimation.value = !matrixAnimation.value
+}
+
+const matrixBgRef = ref<HTMLElement | null>(null)
+const matrixCanvasRef = ref<HTMLCanvasElement | null>(null)
+let animationFrameId: number | null = null
+let ctx: CanvasRenderingContext2D | null = null
+let columns: number[] = []
+let fontSize = 18
+let drops: number[] = []
+const matrixChars = 'アァカサタナハマヤャラワガザダバパイィキシチニヒミリヰギジヂビピウゥクスツヌフムユュルグズヅブプエェケセテネヘメレヱゲゼデベペオォコソトノホモヨョロヲゴゾドボポヴッンABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'.split('')
+
+function startMatrixRain() {
+  const canvas = matrixCanvasRef.value
+  if (!canvas) return
+  ctx = canvas.getContext('2d')
+  if (!ctx) return
+  canvas.width = window.innerWidth
+  canvas.height = window.innerHeight
+  fontSize = 18
+  const columnsCount = Math.floor(canvas.width / fontSize)
+  drops = Array(columnsCount).fill(1)
+  columns = Array.from({ length: columnsCount }, (_, i) => i)
+  function draw() {
+    if (!ctx || !canvas) return
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.15)'
+    ctx.fillRect(0, 0, canvas.width, canvas.height)
+    ctx.font = `${fontSize}px 'Share Tech Mono', monospace`
+    ctx.fillStyle = '#39FF14'
+    columns.forEach((col, i) => {
+      const text = matrixChars[Math.floor(Math.random() * matrixChars.length)]
+      ctx.fillText(text, col * fontSize, drops[i] * fontSize)
+      if (drops[i] * fontSize > canvas.height && Math.random() > 0.975) {
+        drops[i] = 0
+      }
+      drops[i]++
+    })
+    animationFrameId = requestAnimationFrame(draw)
+  }
+  draw()
+}
+
+function stopMatrixRain() {
+  if (animationFrameId) {
+    cancelAnimationFrame(animationFrameId)
+    animationFrameId = null
+  }
+  const canvas = matrixCanvasRef.value
+  if (ctx && canvas) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height)
+  }
+}
+
+function handleResize() {
+  if (matrixCanvasRef.value && isMatrix.value && matrixAnimation.value) {
+    stopMatrixRain()
+    startMatrixRain()
+  }
+}
+
+onMounted(() => {
+  watch([isMatrix, matrixAnimation], async ([matrix, anim]) => {
+    await nextTick()
+    if (matrix && anim) {
+      startMatrixRain()
+      window.addEventListener('resize', handleResize)
+    } else {
+      stopMatrixRain()
+      window.removeEventListener('resize', handleResize)
+    }
+  }, { immediate: true })
+})
+
+onUnmounted(() => {
+  stopMatrixRain()
+  window.removeEventListener('resize', handleResize)
+})
 
 const menuItems = [
   { title: 'Home', path: '/' },
@@ -129,8 +229,29 @@ onMounted(async () => {
 </script>
 
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
 body {
   font-family: 'Roboto', sans-serif;
+}
+.v-theme--matrix, .v-theme--matrix body {
+  font-family: 'Share Tech Mono', monospace !important;
+  color: #39FF14 !important;
+}
+.v-theme--matrix .v-main,
+.v-theme--matrix .v-main__wrap,
+.v-theme--matrix .v-application__wrap,
+.v-theme--matrix .router-view {
+  background: transparent !important;
+}
+.matrix-bg {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 10;
+  pointer-events: none;
+  background: transparent;
 }
 
 .drawer-accent {
@@ -162,5 +283,65 @@ body {
 .logo-text .track {
   color: #4CAF50;
   font-weight: 900;
+}
+
+.v-theme--matrix .v-navigation-drawer {
+  background: #010 !important;
+}
+.v-theme--matrix .v-list-item-title,
+.v-theme--matrix .v-list-item {
+  color: #39FF14 !important;
+  font-family: 'Share Tech Mono', monospace !important;
+}
+.v-theme--matrix .v-list-item--active,
+.v-theme--matrix .v-list-item--active .v-list-item-title {
+  color: #000 !important;
+  background: #39FF14 !important;
+  font-weight: bold;
+}
+
+.v-theme--matrix .matrix-table {
+  background: #000 !important;
+  color: #39FF14 !important;
+  border-color: #39FF14 !important;
+}
+.v-theme--matrix .matrix-table th,
+.v-theme--matrix .matrix-table td {
+  background: #000 !important;
+  color: #39FF14 !important;
+  border: 1px solid #39FF14 !important;
+}
+.v-theme--matrix .matrix-table th {
+  font-weight: bold;
+}
+.v-theme--matrix .v-chip,
+.v-theme--matrix .v-chip .v-icon {
+  background: #003300 !important;
+  color: #39FF14 !important;
+  border: none !important;
+}
+.v-theme--matrix .cell-up-to-date {
+  background: #003300 !important;
+}
+.v-theme--matrix .cell-outdated {
+  background: #330000 !important;
+}
+
+.v-theme--matrix .v-app-bar {
+  background: #000 !important;
+  color: #39FF14 !important;
+  border-bottom: 2px solid #39FF14 !important;
+}
+.v-theme--matrix .v-app-bar .v-btn,
+.v-theme--matrix .v-app-bar .v-icon,
+.v-theme--matrix .v-app-bar .logo-text,
+.v-theme--matrix .v-app-bar .logo-text .hi,
+.v-theme--matrix .v-app-bar .logo-text .track {
+  color: #39FF14 !important;
+  font-family: 'Share Tech Mono', monospace !important;
+}
+.v-theme--matrix .v-app-bar .v-btn {
+  background: transparent !important;
+  box-shadow: none !important;
 }
 </style> 

@@ -619,4 +619,10 @@ onMounted(() => {
 .clickable-row:hover {
   background: #f0f4ff !important;
 }
+
+.v-theme--matrix :deep(.v-table .v-table__wrapper > table > thead > tr > th) {
+  background: #011 !important;
+  color: #39FF14 !important;
+  border: 1px solid #39FF14 !important;
+}
 </style> 

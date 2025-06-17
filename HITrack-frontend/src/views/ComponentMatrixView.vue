@@ -598,4 +598,10 @@ onMounted(() => {
 .cell-outdated {
   background-color: #ffebee !important;
 }
+.v-theme--matrix .matrix-table th {
+  background: #011 !important;
+  color: #39FF14 !important;
+  border: 1px solid #39FF14 !important;
+  font-weight: bold;
+}
 </style>
