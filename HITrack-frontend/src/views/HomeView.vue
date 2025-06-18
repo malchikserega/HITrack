@@ -67,9 +67,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import api from '../plugins/axios'
 import type { Stats } from '../types/interfaces'
+import { useTheme } from 'vuetify'
 
 const stats = ref<Stats>({
   repositories: 0,
@@ -77,6 +78,21 @@ const stats = ref<Stats>({
   vulnerabilities: 0,
   components: 0
 })
+
+const theme = useTheme()
+let keyBuffer = ''
+
+function handleKeydown(e: KeyboardEvent) {
+  // Only listen if not focused in an input/textarea
+  const tag = (e.target as HTMLElement)?.tagName?.toLowerCase()
+  if (tag === 'input' || tag === 'textarea' || (e.target as HTMLElement)?.isContentEditable) return
+  keyBuffer += e.key
+  if (keyBuffer.length > 4) keyBuffer = keyBuffer.slice(-4)
+  if (keyBuffer === '1337') {
+    theme.global.name.value = 'matrix'
+    keyBuffer = ''
+  }
+}
 
 const fetchStats = async () => {
   try {
@@ -96,6 +112,10 @@ const fetchStats = async () => {
 
 onMounted(() => {
   fetchStats()
+  window.addEventListener('keydown', handleKeydown)
+})
+onUnmounted(() => {
+  window.removeEventListener('keydown', handleKeydown)
 })
 </script>
 

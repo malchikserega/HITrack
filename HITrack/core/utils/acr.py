@@ -242,3 +242,75 @@ def get_helm_images(api_url: str, token: str, repo: str, digest: str) -> List[st
     except (requests.RequestException, subprocess.SubprocessError) as e:
         logger.error(f"Failed to process Helm chart {repo}:{digest}: {e}")
         return []
+
+
+def get_acr_image_digest(registry_url: str, token: str, image_ref: str) -> str:
+    """
+    Get image digest from Azure Container Registry.
+    If the image is public and ACR API fails, falls back to Docker inspect.
+    
+    Args:
+        registry_url: ACR registry URL (e.g., 'myregistry.azurecr.io')
+        token: ACR access token
+        image_ref: Full image reference (e.g., 'myregistry.azurecr.io/myimage:tag')
+    
+    Returns:
+        str: Image digest or None if not found
+    """
+    try:
+        # First try to get digest through ACR API
+        registry = registry_url.split('://')[-1] if '://' in registry_url else registry_url
+        image_name = image_ref.split(registry + '/')[-1]
+        repository, tag = image_name.split(':')
+        
+        headers = {
+            'Authorization': f'Bearer {token}',
+            'Accept': 'application/vnd.docker.distribution.manifest.v2+json'
+        }
+        
+        url = f'https://{registry}/v2/{repository}/manifests/{tag}'
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        
+        digest = response.headers.get('Docker-Content-Digest')
+        if digest:
+            return digest
+            
+        logger.warning(f"Could not get digest for image {image_ref} from ACR API")
+        
+    except Exception as e:
+        logger.warning(f"Failed to get digest from ACR API for {image_ref}: {str(e)}")
+        logger.info("Trying to get digest using Docker inspect...")
+        
+        try:
+            # Fallback to Docker inspect for public images
+            import subprocess
+            import json
+            
+            # Pull the image first
+            subprocess.run(["docker", "pull", image_ref], capture_output=True, check=True)
+            
+            # Get image digest using Docker inspect
+            result = subprocess.run(
+                ["docker", "inspect", image_ref],
+                capture_output=True,
+                check=True,
+                text=True
+            )
+            
+            inspect_data = json.loads(result.stdout)
+            if inspect_data and len(inspect_data) > 0:
+                repo_digests = inspect_data[0].get('RepoDigests', [])
+                if repo_digests:
+                    digest = repo_digests[0].split('@')[1]
+                    logger.info(f"Successfully got digest {digest} using Docker inspect")
+                    return digest
+            
+            logger.warning(f"Could not get digest for image {image_ref} using Docker inspect")
+            return None
+            
+        except Exception as docker_error:
+            logger.error(f"Failed to get digest using Docker inspect for {image_ref}: {str(docker_error)}")
+            return None
+            
+    return None

@@ -48,6 +48,8 @@ services:
     image: hitrack-api
     links:
       - hitrack-db
+    deploy:
+      replicas: 2
     volumes:
       - ./storage:/storage
       - ./static_data:/code/static

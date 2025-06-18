@@ -89,6 +89,7 @@ export interface ComponentVersion extends BaseEntity {
   images: Image[]
   vulnerabilities: Vulnerability[]
   vulnerabilities_count: number
+  used_count: number
   created_at: string
   updated_at: string
 }

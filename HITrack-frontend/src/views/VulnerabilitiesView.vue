@@ -312,4 +312,10 @@ onMounted(() => {
 :deep(.v-table .v-table__wrapper > table > tbody > tr:hover) {
   background-color: #f5f5f5;
 }
+
+.v-theme--matrix :deep(.v-table .v-table__wrapper > table > thead > tr > th) {
+  background: #011 !important;
+  color: #39FF14 !important;
+  border: 1px solid #39FF14 !important;
+}
 </style> 

@@ -122,7 +122,7 @@ const handleLogin = async () => {
       console.log('Login successful')
       notificationService.success('Successfully logged in')
       // Use replace instead of push to prevent returning to login page
-      router.replace({ name: 'Home' })
+      router.replace({ name: 'home' })
       console.log('Redirect completed')
     } else {
       console.log('Login failed:', loginError)
@@ -144,7 +144,7 @@ watch(
   () => authStore.isAuthenticated,
   (isAuthenticated) => {
     if (isAuthenticated) {
-      router.replace({ name: 'Home' })
+      router.replace({ name: 'home' })
     }
   }
 )

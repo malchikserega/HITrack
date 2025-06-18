@@ -3,6 +3,8 @@ from __future__ import absolute_import, unicode_literals
 from hitrack_celery.celery import celery_app
 import logging
 import re
+from datetime import timedelta
+from django.utils import timezone
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -23,7 +25,7 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
     import json
     import tempfile
     import os
-    from .utils.acr import get_bearer_token
+    from .utils.acr import get_bearer_token, get_acr_image_digest
 
     logger.info(f"Starting SBOM generation for image {image_uuid}")
     
@@ -337,7 +339,7 @@ def process_all_tags():
     This task can be manually triggered.
     """
     from .models import Repository, RepositoryTag, Image
-    from .utils.acr import get_manifest, is_helm_chart, get_chart_digest, get_helm_images, get_bearer_token
+    from .utils.acr import get_manifest, is_helm_chart, get_chart_digest, get_helm_images, get_bearer_token, get_acr_image_digest
 
     logger.info("Starting processing of all tags from active repositories")
 
@@ -395,16 +397,25 @@ def process_all_tags():
                                 repository.name,
                                 chart_digest
                             ):
-                                # Create or get image with digest from manifest
+                                # Get image digest from ACR
+                                image_digest = None
+                                if repository.container_registry and repository.container_registry.provider == 'acr':
+                                    image_digest = get_acr_image_digest(
+                                        repository.container_registry.api_url,
+                                        token,
+                                        image_ref
+                                    )
+                                
+                                # Create or get image with proper digest
                                 image, created = Image.objects.get_or_create(
                                     name=image_ref,
                                     defaults={
-                                        'digest': digest,  # Save digest from manifest
+                                        'digest': image_digest,  # Use actual image digest
                                         'artifact_reference': f"{repository.url}:{repo_tag.tag}"
                                     }
                                 )
                                 image.repository_tags.add(repo_tag)
-                                logger.info(f"{'Created' if created else 'Linked'} Helm image {image_ref} with digest {digest}")
+                                logger.info(f"{'Created' if created else 'Linked'} Helm image {image_ref} with digest {image_digest}")
 
                 processed_tags.append(repo_tag.tag)
 
@@ -481,12 +492,6 @@ def parse_sbom_and_create_components(image_uuid: str):
             
             logger.info(f"Processing batch {current_batch}/{total_batches} ({len(batch)} artifacts)")
             
-            # Prepare data for bulk operations
-            components_to_create = []
-            components_to_update = []
-            component_versions_to_create = []
-            component_versions_to_update = []
-            
             # Collect unique component names and versions
             component_data = {}
             skipped_artifacts = 0
@@ -501,14 +506,18 @@ def parse_sbom_and_create_components(image_uuid: str):
                     skipped_artifacts += 1
                     continue
 
-                component_data[name] = {
-                    'name': name,
-                    'type': type,
+                if name not in component_data:
+                    component_data[name] = {
+                        'name': name,
+                        'type': type,
+                        'versions': {},
+                        'purl': purl
+                    }
+
+                component_data[name]['versions'][version] = {
                     'purl': purl,
-                    'cpes': cpes,
-                    'versions': set()
+                    'cpes': cpes
                 }
-                component_data[name]['versions'].add(version)
 
             if skipped_artifacts:
                 logger.warning(f"Skipped {skipped_artifacts} artifacts in batch {current_batch} due to missing name or version")
@@ -532,25 +541,25 @@ def parse_sbom_and_create_components(image_uuid: str):
             }
             logger.info(f"Found {len(existing_versions)} existing component versions in batch {current_batch}")
 
+            # Initialize lists for bulk operations
+            components_to_create = []
+            components_to_update = []
+            component_versions_to_create = []
+            component_versions_to_update = []
+
             # Prepare components for creation/update
             for name, data in component_data.items():
                 if name in existing_components:
                     component = existing_components[name]
                     # Update component if needed
-                    if (data['purl'] and not component.purl) or \
-                       (data['cpes'] and not component.cpes) or \
-                       (data['type'] != 'unknown' and component.type == 'unknown'):
-                        component.purl = data['purl'] or component.purl
-                        component.cpes = data['cpes'] or component.cpes
-                        component.type = data['type'] if component.type == 'unknown' else component.type
+                    if data['type'] != 'unknown' and component.type == 'unknown':
+                        component.type = data['type']
                         components_to_update.append(component)
                 else:
                     # Create new component
                     components_to_create.append(Component(
                         name=name,
-                        type=data['type'],
-                        purl=data['purl'],
-                        cpes=data['cpes']
+                        type=data['type']
                     ))
 
             logger.info(f"Prepared {len(components_to_create)} components for creation and {len(components_to_update)} for update in batch {current_batch}")
@@ -567,7 +576,7 @@ def parse_sbom_and_create_components(image_uuid: str):
                 if components_to_update:
                     Component.objects.bulk_update(
                         components_to_update,
-                        ['purl', 'cpes', 'type']
+                        ['type']
                     )
                     components_updated += len(components_to_update)
                     logger.info(f"Updated {len(components_to_update)} existing components in batch {current_batch}")
@@ -575,13 +584,23 @@ def parse_sbom_and_create_components(image_uuid: str):
                 # Prepare component versions
                 for name, data in component_data.items():
                     component = existing_components[name]
-                    for version in data['versions']:
+                    for version, version_data in data['versions'].items():
                         version_key = f"{name}:{version}"
                         if version_key not in existing_versions:
                             component_versions_to_create.append(ComponentVersion(
                                 component=component,
-                                version=version
+                                version=version,
+                                purl=version_data['purl'],
+                                cpes=version_data['cpes']
                             ))
+                        else:
+                            # Update existing version if purl or cpes are missing
+                            version_obj = existing_versions[version_key]
+                            if (version_data['purl'] and not version_obj.purl) or \
+                               (version_data['cpes'] and not version_obj.cpes):
+                                version_obj.purl = version_data['purl'] or version_obj.purl
+                                version_obj.cpes = version_data['cpes'] or version_obj.cpes
+                                component_versions_to_update.append(version_obj)
 
                 logger.info(f"Prepared {len(component_versions_to_create)} component versions for creation in batch {current_batch}")
 
@@ -601,7 +620,7 @@ def parse_sbom_and_create_components(image_uuid: str):
                 links_created = 0
                 for name, data in component_data.items():
                     component = existing_components[name]
-                    for version in data['versions']:
+                    for version, version_data in data['versions'].items():
                         version_key = f"{name}:{version}"
                         version_obj = existing_versions[version_key]
                         if version_obj not in image_versions:
@@ -646,43 +665,199 @@ def parse_sbom_and_create_components(image_uuid: str):
         }
 
 @celery_app.task()
+def update_components_latest_versions(image_uuid: str):
+    """
+    Update latest versions for all component versions in an image.
+    This task can be triggered manually through the API.
+    """
+    from .models import Image, ComponentVersion
+    import time
+    import requests
+    import subprocess
+    from packaging.version import parse as parse_version
+
+    logger.info(f"Starting latest versions update for image {image_uuid}")
+    start_time = time.time()
+
+    try:
+        image = Image.objects.prefetch_related('component_versions').get(uuid=image_uuid)
+        component_versions = image.component_versions.all()
+        logger.info(f"Found {component_versions.count()} component versions to process")
+        updated_count = 0
+        for component_version in component_versions:
+            try:
+                now = timezone.now()
+                # Skip update if already updated within the last 4 days
+                if (
+                    component_version.latest_version_updated_at and
+                    (now - component_version.latest_version_updated_at).days <= 4
+                ):
+                    logger.info(
+                        f"Skipped update for {component_version.component.name}:{component_version.version} (last updated {component_version.latest_version_updated_at})"
+                    )
+                    continue
+                if not component_version.purl:
+                    logger.debug(f"No PURL found for component version {component_version.component.name}:{component_version.version}")
+                    continue
+                logger.debug(f"Processing component version {component_version.component.name}:{component_version.version}")
+                parts = component_version.purl.split("/")
+                if len(parts) < 2:
+                    continue
+                package_type = parts[0].split(":")[1] if ":" in parts[0] else None
+                if not package_type:
+                    continue
+                package_name = parts[1].lower()
+                if len(parts) > 2:
+                    package_name = f"{package_name}/{parts[2].lower()}"
+                if "@" in package_name:
+                    package_name = package_name.split("@")[0]
+                logger.debug(f"Processing PURL: {component_version.purl}")
+                logger.debug(f"Package type: {package_type}, Package name: {package_name}")
+                latest_version = None
+                if package_type == "pypi":
+                    url = f"https://pypi.org/pypi/{package_name}/json"
+                    r = requests.get(url, timeout=5)
+                    if r.ok:
+                        latest_version = r.json()["info"]["version"]
+                elif package_type == "npm":
+                    url = f"https://registry.npmjs.org/{package_name}"
+                    r = requests.get(url, timeout=5)
+                    if r.ok:
+                        latest_version = r.json()["dist-tags"]["latest"]
+                elif package_type == "nuget":
+                    url = f"https://api.nuget.org/v3-flatcontainer/{package_name}/index.json"
+                    r = requests.get(url, timeout=5)
+                    if r.ok:
+                        versions = r.json().get("versions", [])
+                        latest_version = versions[-1] if versions else None
+                elif package_type == "deb":
+                    try:
+                        output = subprocess.check_output(["apt-cache", "policy", package_name], text=True, timeout=5)
+                        for line in output.splitlines():
+                            if "Candidate:" in line:
+                                latest_version = line.split(":")[1].strip()
+                                break
+                    except Exception:
+                        continue
+                elif package_type == "golang":
+                    if package_name == "stdlib":
+                        url = "https://golang.org/dl/?mode=json"
+                        r = requests.get(url, timeout=5)
+                        if r.ok:
+                            versions = r.json()
+                            stable_versions = [v['version'] for v in versions if not v['version'].endswith('beta') and not v['version'].endswith('rc')]
+                            if stable_versions:
+                                latest_version = max(stable_versions).replace('go', '')
+                    else:
+                        url = f"https://proxy.golang.org/{package_name}/@latest"
+                        r = requests.get(url, timeout=5)
+                        if r.ok:
+                            data = r.json()
+                            latest_version = data.get('Version', '').replace('v', '')
+                if latest_version:
+                    component_version.latest_version = latest_version
+                    component_version.latest_version_updated_at = now
+                    component_version.save()
+                    updated_count += 1
+                    logger.info(
+                        f"Updated latest version for {component_version.component.name}:{component_version.version} to {latest_version} (updated_at={now})"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"Error processing component version {component_version.component.name}:{component_version.version}: {str(e)}"
+                )
+                continue
+        total_time = time.time() - start_time
+        logger.info(f"Latest versions update completed in {total_time:.2f} seconds")
+        logger.info(f"Updated latest versions for {updated_count} component versions")
+        return {
+            "status": "success",
+            "image_uuid": str(image_uuid),
+            "component_versions_updated": updated_count,
+            "processing_time": total_time
+        }
+    except Image.DoesNotExist:
+        logger.error(f"Image with UUID {image_uuid} not found")
+        return {
+            "status": "error",
+            "error": f"Image with UUID {image_uuid} not found"
+        }
+    except Exception as e:
+        logger.error(f"Error updating latest versions for image {image_uuid}: {str(e)}")
+        return {
+            "status": "error",
+            "error": str(e)
+        }
+
+@celery_app.task()
 def process_grype_scan_results(image_uuid: str, scan_results: dict):
     """
     Process Grype scan results for an image and update the database with vulnerability information.
-    
-    This function:
-    1. Creates new vulnerabilities if they don't exist
-    2. Updates existing vulnerabilities if they already exist
-    3. Links vulnerabilities to component versions through ComponentVersionVulnerability
-    4. Links component versions to images
-    
-    A vulnerability can be linked to multiple component versions,
-    and a component version can have multiple vulnerabilities.
-    
-    Args:
-        image_uuid (str): UUID of the Image to process
-        scan_results (dict): Grype scan results in JSON format
+    Optimized for bulk operations and safe parallel execution.
     """
     from .models import Image, Component, ComponentVersion, Vulnerability, ComponentVersionVulnerability
+    from django.db import IntegrityError
     import logging
 
     logger = logging.getLogger(__name__)
     logger.info(f"Processing Grype scan results for image {image_uuid}")
 
     try:
-        # Get the image
         image = Image.objects.get(uuid=image_uuid)
-        
-        # Process each match (vulnerability) in the scan results
-        for match in scan_results.get('matches', []):
-            # Extract vulnerability information
+        matches = scan_results.get('matches', [])
+
+        # Collect unique names/versions/ids
+        component_names = set()
+        component_versions_set = set()
+        vuln_ids = set()
+        for match in matches:
+            artifact = match.get('artifact', {})
+            component_name = artifact.get('name')
+            component_version = artifact.get('version')
+            if component_name:
+                component_names.add(component_name)
+            if component_name and component_version:
+                component_versions_set.add((component_name, component_version))
+            vulnerability_data = match.get('vulnerability', {})
+            vuln_id = vulnerability_data.get('id', '')
+            if vuln_id:
+                vuln_ids.add(vuln_id)
+
+        # Bulk create Components
+        existing_components = {c.name: c for c in Component.objects.filter(name__in=component_names)}
+        new_components = [Component(name=name) for name in component_names if name not in existing_components]
+        Component.objects.bulk_create(new_components, ignore_conflicts=True)
+        # Refresh cache
+        existing_components = {c.name: c for c in Component.objects.filter(name__in=component_names)}
+
+        # Bulk create Vulnerabilities
+        existing_vulns = {v.vulnerability_id: v for v in Vulnerability.objects.filter(vulnerability_id__in=vuln_ids)}
+        new_vulns = [Vulnerability(vulnerability_id=vid) for vid in vuln_ids if vid not in existing_vulns]
+        Vulnerability.objects.bulk_create(new_vulns, ignore_conflicts=True)
+        existing_vulns = {v.vulnerability_id: v for v in Vulnerability.objects.filter(vulnerability_id__in=vuln_ids)}
+
+        # Bulk create ComponentVersions
+        existing_versions = {(cv.component.name, cv.version): cv for cv in ComponentVersion.objects.filter(
+            component__name__in=component_names,
+            version__in=[v for _, v in component_versions_set]
+        ).select_related('component')}
+        new_versions = [
+            ComponentVersion(component=existing_components[name], version=version)
+            for (name, version) in component_versions_set if (name, version) not in existing_versions
+        ]
+        ComponentVersion.objects.bulk_create(new_versions, ignore_conflicts=True)
+        existing_versions = {(cv.component.name, cv.version): cv for cv in ComponentVersion.objects.filter(
+            component__name__in=component_names,
+            version__in=[v for _, v in component_versions_set]
+        ).select_related('component')}
+
+        # Process each match
+        for match in matches:
             vulnerability_data = match.get('vulnerability', {})
             vuln_id = vulnerability_data.get('id', '')
             severity = vulnerability_data.get('severity', 'UNKNOWN').upper()
             description = vulnerability_data.get('description', '')
-            
-            # Determine vulnerability type from ID
-            vuln_type = 'CVE'  # Default type
+            vuln_type = 'CVE'
             if vuln_id.startswith('GHSA-'):
                 vuln_type = 'GHSA'
             elif vuln_id.startswith('RUSTSEC-'):
@@ -691,29 +866,21 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
                 vuln_type = 'PYSEC'
             elif vuln_id.startswith('NPM-'):
                 vuln_type = 'NPM'
-            # Add more vulnerability types as needed
-            
-            # Extract EPSS score - handle both old and new format
             epss_score = 0.0
             epss_data = vulnerability_data.get('epss', [])
             if isinstance(epss_data, list) and epss_data:
-                # New format: list of EPSS data
                 epss_score = epss_data[0].get('epss', 0.0)
             elif isinstance(epss_data, (int, float)):
-                # Old format: direct number
                 epss_score = float(epss_data)
-            
-            # Extract fix info from Grype report
             fix_data = vulnerability_data.get('fix', {})
             fix_versions = fix_data.get('versions', []) if isinstance(fix_data, dict) else []
             fix_state = fix_data.get('state', '') if isinstance(fix_data, dict) else ''
-            # fixable is True if there are fix versions, or state is present and not 'wont-fix'/'not-fixed' (case-insensitive)
             fixable = bool(fix_versions) or (bool(fix_state) and fix_state.lower() not in ['wont-fix', 'not-fixed', ''])
-            fixable = bool(fixable)  # Ensure only True/False
+            fixable = bool(fixable)
             fix_str = ', '.join(fix_versions) if fix_versions else (fix_state or '')
-            
-            # Get or create vulnerability using the new field names
-            vulnerability, created = Vulnerability.objects.get_or_create(
+
+            # Get or create vulnerability (safe for parallel)
+            vulnerability, _ = Vulnerability.objects.get_or_create(
                 vulnerability_id=vuln_id,
                 defaults={
                     'vulnerability_type': vuln_type,
@@ -722,79 +889,84 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
                     'epss': epss_score
                 }
             )
-            
-            # Update vulnerability if it already existed
-            if not created:
+            # Update fields if needed
+            updated = False
+            if vulnerability.severity != severity:
                 vulnerability.severity = severity
+                updated = True
+            if vulnerability.description != description:
                 vulnerability.description = description
+                updated = True
+            if vulnerability.epss != epss_score:
                 vulnerability.epss = epss_score
+                updated = True
+            if updated:
                 vulnerability.save()
-                # logger.info(f"Updated existing vulnerability {vuln_id}")
-            else:
-                logger.info(f"Created new vulnerability {vuln_id} of type {vuln_type}")
-            
-            # Get the affected component information
+
             artifact = match.get('artifact', {})
             component_name = artifact.get('name')
             component_type = artifact.get('type', 'unknown')
             component_version = artifact.get('version')
             purl = artifact.get('purl')
-            
+            cpes = artifact.get('cpes', [])
+
             if component_name and component_version:
-                # Get or create component
-                component, component_created = Component.objects.get_or_create(
+                # Get or create component (safe for parallel)
+                component, _ = Component.objects.get_or_create(
                     name=component_name,
-                    defaults={
-                        'type': component_type,
-                        'purl': purl,
-                        'cpes': artifact.get('cpes', [])
-                    }
+                    defaults={'type': component_type}
                 )
-                
-                if component_created:
-                    logger.info(f"Created new component {component_name}")
-                
-                # Get or create component version
-                component_version_obj, version_created = ComponentVersion.objects.get_or_create(
+                # Update type if needed
+                if component.type == 'unknown' and component_type != 'unknown':
+                    component.type = component_type
+                    component.save()
+                # Get or create component version (safe for parallel)
+                component_version_obj, _ = ComponentVersion.objects.get_or_create(
                     version=component_version,
-                    component=component
+                    component=component,
+                    defaults={'purl': purl, 'cpes': cpes}
                 )
-                
-                if version_created:
-                    logger.info(f"Created new version {component_version} for component {component_name}")
-                
-                # Link component version to image if not already linked
-                if image not in component_version_obj.images.all():
+                # Update purl/cpes if needed
+                updated = False
+                if purl and not component_version_obj.purl:
+                    component_version_obj.purl = purl
+                    updated = True
+                if cpes and not component_version_obj.cpes:
+                    component_version_obj.cpes = cpes
+                    updated = True
+                if updated:
+                    component_version_obj.save()
+                # Link image to component version
+                if not component_version_obj.images.filter(pk=image.pk).exists():
                     component_version_obj.images.add(image)
                     logger.info(f"Linked component version {component_version} to image {image.name}")
-                
-                # Create or update the through model relationship with fix information
-                cvv, cvv_created = ComponentVersionVulnerability.objects.get_or_create(
+                # Get or create CVV (safe for parallel)
+                cvv, _ = ComponentVersionVulnerability.objects.get_or_create(
                     component_version=component_version_obj,
                     vulnerability=vulnerability,
-                    defaults={
-                        'fixable': fixable,
-                        'fix': fix_str
-                    }
+                    defaults={'fixable': fixable, 'fix': fix_str}
                 )
-                
-                if not cvv_created:
-                    # Update fix information if it already existed
-                    cvv.fixable = fixable
-                    cvv.fix = fix_str
-                    cvv.save()
-                
-        # Update image scan status
+                # Update fix info if needed
+                if not _:
+                    updated = False
+                    if cvv.fixable != fixable:
+                        cvv.fixable = fixable
+                        updated = True
+                    if cvv.fix != fix_str:
+                        cvv.fix = fix_str
+                        updated = True
+                    if updated:
+                        cvv.save()
+
         image.scan_status = 'success'
         image.save()
-        
         logger.info(f"Successfully processed Grype scan results for image {image_uuid}")
         return {
             "status": "success",
             "image_uuid": str(image_uuid),
-            "vulnerabilities_processed": len(scan_results.get('matches', []))
+            "vulnerabilities_processed": len(matches)
         }
-        
+
     except Image.DoesNotExist:
         logger.error(f"Image with UUID {image_uuid} not found")
         return {
@@ -803,9 +975,12 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
         }
     except Exception as e:
         logger.error(f"Error processing Grype scan results for image {image_uuid}: {str(e)}")
-        if image:
+        try:
+            image = Image.objects.get(uuid=image_uuid)
             image.scan_status = 'error'
             image.save()
+        except Exception:
+            pass
         return {
             "status": "error",
             "error": str(e)
@@ -997,9 +1172,11 @@ def scan_repository_tags(repository_uuid: str):
 def process_single_tag(tag_uuid: str):
     """
     Process a single repository tag and create an image if it doesn't exist.
+    After processing, trigger SBOM scan for all images linked to this tag.
     """
     from .models import RepositoryTag, Image
-    from .utils.acr import get_manifest, is_helm_chart, get_chart_digest, get_helm_images, get_bearer_token
+    from .utils.acr import get_manifest, is_helm_chart, get_chart_digest, get_helm_images, get_bearer_token, get_acr_image_digest
+    from .tasks import generate_sbom_and_create_components
 
     logger.info(f"Starting processing of tag {tag_uuid}")
 
@@ -1055,26 +1232,52 @@ def process_single_tag(tag_uuid: str):
                         repository.name,
                         chart_digest
                     ):
-                        # Create or get image with digest from manifest
+                        # Get image digest from ACR
+                        image_digest = None
+                        if repository.container_registry and repository.container_registry.provider == 'acr':
+                            image_digest = get_acr_image_digest(
+                                repository.container_registry.api_url,
+                                token,
+                                image_ref
+                            )
+                        
+                        # Create or get image with proper digest
                         image, created = Image.objects.get_or_create(
                             name=image_ref,
                             defaults={
-                                'digest': digest,  # Save digest from manifest
+                                'digest': image_digest,  # Use actual image digest
                                 'artifact_reference': f"{repository.url}:{tag.tag}"
                             }
                         )
                         image.repository_tags.add(tag)
-                        logger.info(f"{'Created' if created else 'Linked'} Helm image {image_ref} with digest {digest}")
+                        logger.info(f"{'Created' if created else 'Linked'} Helm image {image_ref} with digest {image_digest}")
 
         # Set status to success
         tag.processing_status = 'success'
         tag.save()
 
+        # Trigger SBOM scan for all images linked to this tag
+        images = tag.images.all()
+        started = 0
+        for image in images:
+            if image.scan_status not in ['in_process', 'pending']:
+                image.scan_status = 'pending'
+                image.save()
+                repo_tag = image.repository_tags.first()
+                art_type = repo_tag.repository.repository_type if repo_tag else 'docker'
+                generate_sbom_and_create_components.delay(
+                    image_uuid=str(image.uuid),
+                    art_type=art_type
+                )
+                started += 1
+        logger.info(f"Triggered SBOM scan for {started} images for tag {tag.tag}")
+
         return {
             "status": "success",
             "tag_uuid": str(tag_uuid),
-            "repository": repository.name,
-            "tag": tag.tag
+            "repository": tag.repository.name,
+            "tag": tag.tag,
+            "images_scanned": started
         }
 
     except RepositoryTag.DoesNotExist:
@@ -1095,3 +1298,13 @@ def process_single_tag(tag_uuid: str):
             "status": "error",
             "error": str(e)
         }
+
+@celery_app.task()
+def delete_old_repository_tags(days: int = 1):
+    """
+    Delete all RepositoryTag objects older than `days` days.
+    """
+    from .models import RepositoryTag
+    cutoff = timezone.now() - timedelta(days=days)
+    deleted_count, _ = RepositoryTag.objects.filter(created_at__lt=cutoff).delete()
+    return f"Deleted {deleted_count} old repository tags older than {days} days"

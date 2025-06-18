@@ -4,20 +4,26 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.generics import ListAPIView, GenericAPIView
 from django_filters.rest_framework import DjangoFilterBackend
-from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ContainerRegistry
+from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ContainerRegistry, ComponentVersionVulnerability
 from .serializers import (
     RepositorySerializer, RepositoryTagSerializer, ImageSerializer, ImageListSerializer,
     ComponentSerializer, ComponentVersionSerializer, VulnerabilitySerializer, ComponentListSerializer,
     RepositoryListSerializer, RepositoryTagListSerializer, ComponentVersionListSerializer,
     HasACRRegistryResponseSerializer, ListACRRegistriesResponseSerializer,
     StatsResponseSerializer, JobAddRepositoriesRequestSerializer,
-    JobAddRepositoriesResponseSerializer
+    JobAddRepositoriesResponseSerializer, ImageDropdownSerializer
 )
 from django.db import models
 from .pagination import CustomPageNumberPagination
 from django.db.models import Q, Count
 from django.utils import timezone
-from datetime import timedelta
+from datetime import timedelta, datetime
+from io import BytesIO
+from rest_framework.views import APIView
+from django.http import HttpResponse
+from openpyxl import Workbook
+from core.models import ComponentVersionVulnerability
+from django.shortcuts import render
 
 # Create your views here.
 
@@ -255,14 +261,41 @@ class RepositoryTagViewSet(BaseViewSet):
 class ImageViewSet(BaseViewSet):
     queryset = Image.objects.all()
     filterset_fields = ['repository_tags', 'component_versions']
-    search_fields = ['name', 'digest']
+    search_fields = ['name']
     ordering_fields = ['name', 'created_at', 'updated_at']
     pagination_class = CustomPageNumberPagination
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
 
     def get_serializer_class(self):
+        if self.action == 'list' and self.request and self.request.query_params.get('dropdown') == '1':
+            return ImageDropdownSerializer
         if self.action == 'list':
             return ImageListSerializer
         return ImageSerializer
+
+    def get_queryset(self):
+        # Always apply search and filters, even for dropdown
+        return super().get_queryset()
+
+    @action(detail=True, methods=['post'])
+    def update_latest_versions(self, request, uuid=None):
+        """
+        Update latest versions for all components in this image.
+        This will check all package registries for the latest available versions.
+        """
+        image = self.get_object()
+        try:
+            from .tasks import update_components_latest_versions
+            update_components_latest_versions.delay(str(image.uuid))
+            return Response({
+                'status': 'success',
+                'message': 'Latest versions update scheduled successfully'
+            })
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
     @action(detail=True, methods=['get'])
     def vulnerabilities(self, request, pk=None):
@@ -357,6 +390,21 @@ class ImageViewSet(BaseViewSet):
         page = paginator.paginate_queryset(component_versions, request)
         serializer = ComponentVersionSerializer(page, many=True)
         return paginator.get_paginated_response(serializer.data)
+
+    @action(detail=True, methods=['post'], url_path='rescan-grype')
+    def rescan_grype(self, request, uuid=None):
+        """
+        Re-analyze SBOM for this image using Grype.
+        """
+        image = self.get_object()
+        if not image.sbom_data:
+            return Response({'error': 'No SBOM data available for this image.'}, status=400)
+        try:
+            from .tasks import scan_image_with_grype
+            scan_image_with_grype.delay(str(image.uuid))
+            return Response({'status': 'success', 'message': 'Grype scan scheduled successfully'})
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
 
 class ComponentViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Component.objects.all()
@@ -559,3 +607,214 @@ class RepositoryTagListForRepositoryView(ListAPIView):
     def get_queryset(self):
         repository_uuid = self.kwargs['repository_uuid']
         return RepositoryTag.objects.filter(repository__uuid=repository_uuid)
+
+class ReportGeneratorView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        """
+        Generate a vulnerability report for selected images.
+        Returns an Excel file with vulnerability data.
+        """
+        image_uuids = request.data.get('image_uuids', [])
+        if not image_uuids:
+            return Response(
+                {'error': 'No images selected'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            images = Image.objects.filter(uuid__in=image_uuids)
+
+            # Create Excel file in memory
+            output = BytesIO()
+            wb = Workbook()
+            ws = wb.active
+            ws.title = 'Vulnerability Report'
+            ws.append([
+                'Image Name', 'Component Name', 'Component Type', 'Component Version',
+                'Vulnerability ID', 'Vulnerability Severity', 'Fixed In'
+            ])
+
+            for image in images:
+                findings_qs = ComponentVersionVulnerability.objects.filter(
+                    component_version__images=image
+                ).select_related(
+                    'component_version',
+                    'component_version__component',
+                    'vulnerability'
+                )
+                if findings_qs.exists():
+                    for cvv in findings_qs:
+                        ws.append([
+                            image.name,
+                            cvv.component_version.component.name,
+                            cvv.component_version.component.type,
+                            cvv.component_version.version,
+                            cvv.vulnerability.vulnerability_id,
+                            cvv.vulnerability.severity,
+                            cvv.fix if cvv.fixable else 'No fix available'
+                        ])
+                else:
+                    ws.append([
+                        image.name, '', '', '', '', '', ''
+                    ])
+
+            wb.save(output)
+            output.seek(0)
+
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            filename = f"vulnerability_report_{timestamp}.xlsx"
+
+            response = HttpResponse(
+                output.getvalue(),
+                content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            )
+            response['Content-Disposition'] = f'attachment; filename="{filename}"'
+            response['Access-Control-Expose-Headers'] = 'Content-Disposition'
+            return response
+
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+class ComponentMatrixView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        """
+        Generate a component matrix for selected repositories or images.
+        Returns JSON: columns are repo:tag or image names, rows are components, cells are versions.
+        
+        Request body:
+        {
+            "type": "repository" | "image",  # Type of comparison
+            "repository_tags": [{"repo_uuid": "uuid1", "tag": "tag1"}, ...],  # For repository comparison
+            "image_uuids": ["uuid1", "uuid2"]  # For image comparison
+        }
+        """
+        comparison_type = request.data.get('type', 'repository')
+        repo_tags = request.data.get('repository_tags', [])
+        image_uuids = request.data.get('image_uuids', [])
+
+        if comparison_type == 'repository' and not repo_tags:
+            return Response({'error': 'No repositories selected'}, status=400)
+        elif comparison_type == 'image' and not image_uuids:
+            return Response({'error': 'No images selected'}, status=400)
+
+        # Get all relevant data with a single query
+        from core.models import Repository, RepositoryTag, Image, ComponentVersion, ComponentVersionVulnerability
+        from django.db.models import Max, Prefetch, Subquery, OuterRef
+
+        if comparison_type == 'repository':
+            tags = RepositoryTag.objects.filter(
+                repository__uuid__in=[rt['repo_uuid'] for rt in repo_tags],
+                tag__in=[rt['tag'] for rt in repo_tags]
+            ).select_related('repository').order_by('repository__uuid', '-tag')
+
+            tag_mapping = {
+                f"{tag.repository.uuid}:{tag.tag}": tag
+                for tag in tags
+            }
+
+            columns = []
+            component_set = set()
+            image_components = {}
+            seen_col_labels = set()
+            for repo_tag in repo_tags:
+                repo_uuid = repo_tag['repo_uuid']
+                tag_name = repo_tag['tag']
+                tag_key = f"{repo_uuid}:{tag_name}"
+                tag = tag_mapping.get(tag_key)
+                if not tag:
+                    continue
+                col_label = f"{tag.repository.name}:{tag.tag}"
+                if col_label in seen_col_labels:
+                    continue  # avoid duplicate columns
+                seen_col_labels.add(col_label)
+                columns.append({
+                    'repo': tag.repository.name,
+                    'tag': tag.tag,
+                    'label': col_label,
+                    'type': 'repository'
+                })
+                images_for_tag = Image.objects.filter(repository_tags=tag, sbom_data__isnull=False).order_by('-updated_at')
+                image_components[col_label] = {}
+                for image in images_for_tag:
+                    cvs = image.component_versions.all()
+                    for cv in cvs:
+                        cname = cv.component.name
+                        component_set.add(cname)
+                        if cname not in image_components[col_label]:
+                            image_components[col_label][cname] = {
+                                'version': cv.version,
+                                'has_vuln': cv.componentversionvulnerability_set.exists(),
+                                'latest_version': cv.latest_version
+                            }
+
+        else:  # comparison_type == 'image'
+            # Get all relevant images with SBOM in one query
+            images = Image.objects.filter(
+                uuid__in=image_uuids,
+                sbom_data__isnull=False
+            ).prefetch_related(
+                'component_versions',
+                'component_versions__component',
+                'component_versions__componentversionvulnerability_set'
+            ).order_by('-updated_at')
+
+            # Build columns and collect all component versions in one go
+            columns = []
+            component_set = set()
+            image_components = {}
+            
+            for image in images:
+                col_label = image.name
+                columns.append({
+                    'name': image.name,
+                    'digest': image.digest,
+                    'label': col_label,
+                    'type': 'image'
+                })
+                
+                # Get all component versions for this image with their vulnerabilities
+                cvs = image.component_versions.all()
+                image_components[col_label] = {}
+                
+                for cv in cvs:
+                    cname = cv.component.name
+                    component_set.add(cname)
+                    image_components[col_label][cname] = {
+                        'version': cv.version,
+                        'has_vuln': cv.componentversionvulnerability_set.exists(),
+                        'latest_version': cv.latest_version
+                    }
+
+        components = sorted(component_set)
+
+        # Build matrix using the pre-fetched data
+        matrix = {}
+        for cname in components:
+            matrix[cname] = {}
+            for col in columns:
+                col_label = col['label']
+                if col_label in image_components and cname in image_components[col_label]:
+                    matrix[cname][col_label] = image_components[col_label][cname]
+                else:
+                    matrix[cname][col_label] = {'version': '', 'has_vuln': False, 'latest_version': None}
+
+        # Get component types
+        component_types = {}
+        for component in Component.objects.filter(name__in=components):
+            component_types[component.name] = component.type
+
+        return Response({
+            'components': components,
+            'columns': columns,
+            'matrix': matrix,
+            'type': comparison_type,
+            'component_types': component_types
+        })

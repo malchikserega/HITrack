@@ -21,28 +21,30 @@ class ContainerRegistryAdmin(admin.ModelAdmin):
 
 @admin.register(Repository)
 class RepositoryAdmin(admin.ModelAdmin):
-    list_display = ('name', 'url', 'created_at', 'updated_at', 'last_scanned', 'status')
+    list_display = ('name', 'url', 'status', 'repository_type', 'scan_status', 'last_scanned')
     search_fields = ('name', 'url')
-    list_filter = ('created_at', 'updated_at')
+    list_filter = ('status', 'repository_type', 'scan_status')
+    raw_id_fields = ('container_registry',)
 
 @admin.register(RepositoryTag)
 class RepositoryTagAdmin(admin.ModelAdmin):
-    list_display = ('tag', 'repository', 'created_at', 'updated_at')
+    list_display = ('tag', 'repository', 'processing_status', 'created_at')
     search_fields = ('tag', 'repository__name')
-    list_filter = ('repository', 'created_at', 'updated_at')
+    list_filter = ('processing_status',)
+    raw_id_fields = ('repository',)
 
 @admin.register(Image)
 class ImageAdmin(admin.ModelAdmin):
-    list_display = ('name', 'digest', 'created_at', 'updated_at')
+    list_display = ('name', 'digest', 'scan_status', 'created_at')
     search_fields = ('name', 'digest')
-    list_filter = ('created_at', 'updated_at')
+    list_filter = ('scan_status',)
     filter_horizontal = ('repository_tags',)
 
 @admin.register(Component)
 class ComponentAdmin(admin.ModelAdmin):
-    list_display = ('name', 'created_at', 'updated_at')
-    search_fields = ('name',)
-    list_filter = ('created_at', 'updated_at')
+    list_display = ('name', 'type', 'created_at')
+    search_fields = ('name', 'type')
+    list_filter = ('type',)
 
 class ComponentVersionVulnerabilityInline(admin.TabularInline):
     model = ComponentVersionVulnerability
@@ -53,15 +55,32 @@ class ComponentVersionVulnerabilityInline(admin.TabularInline):
 
 @admin.register(ComponentVersion)
 class ComponentVersionAdmin(admin.ModelAdmin):
-    list_display = ('version', 'component', 'created_at', 'updated_at')
-    search_fields = ('version', 'component__name')
-    list_filter = ('created_at', 'updated_at')
+    list_display = ('component', 'version', 'created_at', 'latest_version')
+    search_fields = ('component__name', 'version', 'purl')
+    list_filter = ('component__type',)
+    raw_id_fields = ('component',)
     filter_horizontal = ('images',)
     inlines = [ComponentVersionVulnerabilityInline]
+    fieldsets = (
+        ('Basic Information', {
+            'fields': ('component', 'version', 'purl', 'latest_version')
+        }),
+        ('CPE Information', {
+            'fields': ('cpes',)
+        })
+    )
+    readonly_fields = ('created_at', 'updated_at')
 
 @admin.register(Vulnerability)
 class VulnerabilityAdmin(admin.ModelAdmin):
-    list_display = ['vulnerability_id', 'vulnerability_type', 'severity', 'epss', 'created_at']
-    list_filter = ['severity', 'vulnerability_type']
-    search_fields = ['vulnerability_id', 'description']
+    list_display = ('vulnerability_id', 'vulnerability_type', 'severity', 'epss', 'created_at')
+    search_fields = ('vulnerability_id', 'description')
+    list_filter = ('vulnerability_type', 'severity')
     readonly_fields = ['uuid', 'created_at', 'updated_at']
+
+@admin.register(ComponentVersionVulnerability)
+class ComponentVersionVulnerabilityAdmin(admin.ModelAdmin):
+    list_display = ('component_version', 'vulnerability', 'fixable', 'fix', 'created_at')
+    search_fields = ('component_version__component__name', 'vulnerability__vulnerability_id')
+    list_filter = ('fixable',)
+    raw_id_fields = ('component_version', 'vulnerability')

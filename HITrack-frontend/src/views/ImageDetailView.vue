@@ -151,6 +151,15 @@
                       {{ item.vulnerabilities_count }}
                     </v-chip>
                   </template>
+                  <template v-slot:item.used_count="{ item }">
+                    <v-chip
+                      color="primary"
+                      size="small"
+                      class="font-weight-medium"
+                    >
+                      {{ item.used_count }}
+                    </v-chip>
+                  </template>
                   <template v-slot:item.created_at="{ item }">
                     {{ $formatDate(item.created_at) }}
                   </template>
@@ -386,12 +395,12 @@ const componentsSearch = ref('')
 const componentsPageCount = computed(() => Math.ceil(componentsTotal.value / componentsPerPage.value))
 
 const componentHeaders = [
-  { title: 'Name', key: 'name', sortable: true },
+  { title: 'Component', key: 'component.name', sortable: true },
   { title: 'Version', key: 'version', sortable: true },
-  { title: 'Type', key: 'type', sortable: true },
+  { title: 'Type', key: 'component.type', sortable: true },
   { title: 'Vulnerabilities', key: 'vulnerabilities_count', sortable: true },
-  { title: 'Created', key: 'created_at', sortable: true },
-  { title: 'Updated', key: 'updated_at', sortable: true },
+  { title: 'Used in:', key: 'used_count', sortable: true },
+  { title: 'Updated', key: 'updated_at', sortable: true }
 ] as const
 
 const fetchComponents = async () => {

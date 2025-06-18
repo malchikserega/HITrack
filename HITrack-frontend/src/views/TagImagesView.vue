@@ -123,6 +123,18 @@
                         />
                       </template>
                     </v-tooltip>
+                    <v-tooltip text="Reanalyze SBOM">
+                      <template v-slot:activator="{ props }">
+                        <v-btn
+                          v-bind="props"
+                          icon="mdi-bug"
+                          variant="tonal"
+                          size="x-small"
+                          color="warning"
+                          @click.stop="onRescanGrype(item)"
+                        />
+                      </template>
+                    </v-tooltip>
                   </td>
                 </tr>
               </template>
@@ -272,6 +284,18 @@ const onRescan = async (image: Image) => {
   }
 }
 
+const onRescanGrype = async (image: Image) => {
+  if (!image.uuid) return
+  try {
+    await api.post(`images/${image.uuid}/rescan-grype/`)
+    notificationService.success('Grype scan scheduled successfully')
+    fetchImages()
+  } catch (e: any) {
+    const msg = e?.response?.data?.error || 'Failed to schedule Grype scan'
+    notificationService.error(msg)
+  }
+}
+
 const goBack = () => router.back()
 
 const navigateToImageDetail = (image: Image) => {
@@ -334,5 +358,10 @@ onMounted(() => {
 }
 .clickable-row:hover {
   background: #f0f4ff !important;
+}
+.v-theme--matrix :deep(.v-table .v-table__wrapper > table > thead > tr > th) {
+  background: #011 !important;
+  color: #39FF14 !important;
+  border: 1px solid #39FF14 !important;
 }
 </style> 

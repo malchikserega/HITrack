@@ -472,4 +472,10 @@ onMounted(() => {
   text-align: center;
   min-width: 40px;
 }
+
+.v-theme--matrix :deep(.v-table .v-table__wrapper > table > thead > tr > th) {
+  background: #011 !important;
+  color: #39FF14 !important;
+  border: 1px solid #39FF14 !important;
+}
 </style> 
