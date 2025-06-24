@@ -217,6 +217,17 @@ const barChartOptions = {
   }
 }
 
+function movingAverage(arr: number[], windowSize = 5): number[] {
+  return arr.map((_, idx, a) => {
+    const start = Math.max(0, idx - Math.floor(windowSize / 2));
+    const end = Math.min(a.length, idx + Math.ceil(windowSize / 2));
+    const window = a.slice(start, end);
+    return window.reduce((sum, v) => sum + v, 0) / window.length;
+  });
+}
+
+const vulnTrendData = computed(() => movingAverage(findingsData.value, 5));
+
 const comboChartData = computed(() => ({
   labels: tagLabels.value,
   datasets: [
@@ -241,6 +252,17 @@ const comboChartData = computed(() => ({
       pointBackgroundColor: '#b2f2e5',
       order: 2,
     },
+    {
+      type: 'line',
+      label: 'Vuln Trend',
+      borderColor: '#ff9800',
+      backgroundColor: 'rgba(255,152,0,0.1)',
+      data: vulnTrendData.value,
+      borderDash: [8, 4],
+      pointRadius: 0,
+      fill: false,
+      order: 3,
+    }
   ]
 }))
 const comboChartOptions = {

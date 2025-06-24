@@ -24,6 +24,8 @@ from django.http import HttpResponse
 from openpyxl import Workbook
 from core.models import ComponentVersionVulnerability
 from django.shortcuts import render
+from packaging import version as packaging_version
+import re
 
 # Create your views here.
 
@@ -162,10 +164,26 @@ class RepositoryViewSet(BaseViewSet):
     def tags_graph(self, request, uuid=None):
         """
         Returns 30 tags for repository for use in charts (fields: uuid, tag, findings, components, created_at)
+        Tags are sorted by semantic version (numeric part) and then by suffix.
         """
         repository = self.get_object()
-        tags = repository.tags.order_by('-tag')[:30]
-        serializer = RepositoryTagListSerializer(tags, many=True)
+        tags = list(repository.tags.all())
+        
+        version_regex = re.compile(r'^(\d+\.\d+\.\d+)')
+        def version_key(tag):
+            match = version_regex.match(tag.tag)
+            if match:
+                try:
+                    ver = packaging_version.parse(match.group(1))
+                except Exception:
+                    ver = packaging_version.Version('0.0.0')
+                suffix = tag.tag[len(match.group(1)):] or ''
+                return (ver, suffix)
+            else:
+                return (packaging_version.Version('0.0.0'), tag.tag)
+        
+        sorted_tags = sorted(tags, key=version_key)[:30]
+        serializer = RepositoryTagListSerializer(sorted_tags, many=True)
         return Response(serializer.data)
 
 class RepositoryTagViewSet(BaseViewSet):
