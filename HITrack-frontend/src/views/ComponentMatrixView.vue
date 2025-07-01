@@ -41,7 +41,7 @@
                         size="small"
                         color="primary"
                         variant="text"
-                        @click="loadTags(repo)"
+                        @click="loadTags(repo, true)"
                         :loading="loadingTags[repo]"
                       >
                         <v-icon>mdi-refresh</v-icon>
@@ -57,6 +57,7 @@
                       :disabled="loadingTags[repo]"
                       clearable
                       multiple
+                      @scroll="(e: Event) => onTagsScroll(e, repo)"
                     >
                       <template v-slot:item="{ props, item }">
                         <v-list-item v-bind="props">
@@ -71,6 +72,15 @@
                             Processing — {{ item.raw.processing_status }}
                           </v-chip>
                         </v-list-item>
+                      </template>
+                      <template v-slot:append>
+                        <v-icon
+                          v-if="loadingMoreTags[repo]"
+                          class="rotating"
+                          size="small"
+                        >
+                          mdi-loading
+                        </v-icon>
                       </template>
                     </v-autocomplete>
                   </v-card-text>
@@ -257,6 +267,12 @@ const availableTags = ref<{ [key: string]: any[] }>({})
 const loadingTags = ref<{ [key: string]: boolean }>({})
 const imagesSearchRef = ref('')
 
+// Add pagination state for tags
+const tagsPage = ref<{ [key: string]: number }>({})
+const tagsPageSize = 50
+const tagsTotal = ref<{ [key: string]: number }>({})
+const loadingMoreTags = ref<{ [key: string]: boolean }>({})
+
 // Computed property for filtered components
 const filteredComponents = computed(() => {
   if (!matrixData.value) return []
@@ -344,16 +360,62 @@ const getRepoName = (uuid: string) => {
   return repo ? repo.name : uuid
 }
 
-const loadTags = async (repoUuid: string) => {
+const loadTags = async (repoUuid: string, reset = false) => {
+  if (loadingTags.value[repoUuid] && !reset) return
+  
+  if (reset) {
+    tagsPage.value[repoUuid] = 1
+    availableTags.value[repoUuid] = []
+  }
+  
   loadingTags.value[repoUuid] = true
   try {
-    const resp = await api.get(`repositories/${repoUuid}/tags-list/`)
-    availableTags.value[repoUuid] = resp.data.results || []
+    const params: any = {
+      page: tagsPage.value[repoUuid] || 1,
+      page_size: tagsPageSize,
+    }
+    const resp = await api.get(`repositories/${repoUuid}/tags-list/`, { params })
+    
+    if (reset) {
+      availableTags.value[repoUuid] = resp.data.results || []
+    } else {
+      availableTags.value[repoUuid] = [...(availableTags.value[repoUuid] || []), ...(resp.data.results || [])]
+    }
+    
+    tagsTotal.value[repoUuid] = resp.data.count
   } catch (e) {
     notificationService.error('Failed to fetch repository tags')
-    availableTags.value[repoUuid] = []
+    if (reset) {
+      availableTags.value[repoUuid] = []
+    }
   } finally {
     loadingTags.value[repoUuid] = false
+  }
+}
+
+const loadMoreTags = async (repoUuid: string) => {
+  if (loadingMoreTags.value[repoUuid]) return
+  
+  const currentTags = availableTags.value[repoUuid] || []
+  const total = tagsTotal.value[repoUuid] || 0
+  
+  if (currentTags.length >= total) return
+  
+  loadingMoreTags.value[repoUuid] = true
+  try {
+    tagsPage.value[repoUuid] = (tagsPage.value[repoUuid] || 1) + 1
+    await loadTags(repoUuid, false)
+  } finally {
+    loadingMoreTags.value[repoUuid] = false
+  }
+}
+
+const onTagsScroll = (e: Event, repoUuid: string) => {
+  const el = e.target as HTMLElement
+  if (!el) return
+  
+  if (el.scrollTop + el.clientHeight >= el.scrollHeight - 10) {
+    loadMoreTags(repoUuid)
   }
 }
 
@@ -361,7 +423,7 @@ watch(selectedRepos, (newRepos, oldRepos) => {
   // Load tags for newly selected repos
   newRepos.forEach(repo => {
     if (!oldRepos.includes(repo)) {
-      loadTags(repo)
+      loadTags(repo, true)
     }
   })
   // Clear tags for unselected repos
@@ -369,6 +431,9 @@ watch(selectedRepos, (newRepos, oldRepos) => {
     if (!newRepos.includes(repo)) {
       delete selectedTags.value[repo]
       delete availableTags.value[repo]
+      delete tagsPage.value[repo]
+      delete tagsTotal.value[repo]
+      delete loadingMoreTags.value[repo]
     }
   })
 })
@@ -603,5 +668,18 @@ onMounted(() => {
   color: #39FF14 !important;
   border: 1px solid #39FF14 !important;
   font-weight: bold;
+}
+
+.rotating {
+  animation: rotate 1s linear infinite;
+}
+
+@keyframes rotate {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 </style>
