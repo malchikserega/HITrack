@@ -22,7 +22,6 @@ from io import BytesIO
 from rest_framework.views import APIView
 from django.http import HttpResponse
 from openpyxl import Workbook
-from core.models import ComponentVersionVulnerability
 from django.shortcuts import render
 from packaging import version as packaging_version
 import re
@@ -49,7 +48,7 @@ class RepositoryViewSet(BaseViewSet):
         return RepositorySerializer
 
     @action(detail=True, methods=['get'])
-    def tags(self, request, pk=None):
+    def tags(self, request, uuid=None):
         repository = self.get_object()
         tags = repository.tags.all()
         serializer = RepositoryTagSerializer(tags, many=True)
@@ -315,14 +314,81 @@ class ImageViewSet(BaseViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-    @action(detail=True, methods=['get'])
-    def vulnerabilities(self, request, pk=None):
-        image = self.get_object()
+    @action(detail=True, methods=['get'], url_path='vulnerabilities')
+    def vulnerabilities(self, request, uuid=None):
+        """
+        Paginated list of vulnerabilities for a given image, with search and ordering support.
+        """
+        # Temporarily disable search filter for this action
+        original_filter_backends = self.filter_backends
+        self.filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+        
+        try:
+            image = self.get_object()
+        except Exception:
+            self.filter_backends = original_filter_backends
+            return Response({'error': 'Image not found'}, status=404)
+        
+        # Restore original filter_backends
+        self.filter_backends = original_filter_backends
+        
+        # Get all vulnerabilities linked to this image through component versions
         vulnerabilities = Vulnerability.objects.filter(
             component_versions__images=image
         ).distinct()
-        serializer = VulnerabilitySerializer(vulnerabilities, many=True)
-        return Response(serializer.data)
+
+        # Search
+        search = request.query_params.get('search')
+        if search:
+            vulnerabilities = vulnerabilities.filter(
+                vulnerability_id__icontains=search
+            )
+
+        # Ordering
+        ordering = request.query_params.get('ordering')
+        if ordering:
+            # Support ordering by vulnerability fields
+            ordering_map = {
+                'vulnerability_id': 'vulnerability_id',
+                '-vulnerability_id': '-vulnerability_id',
+                'vulnerability_type': 'vulnerability_type',
+                '-vulnerability_type': '-vulnerability_type',
+                'severity': 'severity',
+                '-severity': '-severity',
+                'epss': 'epss',
+                '-epss': '-epss',
+                'created_at': 'created_at',
+                '-created_at': '-created_at',
+                'updated_at': 'updated_at',
+                '-updated_at': '-updated_at',
+            }
+            ordering_field = ordering_map.get(ordering, ordering)
+            vulnerabilities = vulnerabilities.order_by(ordering_field)
+        else:
+            vulnerabilities = vulnerabilities.order_by('-created_at')
+
+        # Pagination
+        paginator = CustomPageNumberPagination()
+        page = paginator.paginate_queryset(vulnerabilities, request)
+        
+        # Serialize with fix information from ComponentVersionVulnerability
+        vuln_data = []
+        for vuln in page:
+            vuln_dict = VulnerabilitySerializer(vuln).data
+            # Get fix information from ComponentVersionVulnerability
+            cvv = ComponentVersionVulnerability.objects.filter(
+                vulnerability=vuln,
+                component_version__images=image
+            ).first()
+            if cvv:
+                vuln_dict['fixable'] = cvv.fixable
+                vuln_dict['fix'] = cvv.fix
+            else:
+                vuln_dict['fixable'] = False
+                vuln_dict['fix'] = ''
+            vuln_data.append(vuln_dict)
+        
+        return paginator.get_paginated_response(vuln_data)
 
     @action(detail=True, methods=['post'])
     def rescan(self, request, uuid=None):
@@ -437,7 +503,7 @@ class ComponentViewSet(viewsets.ReadOnlyModelViewSet):
         return ComponentSerializer
 
     @action(detail=True, methods=['get'])
-    def versions(self, request, pk=None):
+    def versions(self, request, uuid=None):
         component = self.get_object()
         versions = component.versions.select_related(
             'component'
@@ -465,7 +531,7 @@ class ComponentVersionViewSet(BaseViewSet):
         return ComponentVersionSerializer
 
     @action(detail=True, methods=['get'])
-    def vulnerabilities(self, request, pk=None):
+    def vulnerabilities(self, request, uuid=None):
         version = self.get_object()
         vulnerabilities = version.vulnerabilities.all()
         serializer = VulnerabilitySerializer(vulnerabilities, many=True)
@@ -498,9 +564,9 @@ class VulnerabilityViewSet(BaseViewSet):
     """
     queryset = Vulnerability.objects.all()
     serializer_class = VulnerabilitySerializer
-    filterset_fields = ['severity', 'component_versions']
-    search_fields = ['cve_id', 'description']
-    ordering_fields = ['cve_id', 'severity', 'epss', 'created_at', 'updated_at']
+    filterset_fields = ['severity', 'vulnerability_type']
+    search_fields = ['vulnerability_id']
+    ordering_fields = ['vulnerability_id', 'severity', 'epss', 'created_at', 'updated_at']
 
     @action(detail=False, methods=['get'])
     def severity_stats(self, request):

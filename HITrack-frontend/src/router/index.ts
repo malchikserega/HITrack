@@ -48,6 +48,12 @@ const router = createRouter({
       meta: { requiresAuth: true }
     },
     {
+      path: '/vulnerabilities/:uuid',
+      name: 'vulnerability-detail',
+      component: () => import('../views/VulnerabilityDetailView.vue'),
+      meta: { requiresAuth: true }
+    },
+    {
       path: '/acr',
       name: 'ACR',
       component: () => import('../views/ACRView.vue'),

@@ -104,88 +104,230 @@
               </v-card-text>
             </v-card>
 
-            <!-- Components table -->
-            <v-row>
-              <v-col cols="12">
-                <h2 class="text-h6 font-weight-bold mb-2 mt-6">Components</h2>
-                <v-text-field
-                  v-model="componentsSearch"
-                  label="Search components"
-                  prepend-inner-icon="mdi-magnify"
-                  variant="outlined"
-                  clearable
-                  class="mb-4"
-                  @click:clear="componentsSearch = ''"
-                ></v-text-field>
-                <v-data-table
-                  :headers="componentHeaders"
-                  :items="components"
-                  :loading="componentsLoading"
-                  :items-per-page="componentsPerPage"
-                  :page="componentsPage"
-                  :sort-by="componentsSortBy"
-                  :sort-desc="componentsSortDesc"
-                  hide-default-footer
-                  class="elevation-1"
-                  hover
-                  density="comfortable"
-                >
-                  <template v-slot:item.name="{ item }">
-                    {{ item.component.name }}
-                  </template>
-                  <template v-slot:item.version="{ item }">
-                    {{ item.version }}
-                  </template>
-                  <template v-slot:item.type="{ item }">
-                    <v-chip size="small" :color="getTypeColor(item.component.type)" variant="tonal">
-                      {{ item.component.type }}
-                    </v-chip>
-                  </template>
-                  <template v-slot:item.vulnerabilities_count="{ item }: { item: ComponentVersion }">
-                    <v-chip
-                      size="small"
-                      :color="item.vulnerabilities_count > 0 ? 'error' : 'success'"
-                      variant="tonal"
-                      class="font-weight-medium"
+            <!-- Tabs for Components and Vulnerabilities -->
+            <v-card class="mb-4">
+              <v-tabs v-model="activeTab" color="primary" grow>
+                <v-tab value="components">
+                  <v-icon start>mdi-package-variant</v-icon>
+                  Components
+                </v-tab>
+                <v-tab value="vulnerabilities">
+                  <v-icon start>mdi-shield-alert</v-icon>
+                  Vulnerabilities
+                </v-tab>
+              </v-tabs>
+
+              <v-window v-model="activeTab">
+                <!-- Components Tab -->
+                <v-window-item value="components">
+                  <v-card-text>
+                    <v-text-field
+                      v-model="componentsSearch"
+                      label="Search components"
+                      prepend-inner-icon="mdi-magnify"
+                      :append-inner-icon="componentsLoading ? 'mdi-loading mdi-spin' : undefined"
+                      variant="outlined"
+                      clearable
+                      class="mb-4"
+                      @click:clear="componentsSearch = ''"
+                    ></v-text-field>
+                    <div v-if="componentsSearch" class="text-caption text-grey mb-4 text-right">
+                      Found {{ componentsTotal }} result{{ componentsTotal !== 1 ? 's' : '' }}
+                    </div>
+                    <v-data-table
+                      :headers="componentHeaders"
+                      :items="components"
+                      :loading="componentsLoading"
+                      :items-per-page="componentsPerPage"
+                      :page="componentsPage"
+                      :sort-by="componentsSortBy"
+                      :sort-desc="componentsSortDesc"
+                      hide-default-footer
+                      class="elevation-1"
+                      hover
+                      density="comfortable"
+                      :no-data-text="componentsSearch ? 'No components found matching your search' : 'No components found'"
                     >
-                      {{ item.vulnerabilities_count }}
-                    </v-chip>
-                  </template>
-                  <template v-slot:item.used_count="{ item }">
-                    <v-chip
-                      color="primary"
-                      size="small"
-                      class="font-weight-medium"
+                      <template v-slot:item.name="{ item }">
+                        {{ item.component.name }}
+                      </template>
+                      <template v-slot:item.version="{ item }">
+                        {{ item.version }}
+                      </template>
+                      <template v-slot:item.type="{ item }">
+                        <v-chip size="small" :color="getComponentTypeColor(item.component.type)" variant="tonal">
+                          {{ item.component.type }}
+                        </v-chip>
+                      </template>
+                      <template v-slot:item.vulnerabilities_count="{ item }: { item: ComponentVersion }">
+                        <v-chip
+                          size="small"
+                          :color="item.vulnerabilities_count > 0 ? 'error' : 'success'"
+                          variant="tonal"
+                          class="font-weight-medium"
+                        >
+                          {{ item.vulnerabilities_count }}
+                        </v-chip>
+                      </template>
+                      <template v-slot:item.used_count="{ item }">
+                        <v-chip
+                          color="primary"
+                          size="small"
+                          class="font-weight-medium"
+                        >
+                          {{ item.used_count }}
+                        </v-chip>
+                      </template>
+                      <template v-slot:item.created_at="{ item }">
+                        {{ $formatDate(item.created_at) }}
+                      </template>
+                      <template v-slot:item.updated_at="{ item }">
+                        {{ $formatDate(item.updated_at) }}
+                      </template>
+                    </v-data-table>
+                    <div class="d-flex align-center justify-end mt-2 gap-4">
+                      <v-select
+                        :items="[10, 20, 50, 100]"
+                        v-model="componentsPerPage"
+                        label="Items per page"
+                        style="max-width: 150px"
+                        hide-details
+                        density="compact"
+                        variant="outlined"
+                        @update:model-value="onComponentsItemsPerPageChange"
+                      />
+                      <v-pagination
+                        v-model="componentsPage"
+                        :length="componentsPageCount"
+                        @update:model-value="fetchComponents"
+                        :total-visible="7"
+                        density="comfortable"
+                      />
+                    </div>
+                  </v-card-text>
+                </v-window-item>
+
+                <!-- Vulnerabilities Tab -->
+                <v-window-item value="vulnerabilities">
+                  <v-card-text>
+                    <v-text-field
+                      v-model="vulnerabilitiesSearch"
+                      label="Search vulnerabilities"
+                      placeholder="Search by vulnerability ID (e.g., CVE-2023-1234)"
+                      prepend-inner-icon="mdi-magnify"
+                      :append-inner-icon="vulnerabilitiesLoading ? 'mdi-loading mdi-spin' : undefined"
+                      variant="outlined"
+                      clearable
+                      class="mb-4"
+                      @click:clear="vulnerabilitiesSearch = ''"
+                    ></v-text-field>
+                    <div class="d-flex align-center justify-space-between mb-4">
+                      <div class="text-caption text-grey">
+                        💡 Search by vulnerability ID (e.g., CVE-2023-1234, GHSA-abc123, etc.)
+                      </div>
+                      <div v-if="vulnerabilitiesSearch" class="text-caption text-grey">
+                        Found {{ vulnerabilitiesTotal }} result{{ vulnerabilitiesTotal !== 1 ? 's' : '' }}
+                      </div>
+                    </div>
+                    <v-data-table
+                      :headers="vulnerabilityHeaders"
+                      :items="vulnerabilities"
+                      :loading="vulnerabilitiesLoading"
+                      :items-per-page="vulnerabilitiesPerPage"
+                      :page="vulnerabilitiesPage"
+                      :sort-by="vulnerabilitiesSortBy"
+                      :sort-desc="vulnerabilitiesSortDesc"
+                      hide-default-footer
+                      class="elevation-1"
+                      hover
+                      density="comfortable"
+                      @click:row="onVulnerabilityRowClick"
+                      :no-data-text="vulnerabilitiesSearch ? 'No vulnerabilities found matching your search' : 'No vulnerabilities found'"
                     >
-                      {{ item.used_count }}
-                    </v-chip>
-                  </template>
-                  <template v-slot:item.created_at="{ item }">
-                    {{ $formatDate(item.created_at) }}
-                  </template>
-                  <template v-slot:item.updated_at="{ item }">
-                    {{ $formatDate(item.updated_at) }}
-                  </template>
-                </v-data-table>
-                <div class="d-flex align-center justify-end mt-2 gap-4">
-                  <v-select
-                    :items="[10, 20, 50, 100]"
-                    v-model="componentsPerPage"
-                    label="Items per page"
-                    style="max-width: 150px"
-                    hide-details
-                    density="compact"
-                    variant="outlined"
-                  />
-                  <v-pagination
-                    v-model="componentsPage"
-                    :length="componentsPageCount"
-                    :total-visible="7"
-                    density="comfortable"
-                  />
-                </div>
-              </v-col>
-            </v-row>
+                      <template v-slot:item.vulnerability_id="{ item }">
+                        <v-chip
+                          size="small"
+                          color="primary"
+                          variant="tonal"
+                          class="font-weight-medium"
+                        >
+                          {{ item.vulnerability_id }}
+                        </v-chip>
+                      </template>
+                      <template v-slot:item.vulnerability_type="{ item }">
+                        <v-chip
+                          size="small"
+                          :color="getVulnerabilityTypeColor(item.vulnerability_type)"
+                          variant="tonal"
+                        >
+                          {{ item.vulnerability_type }}
+                        </v-chip>
+                      </template>
+                      <template v-slot:item.severity="{ item }">
+                        <v-chip
+                          size="small"
+                          :color="getSeverityColor(item.severity)"
+                          variant="tonal"
+                          class="font-weight-medium"
+                        >
+                          {{ item.severity }}
+                        </v-chip>
+                      </template>
+                      <template v-slot:item.epss="{ item }">
+                        <v-chip
+                          size="small"
+                          :color="getEpssColor(item.epss)"
+                          variant="tonal"
+                        >
+                          {{ (item.epss * 100).toFixed(1) }}%
+                        </v-chip>
+                      </template>
+                      <template v-slot:item.fixable="{ item }">
+                        <v-chip
+                          size="small"
+                          :color="item.fixable ? 'success' : 'error'"
+                          variant="tonal"
+                        >
+                          <v-icon size="x-small" class="mr-1">
+                            {{ item.fixable ? 'mdi-check' : 'mdi-close' }}
+                          </v-icon>
+                          {{ item.fixable ? 'Fixable' : 'Not Fixable' }}
+                        </v-chip>
+                      </template>
+                      <template v-slot:item.fix="{ item }">
+                        <span v-if="item.fix" class="text-caption">{{ item.fix }}</span>
+                        <span v-else class="text-caption text-grey">No fix available</span>
+                      </template>
+                      <template v-slot:item.created_at="{ item }">
+                        {{ $formatDate(item.created_at) }}
+                      </template>
+                      <template v-slot:item.updated_at="{ item }">
+                        {{ $formatDate(item.updated_at) }}
+                      </template>
+                    </v-data-table>
+                    <div class="d-flex align-center justify-end mt-2 gap-4">
+                      <v-select
+                        :items="[10, 20, 50, 100]"
+                        v-model="vulnerabilitiesPerPage"
+                        label="Items per page"
+                        style="max-width: 150px"
+                        hide-details
+                        density="compact"
+                        variant="outlined"
+                        @update:model-value="onVulnerabilitiesItemsPerPageChange"
+                      />
+                      <v-pagination
+                        v-model="vulnerabilitiesPage"
+                        :length="vulnerabilitiesPageCount"
+                        @update:model-value="fetchVulnerabilities"
+                        :total-visible="7"
+                        density="comfortable"
+                      />
+                    </div>
+                  </v-card-text>
+                </v-window-item>
+              </v-window>
+            </v-card>
           </div>
         </v-col>
       </v-row>
@@ -197,7 +339,10 @@
 import { ref, onMounted, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import api from '../plugins/axios'
-import type { Image, ComponentVersion, PaginatedResponse } from '../types/interfaces'
+import { notificationService } from '../plugins/notifications'
+import { debounce } from '../utils/debounce'
+import { getComponentTypeColor, getVulnerabilityTypeColor, getSeverityColor, getEpssColor } from '../utils/colors'
+import type { Image, ComponentVersion, PaginatedResponse, Vulnerability } from '../types/interfaces'
 import PieChart from '../components/PieChart.vue'
 import type { DataTableSortItem } from 'vuetify'
 
@@ -218,6 +363,9 @@ const showSbom = ref(false)
 const sbomLoading = ref(false)
 const sbomData = ref<any>(null)
 
+// Active tab
+const activeTab = ref('components')
+
 // PieChart legend filtering logic
 const severityOrder = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN']
 const severityLabels = ['Critical', 'High', 'Medium', 'Low', 'Info|Unknown']
@@ -230,26 +378,7 @@ const severityColors = [
 ]
 const legendVisible = ref([true, true, true, true, true])
 
-const getTypeColor = (type: string | undefined) => {
-  if (!type) return 'grey'
-  const typeMap: { [key: string]: string } = {
-    'npm': 'success',
-    'python': 'info',
-    'java': 'warning',
-    'ruby': 'error',
-    'golang': 'primary',
-    'rust': 'secondary',
-    'php': 'purple',
-    'dotnet': 'blue',
-    'debian': 'orange',
-    'alpine': 'teal',
-    'ubuntu': 'indigo',
-    'centos': 'red',
-    'rhel': 'deep-orange',
-    'unknown': 'grey'
-  }
-  return typeMap[type.toLowerCase()] || 'grey'
-}
+// Color utilities imported from utils/colors.ts
 
 const pieChartData = computed(() => {
   if (!image.value) {
@@ -432,35 +561,95 @@ const fetchComponents = async () => {
       ordering,
       search: componentsSearch.value || undefined
     }
-    console.log('fetchComponents: sending request to', `/component-versions/`, params)
     const resp = await api.get<PaginatedResponse<ComponentVersion>>(`/component-versions/`, { params })
     components.value = resp.data.results
     componentsTotal.value = resp.data.count
-  } catch (e) {
-    console.log('fetchComponents: error', e)
+  } catch (e: any) {
     components.value = []
     componentsTotal.value = 0
+    // Show error notification if it's not a 404 (which is expected for empty results)
+    if (e?.response?.status !== 404) {
+      notificationService.error('Failed to fetch components')
+    }
   } finally {
     componentsLoading.value = false
   }
 }
 
-// Replace componentsSearch watcher with debounce
-function debounce(fn: Function, delay: number) {
-  let timeout: ReturnType<typeof setTimeout> | null = null
-  return (...args: any[]) => {
-    if (timeout) clearTimeout(timeout)
-    timeout = setTimeout(() => fn(...args), delay)
+// --- Vulnerabilities for table ---
+const vulnerabilities = ref<Vulnerability[]>([])
+const vulnerabilitiesLoading = ref(false)
+const vulnerabilitiesTotal = ref(0)
+const vulnerabilitiesPage = ref(1)
+const vulnerabilitiesPerPage = ref(10)
+const vulnerabilitiesSortBy = ref<readonly DataTableSortItem[]>([])
+const vulnerabilitiesSortDesc = ref<boolean[]>([])
+const vulnerabilitiesSearch = ref('')
+const vulnerabilitiesPageCount = computed(() => Math.ceil(vulnerabilitiesTotal.value / vulnerabilitiesPerPage.value))
+
+const vulnerabilityHeaders = [
+  { title: 'Vulnerability ID', key: 'vulnerability_id', sortable: true },
+  { title: 'Type', key: 'vulnerability_type', sortable: true },
+  { title: 'Severity', key: 'severity', sortable: true },
+  { title: 'EPSS', key: 'epss', sortable: true },
+  { title: 'Fixable', key: 'fixable', sortable: true },
+  { title: 'Fix', key: 'fix', sortable: false },
+  { title: 'Updated', key: 'updated_at', sortable: true }
+] as const
+
+const fetchVulnerabilities = async () => {
+  if (!image.value || !image.value.uuid) {
+    console.log('fetchVulnerabilities: image.value or image.value.uuid is not set');
+    return;
+  }
+  vulnerabilitiesLoading.value = true
+  try {
+    // Get the first sort field and direction
+    const sortField = vulnerabilitiesSortBy.value[0]
+    const sortDesc = vulnerabilitiesSortDesc.value[0]
+    
+    // Build ordering parameter
+    let ordering = undefined
+    if (sortField) {
+      const prefix = sortDesc ? '-' : ''
+      ordering = `${prefix}${sortField}`
+    }
+
+    const params = {
+      page: vulnerabilitiesPage.value,
+      page_size: vulnerabilitiesPerPage.value,
+      ordering,
+      search: vulnerabilitiesSearch.value || undefined
+    }
+    const resp = await api.get<PaginatedResponse<Vulnerability>>(`/images/${image.value.uuid}/vulnerabilities/`, { params })
+    vulnerabilities.value = resp.data.results
+    vulnerabilitiesTotal.value = resp.data.count
+  } catch (e: any) {
+    vulnerabilities.value = []
+    vulnerabilitiesTotal.value = 0
+    // Show error notification if it's not a 404 (which is expected for empty results)
+    if (e?.response?.status !== 404) {
+      notificationService.error('Failed to fetch vulnerabilities')
+    }
+  } finally {
+    vulnerabilitiesLoading.value = false
   }
 }
 
+// Debounced fetch functions
 const debouncedFetchComponents = debounce(() => {
   if (image.value && image.value.uuid) {
     fetchComponents()
   }
 }, 300)
 
-// Заменяем watcher для componentsSearch на debounce
+const debouncedFetchVulnerabilities = debounce(() => {
+  if (image.value && image.value.uuid) {
+    fetchVulnerabilities()
+  }
+}, 300)
+
+// Watchers for components
 watch([
   componentsPage,
   componentsPerPage,
@@ -472,6 +661,44 @@ watch(componentsSearch, () => {
   componentsPage.value = 1 // reset to first page on new search
   debouncedFetchComponents()
 })
+
+// Watchers for vulnerabilities
+watch([
+  vulnerabilitiesPage,
+  vulnerabilitiesPerPage,
+  vulnerabilitiesSortBy,
+  vulnerabilitiesSortDesc
+], fetchVulnerabilities)
+
+watch(vulnerabilitiesSearch, () => {
+  vulnerabilitiesPage.value = 1 // reset to first page on new search
+  debouncedFetchVulnerabilities()
+})
+
+// Watch for tab changes to load vulnerabilities when needed
+watch(activeTab, (newTab) => {
+  if (newTab === 'vulnerabilities' && image.value && image.value.uuid) {
+    fetchVulnerabilities()
+  }
+})
+
+const onVulnerabilitiesItemsPerPageChange = (val: number) => {
+  vulnerabilitiesPerPage.value = val
+  vulnerabilitiesPage.value = 1
+  fetchVulnerabilities()
+}
+
+const onComponentsItemsPerPageChange = (val: number) => {
+  componentsPerPage.value = val
+  componentsPage.value = 1
+  fetchComponents()
+}
+
+const onVulnerabilityRowClick = (event: MouseEvent, { item }: { item: Vulnerability }) => {
+  if (item && item.uuid) {
+    router.push({ name: 'vulnerability-detail', params: { uuid: item.uuid } })
+  }
+}
 
 onMounted(fetchImage)
 </script>
@@ -565,4 +792,6 @@ onMounted(fetchImage)
 .switch-fixable-findings {
   margin-right: 8px;
 }
+
+/* Component-specific styles */
 </style> 

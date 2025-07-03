@@ -1,4 +1,5 @@
 import './assets/main.css'
+import './assets/animations.css'
 
 import { createApp } from 'vue'
 import type { App as VueApp } from 'vue'

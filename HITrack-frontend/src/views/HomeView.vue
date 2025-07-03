@@ -51,15 +51,17 @@
         </v-col>
 
         <v-col cols="12" sm="6" md="3">
-          <v-card class="dashboard-card" elevation="2" :color="'#f8f9fa'">
-            <div class="d-flex flex-column align-center justify-center text-center" style="min-height:170px;">
-              <div class="icon-number-row">
-                <v-icon class="dashboard-icon mr-2" color="#d32f2f">mdi-bug</v-icon>
-                <div class="dashboard-number">{{ stats.vulnerabilities }}</div>
+          <router-link to="/vulnerabilities" style="text-decoration: none;">
+            <v-card class="dashboard-card" elevation="2" :color="'#f8f9fa'">
+              <div class="d-flex flex-column align-center justify-center text-center" style="min-height:170px;">
+                <div class="icon-number-row">
+                  <v-icon class="dashboard-icon mr-2" color="#d32f2f">mdi-bug</v-icon>
+                  <div class="dashboard-number">{{ stats.vulnerabilities }}</div>
+                </div>
+                <div class="dashboard-label">Vulnerabilities</div>
               </div>
-              <div class="dashboard-label">Vulnerabilities</div>
-            </div>
-          </v-card>
+            </v-card>
+          </router-link>
         </v-col>
       </v-row>
     </v-container>
