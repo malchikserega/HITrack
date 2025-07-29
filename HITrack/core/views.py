@@ -65,7 +65,7 @@ class RepositoryViewSet(BaseViewSet):
 
         registry_uuid = request.query_params.get('registry_uuid')
         provider = request.query_params.get('provider', 'acr')
-        page_size = int(request.query_params.get('page_size', 50))
+        page_size = int(request.query_params.get('page_size', 100))
         last_repo = request.query_params.get('last')
         
         try:
