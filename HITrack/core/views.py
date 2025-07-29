@@ -162,8 +162,8 @@ class RepositoryViewSet(BaseViewSet):
     @action(detail=True, methods=['get'], url_path='tags-graph')
     def tags_graph(self, request, uuid=None):
         """
-        Returns 30 tags for repository for use in charts (fields: uuid, tag, findings, components, created_at)
-        Tags are sorted by semantic version (numeric part) and then by suffix.
+        Returns the latest 30 tags for repository for use in charts (fields: uuid, tag, findings, components, created_at)
+        Tags are sorted by semantic version (numeric part) and then by suffix, returning the most recent 30 tags.
         """
         repository = self.get_object()
         tags = list(repository.tags.all())
@@ -181,7 +181,7 @@ class RepositoryViewSet(BaseViewSet):
             else:
                 return (packaging_version.Version('0.0.0'), tag.tag)
         
-        sorted_tags = sorted(tags, key=version_key)[:30]
+        sorted_tags = sorted(tags, key=version_key)[-30:]
         serializer = RepositoryTagListSerializer(sorted_tags, many=True)
         return Response(serializer.data)
 
