@@ -5,7 +5,7 @@ from .views import (
     ComponentViewSet, ComponentVersionViewSet, VulnerabilityViewSet,
     StatsViewSet, JobViewSet, HasACRRegistryView, ListACRRegistriesView,
     RepositoryTagListForRepositoryView, ReportGeneratorView,
-    ComponentMatrixView
+    ComponentMatrixView, ReleaseViewSet
 )
 
 router = DefaultRouter()
@@ -15,6 +15,7 @@ router.register(r'images', ImageViewSet, basename='image')
 router.register(r'components', ComponentViewSet, basename='component')
 router.register(r'component-versions', ComponentVersionViewSet)
 router.register(r'vulnerabilities', VulnerabilityViewSet, basename='vulnerability')
+router.register(r'releases', ReleaseViewSet, basename='release')
 router.register(r'stats', StatsViewSet, basename='stats')
 router.register(r'jobs', JobViewSet, basename='job')
 

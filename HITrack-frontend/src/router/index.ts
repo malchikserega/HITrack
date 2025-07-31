@@ -85,6 +85,12 @@ const router = createRouter({
       name: 'component-matrix',
       component: () => import('../views/ComponentMatrixView.vue'),
       meta: { requiresAuth: true }
+    },
+    {
+      path: '/releases',
+      name: 'releases',
+      component: () => import('../views/ReleasesView.vue'),
+      meta: { requiresAuth: true }
     }
   ]
 })

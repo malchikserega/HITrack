@@ -17,6 +17,57 @@
               {{ tagName }}
             </v-chip>
           </div>
+          
+          <!-- Release Management Section -->
+          <v-row class="mb-4">
+            <v-col cols="12">
+              <v-card elevation="2">
+                <v-card-title class="text-h6 pa-4">
+                  <v-icon class="mr-2">mdi-tag-multiple</v-icon>
+                  Release Assignments
+                </v-card-title>
+                <v-card-text class="pa-4">
+                  <div class="d-flex align-center mb-3">
+                    <span class="text-body-1 mr-3">Current Releases:</span>
+                    <div v-if="tagReleases.length > 0" class="d-flex flex-wrap gap-2">
+                      <v-chip
+                        v-for="release in tagReleases"
+                        :key="release.uuid"
+                        color="success"
+                        variant="tonal"
+                        closable
+                        @click:close="removeFromRelease(release.uuid)"
+                      >
+                        {{ release.name }}
+                      </v-chip>
+                    </div>
+                    <span v-else class="text-body-2 text-medium-emphasis">No releases assigned</span>
+                  </div>
+                  
+                  <div class="d-flex align-center">
+                    <v-select
+                      v-model="selectedRelease"
+                      :items="availableReleases"
+                      item-title="name"
+                      item-value="uuid"
+                      label="Add to Release"
+                      density="compact"
+                      style="max-width: 300px"
+                      class="mr-3"
+                    />
+                    <v-btn
+                      color="primary"
+                      :disabled="!selectedRelease"
+                      @click="addToRelease"
+                      prepend-icon="mdi-plus"
+                    >
+                      Add to Release
+                    </v-btn>
+                  </div>
+                </v-card-text>
+              </v-card>
+            </v-col>
+          </v-row>
         </v-col>
       </v-row>
       <v-row class="pa-0 ma-0 mt-0">
@@ -190,6 +241,12 @@ const totalItems = ref(0)
 const sortBy = ref<SortItem[]>([{ key: 'updated_at', order: 'desc' }])
 const showUniqueFindings = ref(false)
 
+// Release management
+const tagReleases = ref<Array<{ uuid: string; name: string }>>([])
+const availableReleases = ref<Array<{ uuid: string; name: string }>>([])
+const selectedRelease = ref<string>('')
+const loadingReleases = ref(false)
+
 const headers: any[] = [
   { title: 'Name', key: 'name', sortable: true },
   { title: 'Digest', key: 'digest', sortable: true },
@@ -311,9 +368,88 @@ const fetchTagName = async () => {
   }
 }
 
-onMounted(() => {
+// Release management functions
+const fetchReleases = async () => {
+  loadingReleases.value = true
+  try {
+    const response = await api.get('/releases/')
+    const allReleases = response.data.results || response.data
+    
+    // If we have tag releases, filter out already assigned ones
+    if (tagReleases.value.length > 0) {
+      const assignedReleaseUuids = tagReleases.value.map((r: any) => r.uuid)
+      availableReleases.value = allReleases.filter(
+        (release: any) => !assignedReleaseUuids.includes(release.uuid)
+      )
+    } else {
+      availableReleases.value = allReleases
+    }
+  } catch (error) {
+    console.error('Error fetching releases:', error)
+    notificationService.error('Failed to load releases')
+  } finally {
+    loadingReleases.value = false
+  }
+}
+
+const fetchTagReleases = async () => {
+  try {
+    const response = await api.get(`/repository-tags/${tagUuid.value}/`)
+    tagReleases.value = response.data.releases || []
+    
+    // Update available releases to exclude already assigned ones
+    const assignedReleaseUuids = tagReleases.value.map((r: any) => r.uuid)
+    availableReleases.value = availableReleases.value.filter(
+      (release: any) => !assignedReleaseUuids.includes(release.uuid)
+    )
+  } catch (error) {
+    console.error('Error fetching tag releases:', error)
+    tagReleases.value = []
+  }
+}
+
+const addToRelease = async () => {
+  if (!selectedRelease.value) return
+  
+  try {
+    await api.post(`/repository-tags/${tagUuid.value}/add_to_release/`, {
+      release_id: selectedRelease.value
+    })
+    notificationService.success('Tag added to release successfully')
+    selectedRelease.value = ''
+    
+    // Refresh both lists
+    await fetchReleases()
+    await fetchTagReleases()
+  } catch (error) {
+    console.error('Error adding tag to release:', error)
+    notificationService.error('Failed to add tag to release')
+  }
+}
+
+const removeFromRelease = async (releaseUuid: string) => {
+  try {
+    await api.delete(`/repository-tags/${tagUuid.value}/remove_from_release/`, {
+      data: { release_id: releaseUuid }
+    })
+    notificationService.success('Tag removed from release successfully')
+    
+    // Refresh both lists
+    await fetchReleases()
+    await fetchTagReleases()
+  } catch (error) {
+    console.error('Error removing tag from release:', error)
+    notificationService.error('Failed to remove tag from release')
+  }
+}
+
+onMounted(async () => {
   fetchTagName()
   fetchImages()
+  
+  // Load tag releases first, then available releases
+  await fetchTagReleases()
+  await fetchReleases()
 })
 </script>
 

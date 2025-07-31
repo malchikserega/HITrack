@@ -107,7 +107,8 @@ const severityColors = {
   'HIGH': '#ff9800',
   'MEDIUM': '#ffc107',
   'LOW': '#4caf50',
-  'UNKNOWN': '#9e9e9e'
+  'UNKNOWN': '#9e9e9e',
+  'LOW_GROUP': '#4caf50'
 }
 
 const severityLabels = {
@@ -115,7 +116,8 @@ const severityLabels = {
   'HIGH': 'High',
   'MEDIUM': 'Medium',
   'LOW': 'Low',
-  'UNKNOWN': 'Unknown'
+  'UNKNOWN': 'Unknown',
+  'LOW_GROUP': 'Low & Unknown'
 }
 
 const severityIcons = {
@@ -123,13 +125,37 @@ const severityIcons = {
   'HIGH': 'mdi-alert',
   'MEDIUM': 'mdi-information',
   'LOW': 'mdi-check-circle',
-  'UNKNOWN': 'mdi-help-circle'
+  'UNKNOWN': 'mdi-help-circle',
+  'LOW_GROUP': 'mdi-check-circle'
 }
 
 const severityData = computed(() => {
   if (!props.data) return []
-  return props.data.sort((a, b) => {
-    const order = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN']
+  
+  // Group low severity levels together
+  const groupedData = props.data.reduce((acc, item) => {
+    if (['LOW', 'UNKNOWN', 'NEGLIGIBLE'].includes(item.severity)) {
+      const existing = acc.find(group => group.severity === 'LOW_GROUP')
+      if (existing) {
+        existing.count += item.count
+      } else {
+        acc.push({
+          severity: 'LOW_GROUP',
+          count: item.count,
+          originalSeverities: [item.severity]
+        })
+      }
+    } else {
+      acc.push({
+        ...item,
+        originalSeverities: [item.severity]
+      })
+    }
+    return acc
+  }, [] as any[])
+  
+  return groupedData.sort((a, b) => {
+    const order = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW_GROUP']
     return order.indexOf(a.severity) - order.indexOf(b.severity)
   })
 })
@@ -148,9 +174,9 @@ const riskScore = computed(() => {
   const critical = severityData.value.find(item => item.severity === 'CRITICAL')?.count || 0
   const high = severityData.value.find(item => item.severity === 'HIGH')?.count || 0
   const medium = severityData.value.find(item => item.severity === 'MEDIUM')?.count || 0
-  const low = severityData.value.find(item => item.severity === 'LOW')?.count || 0
+  const lowGroup = severityData.value.find(item => item.severity === 'LOW_GROUP')?.count || 0
   
-  const rawScore = critical * 1 + high * 0.75 + medium * 0.5 + low * 0.25
+  const rawScore = critical * 1 + high * 0.75 + medium * 0.5 + lowGroup * 0.25
   
   // No limits - show real score
   return Math.round(rawScore)
@@ -252,6 +278,11 @@ const selectSeverity = (severity: string) => {
 .severity-card.severity-unknown {
   background: linear-gradient(135deg, #f5f5f5 0%, #eeeeee 100%);
   border-color: #9e9e9e;
+}
+
+.severity-card.severity-low_group {
+  background: linear-gradient(135deg, #e8f5e8 0%, #c8e6c9 100%);
+  border-color: #4caf50;
 }
 
 .severity-icon {

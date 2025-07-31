@@ -4,14 +4,15 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.generics import ListAPIView, GenericAPIView
 from django_filters.rest_framework import DjangoFilterBackend
-from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ContainerRegistry, ComponentVersionVulnerability
+from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ContainerRegistry, ComponentVersionVulnerability, Release, RepositoryTagRelease
 from .serializers import (
     RepositorySerializer, RepositoryTagSerializer, ImageSerializer, ImageListSerializer,
     ComponentSerializer, ComponentVersionSerializer, VulnerabilitySerializer, ComponentListSerializer,
     RepositoryListSerializer, RepositoryTagListSerializer, ComponentVersionListSerializer,
     HasACRRegistryResponseSerializer, ListACRRegistriesResponseSerializer,
     StatsResponseSerializer, JobAddRepositoriesRequestSerializer,
-    JobAddRepositoriesResponseSerializer, ImageDropdownSerializer
+    JobAddRepositoriesResponseSerializer, ImageDropdownSerializer,
+    ReleaseSerializer, RepositoryTagReleaseSerializer, ReleaseAssignmentSerializer
 )
 from django.db import models
 from .pagination import CustomPageNumberPagination
@@ -275,6 +276,80 @@ class RepositoryTagViewSet(BaseViewSet):
             'count': started
         })
 
+    @action(detail=True, methods=['post'])
+    def add_to_release(self, request, uuid=None):
+        """Add repository tag to release"""
+        repository_tag = self.get_object()
+        serializer = ReleaseAssignmentSerializer(data=request.data)
+        
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            release_id = serializer.validated_data['release_id']
+            release = Release.objects.get(uuid=release_id)
+            
+            # Check if assignment already exists
+            assignment, created = RepositoryTagRelease.objects.get_or_create(
+                repository_tag=repository_tag,
+                release=release
+            )
+            
+            if created:
+                return Response({
+                    'message': f'Repository tag added to release "{release.name}"',
+                    'release': ReleaseSerializer(release).data
+                })
+            else:
+                return Response({
+                    'message': f'Repository tag already assigned to release "{release.name}"',
+                    'release': ReleaseSerializer(release).data
+                })
+                
+        except Release.DoesNotExist:
+            return Response(
+                {'error': 'Release not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=True, methods=['delete'])
+    def remove_from_release(self, request, uuid=None):
+        """Remove repository tag from release"""
+        repository_tag = self.get_object()
+        serializer = ReleaseAssignmentSerializer(data=request.data)
+        
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            release_id = serializer.validated_data['release_id']
+            assignment = RepositoryTagRelease.objects.filter(
+                repository_tag=repository_tag,
+                release_id=release_id
+            ).first()
+            
+            if assignment:
+                release_name = assignment.release.name
+                assignment.delete()
+                return Response({
+                    'message': f'Repository tag removed from release "{release_name}"'
+                })
+            else:
+                return Response({
+                    'message': 'Repository tag not assigned to this release'
+                })
+                
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
 class ImageViewSet(BaseViewSet):
     queryset = Image.objects.all()
     filterset_fields = ['repository_tags', 'component_versions']
@@ -536,6 +611,66 @@ class ComponentVersionViewSet(BaseViewSet):
         vulnerabilities = version.vulnerabilities.all()
         serializer = VulnerabilitySerializer(vulnerabilities, many=True)
         return Response(serializer.data)
+
+class ReleaseViewSet(BaseViewSet):
+    """
+    API endpoint for managing releases.
+    
+    list:
+    Return a list of all releases.
+    
+    retrieve:
+    Return the details of a specific release.
+    
+    create:
+    Create a new release.
+    
+    update:
+    Update an existing release.
+    
+    partial_update:
+    Partially update an existing release.
+    
+    destroy:
+    Delete a release.
+    """
+    queryset = Release.objects.all()
+    serializer_class = ReleaseSerializer
+    search_fields = ['name', 'description']
+    ordering_fields = ['name', 'created_at']
+    
+    @action(detail=False, methods=['get'])
+    def with_stats(self, request):
+        """Get all releases with repository tag counts and vulnerability stats"""
+        releases = Release.objects.annotate(
+            tag_count=Count('repository_tags')
+        ).prefetch_related('repository_tags')
+        
+        release_data = []
+        for release in releases:
+            # Get vulnerability stats for this release through RepositoryTagRelease
+            critical_vulns = Vulnerability.objects.filter(
+                component_versions__images__repository_tags__releases__release=release,
+                severity='CRITICAL'
+            ).distinct().count()
+            
+            high_vulns = Vulnerability.objects.filter(
+                component_versions__images__repository_tags__releases__release=release,
+                severity='HIGH'
+            ).distinct().count()
+            
+            release_data.append({
+                'uuid': str(release.uuid),
+                'name': release.name,
+                'description': release.description,
+                'tag_count': release.tag_count,
+                'critical_vulnerabilities': critical_vulns,
+                'high_vulnerabilities': high_vulns,
+                'created_at': release.created_at
+            })
+        
+        return Response(release_data)
+
 
 class VulnerabilityViewSet(BaseViewSet):
     """

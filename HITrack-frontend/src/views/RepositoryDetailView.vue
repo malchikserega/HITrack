@@ -57,6 +57,23 @@
           item-class="clickable-row"
           @click:row="onTagRowClick"
         >
+          <template #item.tag="{ item }">
+            <div class="d-flex align-center">
+              <span class="font-weight-medium">{{ item.tag }}</span>
+              <div v-if="item.releases && item.releases.length > 0" class="ml-2 d-flex gap-1">
+                <v-chip
+                  v-for="release in item.releases"
+                  :key="release.uuid"
+                  size="x-small"
+                  color="success"
+                  variant="tonal"
+                  class="release-chip"
+                >
+                  {{ release.name }}
+                </v-chip>
+              </div>
+            </div>
+          </template>
           <template #item.processing_status="{ item }">
             <v-chip
               size="x-small"
@@ -421,5 +438,20 @@ onMounted(() => {
 }
 .clickable-row:hover {
   background-color: rgba(0, 0, 0, 0.04);
+}
+
+.release-chip {
+  font-size: 0.6rem;
+  height: 18px;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.v-theme--matrix .release-chip {
+  color: #39FF14 !important;
+  background: rgba(57, 255, 20, 0.1) !important;
+  border: 1px solid #39FF14 !important;
 }
 </style> 
