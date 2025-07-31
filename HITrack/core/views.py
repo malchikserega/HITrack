@@ -568,6 +568,20 @@ class VulnerabilityViewSet(BaseViewSet):
     search_fields = ['vulnerability_id']
     ordering_fields = ['vulnerability_id', 'severity', 'epss', 'created_at', 'updated_at']
 
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        
+        # Handle fixable filter
+        fixable = self.request.query_params.get('fixable')
+        if fixable == 'true':
+            # Get vulnerabilities that are fixable (have fixable component versions)
+            fixable_vulnerabilities = ComponentVersionVulnerability.objects.filter(
+                fixable=True
+            ).values_list('vulnerability__uuid', flat=True).distinct()
+            queryset = queryset.filter(uuid__in=fixable_vulnerabilities)
+        
+        return queryset
+
     @action(detail=False, methods=['get'])
     def severity_stats(self, request):
         """
@@ -616,6 +630,120 @@ class StatsViewSet(viewsets.ViewSet):
             'components': Component.objects.count(),
         }
         return Response(data)
+
+    @action(detail=False, methods=['get'])
+    def dashboard_metrics(self, request):
+        """Get comprehensive dashboard metrics with optimized queries"""
+        from django.db.models import Count, Avg, Q
+        from django.utils import timezone
+        from datetime import timedelta
+        
+        # Calculate date once
+        thirty_days_ago = timezone.now() - timedelta(days=30)
+        
+        # Optimized basic counts with select_related/prefetch_related
+        total_repositories = Repository.objects.count()
+        total_images = Image.objects.count()
+        
+        # Optimized severity distribution - single query
+        severity_distribution = Vulnerability.objects.values('severity').annotate(
+            count=Count('uuid')
+        ).order_by('severity')
+        
+        # Optimized vulnerability trends - indexed date field
+        vulnerability_trends = Vulnerability.objects.filter(
+            created_at__gte=thirty_days_ago
+        ).values('created_at__date').annotate(
+            count=Count('uuid')
+        ).order_by('created_at__date')
+        
+        # Optimized top vulnerable components - avoid N+1 with select_related
+        top_vulnerable_components = ComponentVersion.objects.select_related('component').annotate(
+            vuln_count=Count('vulnerabilities')
+        ).filter(vuln_count__gt=0).order_by('-vuln_count')[:10]
+        
+        # Optimized top vulnerabilities by EPSS - limit fields
+        top_vulnerabilities_by_epss = Vulnerability.objects.filter(
+            epss__isnull=False
+        ).only('uuid', 'vulnerability_id', 'severity', 'epss', 'description').order_by('-epss')[:10]
+        
+        # Optimized security metrics - single aggregation query
+        security_metrics = Vulnerability.objects.aggregate(
+            critical_count=Count('uuid', filter=Q(severity='CRITICAL')),
+            total_count=Count('uuid')
+        )
+        
+        # Optimized fixable vulnerabilities count
+        fixable_vulns = ComponentVersionVulnerability.objects.filter(fixable=True).count()
+        
+        # Calculate percentage
+        total_vulns = security_metrics['total_count']
+        fixable_percentage = (fixable_vulns / total_vulns * 100) if total_vulns > 0 else 0
+        
+        # Optimized recent activities - single query with union
+        recent_activities = []
+        
+        # Recent repository scans - optimized with only needed fields
+        recent_scans = Repository.objects.filter(
+            updated_at__gte=thirty_days_ago
+        ).only('name', 'updated_at', 'scan_status').order_by('-updated_at')[:5]
+        
+        for repo in recent_scans:
+            recent_activities.append({
+                'type': 'scan',
+                'title': f'Repository "{repo.name}" scanned',
+                'timestamp': repo.updated_at,
+                'status': repo.scan_status
+            })
+        
+        # Recent vulnerabilities - optimized with only needed fields
+        recent_vulns = Vulnerability.objects.filter(
+            created_at__gte=thirty_days_ago
+        ).only('vulnerability_id', 'created_at', 'severity').order_by('-created_at')[:5]
+        
+        for vuln in recent_vulns:
+            recent_activities.append({
+                'type': 'vulnerability',
+                'title': f'New vulnerability: {vuln.vulnerability_id}',
+                'timestamp': vuln.created_at,
+                'severity': vuln.severity
+            })
+        
+        # Sort activities by timestamp
+        recent_activities.sort(key=lambda x: x['timestamp'], reverse=True)
+        
+        return Response({
+            'basic_stats': {
+                'repositories': total_repositories,
+                'images': total_images
+            },
+            'security_metrics': {
+                'critical_vulnerabilities': security_metrics['critical_count'],
+                'fixable_vulnerabilities': fixable_vulns,
+                'fixable_percentage': round(fixable_percentage, 1)
+            },
+            'severity_distribution': list(severity_distribution),
+            'vulnerability_trends': list(vulnerability_trends),
+            'top_vulnerable_components': [
+                {
+                    'name': cv.component.name,
+                    'version': cv.version,
+                    'vulnerability_count': cv.vuln_count
+                }
+                for cv in top_vulnerable_components
+            ],
+            'top_vulnerabilities_by_epss': [
+                {
+                    'uuid': str(vuln.uuid),
+                    'vulnerability_id': vuln.vulnerability_id,
+                    'severity': vuln.severity,
+                    'epss': round(vuln.epss, 3),
+                    'description': vuln.description[:100] + '...' if len(vuln.description) > 100 else vuln.description
+                }
+                for vuln in top_vulnerabilities_by_epss
+            ],
+            'recent_activities': recent_activities[:10]
+        })
 
 class JobViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]

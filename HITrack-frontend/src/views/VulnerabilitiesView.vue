@@ -35,7 +35,7 @@
                     @update:model-value="onFilterChange"
                   ></v-select>
                 </v-col>
-                <v-col cols="12" md="3">
+                <v-col cols="12" md="2">
                   <v-select
                     v-model="typeFilter"
                     :items="typeOptions"
@@ -44,6 +44,13 @@
                     clearable
                     @update:model-value="onFilterChange"
                   ></v-select>
+                </v-col>
+                <v-col cols="12" md="1">
+                  <v-checkbox
+                    v-model="fixableFilter"
+                    label="Fixable"
+                    @update:model-value="onFilterChange"
+                  ></v-checkbox>
                 </v-col>
               </v-row>
               <div v-if="searchQuery" class="text-caption text-grey mt-2">
@@ -149,7 +156,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, computed, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import api from '../plugins/axios'
 import { notificationService } from '../plugins/notifications'
 import { debounce } from '../utils/debounce'
@@ -158,6 +165,7 @@ import type { Vulnerability, PaginatedResponse } from '../types/interfaces'
 import type { DataTableSortItem } from 'vuetify'
 
 const router = useRouter()
+const route = useRoute()
 
 // Reactive data
 const vulnerabilities = ref<Vulnerability[]>([])
@@ -177,6 +185,7 @@ const sortDesc = ref<boolean[]>([])
 const searchQuery = ref('')
 const severityFilter = ref('')
 const typeFilter = ref('')
+const fixableFilter = ref(false)
 
 // Filter options
 const severityOptions = [
@@ -227,6 +236,7 @@ const fetchVulnerabilities = async () => {
     if (searchQuery.value) params.search = searchQuery.value
     if (severityFilter.value) params.severity = severityFilter.value
     if (typeFilter.value) params.vulnerability_type = typeFilter.value
+    if (fixableFilter.value) params.fixable = 'true'
 
     const resp = await api.get<PaginatedResponse<Vulnerability>>('vulnerabilities/', { params })
     vulnerabilities.value = resp.data.results
@@ -244,6 +254,20 @@ const fetchVulnerabilities = async () => {
 
 // Debounced search function
 const debouncedFetchVulnerabilities = debounce(fetchVulnerabilities, 300)
+
+// Handle URL parameters for filters
+const handleUrlParams = () => {
+  const severity = route.query.severity as string
+  const fixable = route.query.fixable as string
+  
+  if (severity) {
+    severityFilter.value = severity
+  }
+  
+  if (fixable === 'true') {
+    fixableFilter.value = true
+  }
+}
 
 // Event handlers
 const onVulnerabilityRowClick = (_: MouseEvent, { item }: { item: Vulnerability }) => {
@@ -278,6 +302,7 @@ watch(searchQuery, () => {
 
 // Initialize
 onMounted(() => {
+  handleUrlParams()
   fetchVulnerabilities()
 })
 </script>

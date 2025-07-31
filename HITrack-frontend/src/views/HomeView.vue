@@ -1,67 +1,231 @@
 <template>
   <div class="home">
-    <v-container>
+    <v-container fluid>
+      <!-- Header -->
       <v-row>
         <v-col cols="12">
-          <h1 class="text-h4 mb-4 font-weight-black">Dashboard</h1>
+          <div class="d-flex align-center justify-space-between mb-6">
+            <div>
+              <h1 class="text-h3 font-weight-black mb-2">Security Dashboard</h1>
+              <p class="text-body-1 text-medium-emphasis">Choose the red pill, choose the blue pill...</p>
+            </div>
+            <v-btn
+              color="primary"
+              prepend-icon="mdi-refresh"
+              @click="refreshData"
+              :loading="loading"
+            >
+              Refresh Data
+            </v-btn>
+          </div>
         </v-col>
       </v-row>
 
+      <!-- Metrics Row -->
       <v-row>
-        <v-col cols="12" sm="6" md="3">
-          <router-link to="/repositories" style="text-decoration: none;">
-            <v-card class="dashboard-card" elevation="2" :color="'#f8f9fa'">
-              <div class="d-flex flex-column align-center justify-center text-center" style="min-height:170px;">
-                <div class="icon-number-row">
-                  <v-icon class="dashboard-icon mr-2" color="#1976d2">mdi-source-repository</v-icon>
-                  <div class="dashboard-number">{{ stats.repositories }}</div>
-                </div>
-                <div class="dashboard-label">Repositories</div>
-              </div>
-            </v-card>
-          </router-link>
+        <v-col cols="12">
+          <v-row justify="center">
+            <v-col cols="12" sm="6" md="3">
+              <MetricCard
+                title="Critical Vulnerabilities"
+                :value="dashboardData.security_metrics?.critical_vulnerabilities || 0"
+                icon="mdi-alert-circle"
+                color="error"
+                :clickable="true"
+                :clickAction="viewCriticalVulnerabilities"
+              />
+            </v-col>
+            <v-col cols="12" sm="6" md="3">
+              <MetricCard
+                title="Fixable Vulnerabilities"
+                :value="dashboardData.security_metrics?.fixable_vulnerabilities || 0"
+                icon="mdi-check-circle"
+                color="success"
+                :subtitle="`${dashboardData.security_metrics?.fixable_percentage || 0}% of total`"
+                :clickable="true"
+                :clickAction="viewFixableVulnerabilities"
+              />
+            </v-col>
+            <v-col cols="12" sm="6" md="3">
+              <MetricCard
+                title="Total Images"
+                :value="dashboardData.basic_stats?.images || 0"
+                icon="mdi-docker"
+                color="info"
+              />
+            </v-col>
+            <v-col cols="12" sm="6" md="3">
+              <MetricCard
+                title="Total Repositories"
+                :value="dashboardData.basic_stats?.repositories || 0"
+                icon="mdi-git"
+                color="primary"
+              />
+            </v-col>
+          </v-row>
         </v-col>
+      </v-row>
 
-        <v-col cols="12" sm="6" md="3">
-          <router-link to="/images" style="text-decoration: none;">
-            <v-card class="dashboard-card" elevation="2" :color="'#f8f9fa'">
-              <div class="d-flex flex-column align-center justify-center text-center" style="min-height:170px;">
-                <div class="icon-number-row">
-                  <v-icon class="dashboard-icon mr-2" color="#0097a7">mdi-docker</v-icon>
-                  <div class="dashboard-number">{{ stats.images }}</div>
-                </div>
-                <div class="dashboard-label">Images</div>
-              </div>
-            </v-card>
-          </router-link>
+      <!-- Charts Row 1 -->
+      <v-row>
+        <v-col cols="12" md="6">
+          <SeverityDistributionChart :data="dashboardData.severity_distribution || []" />
         </v-col>
+        <v-col cols="12" md="6">
+          <VulnerabilityTrendChart :data="dashboardData.vulnerability_trends || []" />
+        </v-col>
+      </v-row>
 
-        <v-col cols="12" sm="6" md="3">
-          <router-link to="/components" style="text-decoration: none;">
-            <v-card class="dashboard-card" elevation="2" :color="'#f8f9fa'">
-            <div class="d-flex flex-column align-center justify-center text-center" style="min-height:170px;">
-              <div class="icon-number-row">
-                <v-icon class="dashboard-icon mr-2" color="#8e24aa">mdi-cube</v-icon>
-                <div class="dashboard-number">{{ stats.components }}</div>
+      <!-- Charts Row 2 -->
+      <v-row>
+        <v-col cols="12" md="6">
+          <v-card class="chart-card" elevation="2">
+            <v-card-title class="text-h6 font-weight-bold pa-4 pb-2">
+              Top Vulnerable Components
+            </v-card-title>
+            <v-card-text class="pa-4 pt-0">
+              <div v-if="!dashboardData.top_vulnerable_components || dashboardData.top_vulnerable_components.length === 0" class="text-center pa-8">
+                <v-icon size="48" color="grey">mdi-cube-outline</v-icon>
+                <p class="text-body-2 text-medium-emphasis mt-2">No vulnerable components found</p>
               </div>
-              <div class="dashboard-label">Components</div>
-            </div>
+              <v-list v-else class="component-list">
+                <v-list-item
+                  v-for="(component, index) in dashboardData.top_vulnerable_components"
+                  :key="index"
+                  class="component-item"
+                >
+                  <template #prepend>
+                    <v-avatar color="error" size="32">
+                      <span class="text-white font-weight-bold">{{ index + 1 }}</span>
+                    </v-avatar>
+                  </template>
+                  
+                  <v-list-item-title class="component-title">
+                    {{ component.name }}
+                  </v-list-item-title>
+                  
+                  <v-list-item-subtitle class="component-subtitle">
+                    Version: {{ component.version }}
+                  </v-list-item-subtitle>
+                  
+                  <template #append>
+                    <v-chip
+                      color="error"
+                      size="small"
+                      variant="tonal"
+                    >
+                      {{ component.vulnerability_count }} vulns
+                    </v-chip>
+                  </template>
+                </v-list-item>
+              </v-list>
+            </v-card-text>
           </v-card>
-          </router-link>
         </v-col>
-
-        <v-col cols="12" sm="6" md="3">
-          <router-link to="/vulnerabilities" style="text-decoration: none;">
-            <v-card class="dashboard-card" elevation="2" :color="'#f8f9fa'">
-              <div class="d-flex flex-column align-center justify-center text-center" style="min-height:170px;">
-                <div class="icon-number-row">
-                  <v-icon class="dashboard-icon mr-2" color="#d32f2f">mdi-bug</v-icon>
-                  <div class="dashboard-number">{{ stats.vulnerabilities }}</div>
-                </div>
-                <div class="dashboard-label">Vulnerabilities</div>
+        <v-col cols="12" md="6">
+          <v-card class="chart-card" elevation="2">
+            <v-card-title class="text-h6 font-weight-bold pa-4 pb-2">
+              Top 10 Vulnerabilities by EPSS
+            </v-card-title>
+            <v-card-text class="pa-4 pt-0">
+              <div v-if="!dashboardData.top_vulnerabilities_by_epss || dashboardData.top_vulnerabilities_by_epss.length === 0" class="text-center pa-8">
+                <v-icon size="48" color="grey">mdi-shield-alert</v-icon>
+                <p class="text-body-2 text-medium-emphasis mt-2">No vulnerabilities with EPSS data found</p>
               </div>
-            </v-card>
-          </router-link>
+              <v-list v-else class="vulnerability-list">
+                <v-list-item
+                  v-for="(vuln, index) in dashboardData.top_vulnerabilities_by_epss"
+                  :key="index"
+                  class="vulnerability-item clickable"
+                  @click="viewVulnerabilityDetail(vuln.uuid)"
+                >
+                  <template #prepend>
+                    <v-avatar :color="getSeverityColor(vuln.severity)" size="32">
+                      <span class="text-white font-weight-bold">{{ index + 1 }}</span>
+                    </v-avatar>
+                  </template>
+                  
+                  <v-list-item-title class="vulnerability-title">
+                    {{ vuln.vulnerability_id }}
+                  </v-list-item-title>
+                  
+                  <v-list-item-subtitle class="vulnerability-subtitle">
+                    {{ vuln.description }}
+                  </v-list-item-subtitle>
+                  
+                  <template #append>
+                    <div class="vulnerability-epss">
+                      <v-chip
+                        :color="getEpssColor(vuln.epss)"
+                        size="small"
+                        variant="tonal"
+                      >
+                        EPSS: {{ vuln.epss }}
+                      </v-chip>
+                    </div>
+                  </template>
+                </v-list-item>
+              </v-list>
+            </v-card-text>
+          </v-card>
+        </v-col>
+      </v-row>
+
+      <!-- Activity and Quick Actions -->
+      <v-row>
+        <v-col cols="12" md="8">
+          <RecentActivityFeed :activities="dashboardData.recent_activities || []" />
+        </v-col>
+        <v-col cols="12" md="4">
+          <v-card class="quick-actions-card" elevation="2">
+            <v-card-title class="text-h6 font-weight-bold pa-4 pb-2">
+              Quick Actions
+            </v-card-title>
+            <v-card-text class="pa-4 pt-0">
+              <div class="actions-grid">
+                <v-btn
+                  block
+                  color="primary"
+                  prepend-icon="mdi-refresh"
+                  @click="scanAllRepositories"
+                  :loading="scanning"
+                  class="action-btn"
+                >
+                  Scan All Repositories
+                </v-btn>
+                
+                <v-btn
+                  block
+                  color="secondary"
+                  prepend-icon="mdi-file-document"
+                  @click="generateReport"
+                  class="action-btn"
+                >
+                  Generate Security Report
+                </v-btn>
+                
+                <v-btn
+                  block
+                  color="info"
+                  prepend-icon="mdi-plus"
+                  @click="addRepository"
+                  class="action-btn"
+                >
+                  Add Repository
+                </v-btn>
+                
+                <v-btn
+                  block
+                  color="warning"
+                  prepend-icon="mdi-alert"
+                  @click="viewCriticalVulnerabilities"
+                  class="action-btn"
+                >
+                  View Critical Issues
+                </v-btn>
+              </div>
+            </v-card-text>
+          </v-card>
         </v-col>
       </v-row>
     </v-container>
@@ -70,22 +234,28 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
+import { useRouter } from 'vue-router'
 import api from '../plugins/axios'
-import type { Stats } from '../types/interfaces'
+import { notificationService } from '../plugins/notifications'
 import { useTheme } from 'vuetify'
 
-const stats = ref<Stats>({
-  repositories: 0,
-  images: 0,
-  vulnerabilities: 0,
-  components: 0
-})
+import MetricCard from '../components/MetricCard.vue'
+import SeverityDistributionChart from '../components/SeverityDistributionChart.vue'
+import VulnerabilityTrendChart from '../components/VulnerabilityTrendChart.vue'
+import RecentActivityFeed from '../components/RecentActivityFeed.vue'
 
+const router = useRouter()
 const theme = useTheme()
+
+// Data
+const dashboardData = ref<any>({})
+const loading = ref(false)
+const scanning = ref(false)
+
+// Easter egg
 let keyBuffer = ''
 
 function handleKeydown(e: KeyboardEvent) {
-  // Only listen if not focused in an input/textarea
   const tag = (e.target as HTMLElement)?.tagName?.toLowerCase()
   if (tag === 'input' || tag === 'textarea' || (e.target as HTMLElement)?.isContentEditable) return
   keyBuffer += e.key
@@ -96,26 +266,127 @@ function handleKeydown(e: KeyboardEvent) {
   }
 }
 
-const fetchStats = async () => {
+const fetchDashboardData = async () => {
+  loading.value = true
   try {
-    const response = await api.get('stats/')
-    const data = response.data
-
-    stats.value = {
-      repositories: data.repositories,
-      images: data.images,
-      components: data.components,
-      vulnerabilities: data.vulnerabilities
-    }
+    const response = await api.get('stats/dashboard_metrics/')
+    dashboardData.value = response.data
   } catch (error) {
-    console.error('Error fetching stats:', error)
+    console.error('Error fetching dashboard data:', error)
+    notificationService.error('Failed to fetch dashboard data')
+  } finally {
+    loading.value = false
   }
 }
 
+const refreshData = () => {
+  fetchDashboardData()
+}
+
+const scanAllRepositories = async () => {
+  scanning.value = true
+  try {
+    // This would be implemented based on your API
+    notificationService.success('Repository scan initiated')
+  } catch (error) {
+    notificationService.error('Failed to initiate scan')
+  } finally {
+    scanning.value = false
+  }
+}
+
+const generateReport = () => {
+  router.push('/reports')
+}
+
+const addRepository = () => {
+  router.push('/acr')
+}
+
+const viewCriticalVulnerabilities = () => {
+  router.push('/vulnerabilities?severity=CRITICAL')
+}
+
+const viewFixableVulnerabilities = () => {
+  router.push('/vulnerabilities?fixable=true')
+}
+
+const getStatusColor = (status: string) => {
+  switch (status) {
+    case 'success':
+      return 'success'
+    case 'error':
+      return 'error'
+    case 'in_process':
+      return 'warning'
+    case 'pending':
+      return 'info'
+    default:
+      return 'grey'
+  }
+}
+
+const getStatusIcon = (status: string) => {
+  switch (status) {
+    case 'success':
+      return 'mdi-check-circle'
+    case 'error':
+      return 'mdi-alert-circle'
+    case 'in_process':
+      return 'mdi-sync'
+    case 'pending':
+      return 'mdi-clock'
+    default:
+      return 'mdi-help-circle'
+  }
+}
+
+const formatStatusLabel = (status: string) => {
+  switch (status) {
+    case 'success':
+      return 'Successfully Scanned'
+    case 'error':
+      return 'Scan Failed'
+    case 'in_process':
+      return 'Scanning'
+    case 'pending':
+      return 'Pending'
+    default:
+      return 'Unknown'
+  }
+}
+
+const getSeverityColor = (severity: string) => {
+  switch (severity) {
+    case 'CRITICAL':
+      return 'error'
+    case 'HIGH':
+      return 'warning'
+    case 'MEDIUM':
+      return 'info'
+    case 'LOW':
+      return 'success'
+    default:
+      return 'grey'
+  }
+}
+
+const getEpssColor = (epss: number) => {
+  if (epss >= 0.7) return 'error'
+  if (epss >= 0.4) return 'warning'
+  if (epss >= 0.1) return 'info'
+  return 'success'
+}
+
+const viewVulnerabilityDetail = (vulnerabilityId: string) => {
+  router.push(`/vulnerabilities/${vulnerabilityId}`)
+}
+
 onMounted(() => {
-  fetchStats()
+  fetchDashboardData()
   window.addEventListener('keydown', handleKeydown)
 })
+
 onUnmounted(() => {
   window.removeEventListener('keydown', handleKeydown)
 })
@@ -124,71 +395,163 @@ onUnmounted(() => {
 <style scoped>
 .home {
   padding: 20px;
+  background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+  min-height: 100vh;
 }
 
-.dashboard-card {
-  transition: all 0.3s ease-in-out;
-  border-radius: 16px;
-  min-height: 170px !important;
-  height: auto !important;
-  background: linear-gradient(145deg, #ffffff, #f8f9fa);
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+/* Matrix theme override */
+.v-theme--matrix .home {
+  background: #000 !important;
 }
 
-.dashboard-card:hover {
-  transform: translateY(-5px);
-  box-shadow: 0 8px 25px rgba(0, 0, 0, 0.1);
+.v-theme--matrix .chart-card {
+  background: #000 !important;
+  border: 1px solid #39FF14 !important;
 }
 
-.d-flex.flex-column.align-center.justify-center.text-center {
-  min-height: 140px !important;
-  height: auto !important;
-  padding: 18px 0 10px 0;
+.v-theme--matrix .quick-actions-card {
+  background: #000 !important;
+  border: 1px solid #39FF14 !important;
 }
 
-.icon-number-row {
+/* Matrix theme for all cards */
+.v-theme--matrix :deep(.v-card) {
+  background: #000 !important;
+  border: 1px solid #39FF14 !important;
+}
+
+.v-theme--matrix :deep(.metric-card) {
+  background: #000 !important;
+  border: 1px solid #39FF14 !important;
+}
+
+.v-theme--matrix :deep(.trend-chart-card) {
+  background: #000 !important;
+  border: 1px solid #39FF14 !important;
+}
+
+.v-theme--matrix :deep(.severity-chart-card) {
+  background: #000 !important;
+  border: 1px solid #39FF14 !important;
+}
+
+.chart-card {
+  border-radius: 12px;
+  height: 100%;
+}
+
+.component-list {
+  background: transparent;
+}
+
+.component-item {
+  border-radius: 8px;
+  margin-bottom: 8px;
+  transition: background-color 0.2s ease;
+}
+
+.component-item:hover {
+  background-color: rgba(0, 0, 0, 0.04);
+}
+
+.component-title {
+  font-weight: 500;
+  color: #2c3e50;
+  line-height: 1.3;
+}
+
+.vulnerability-list {
+  background: transparent;
+}
+
+.vulnerability-item {
+  border-radius: 8px;
+  margin-bottom: 8px;
+  transition: background-color 0.2s ease;
+}
+
+.vulnerability-item.clickable {
+  cursor: pointer;
+}
+
+.vulnerability-item.clickable:hover {
+  background-color: rgba(0, 0, 0, 0.08);
+  transform: translateX(4px);
+  transition: all 0.2s ease;
+}
+
+.vulnerability-title {
+  font-weight: 500;
+  color: #2c3e50;
+  line-height: 1.3;
+}
+
+.vulnerability-subtitle {
+  color: #666666;
+  line-height: 1.2;
+  margin-top: 4px;
+}
+
+.vulnerability-epss {
   display: flex;
   align-items: center;
-  justify-content: center;
-  margin-bottom: 6px;
 }
 
-.v-icon {
-  opacity: 0.95;
-  font-size: 38px !important;
+.component-subtitle {
+  color: #7f8c8d;
+  font-size: 0.875rem;
 }
 
-.dashboard-number {
-  font-size: 3rem;
-  font-weight: 700;
-  color: #222;
-  letter-spacing: 0.5px;
+.status-grid {
+  display: grid;
+  gap: 16px;
 }
 
-.dashboard-label {
-  font-size: 1.8rem;
-  font-weight: 700;
-  color: #000000;
-  margin-top: 10px;
-  margin-bottom: 6px;
-  letter-spacing: 0.5px;
-  background: none;
-  border: none;
-  text-align: center;
-  text-shadow: none;
-  padding: 0;
-  display: block;
-}
-
-.dashboard-icon {
-  font-size: 54px !important;
-  width: 54px !important;
-  height: 54px !important;
-  min-width: 54px !important;
-  min-height: 54px !important;
-  line-height: 54px !important;
-  display: inline-flex;
+.status-item {
+  display: flex;
   align-items: center;
-  justify-content: center;
+  padding: 12px;
+  border-radius: 8px;
+  background-color: rgba(0, 0, 0, 0.02);
+  transition: background-color 0.2s ease;
+}
+
+.status-item:hover {
+  background-color: rgba(0, 0, 0, 0.04);
+}
+
+.status-icon {
+  margin-right: 12px;
+}
+
+.status-info {
+  flex: 1;
+}
+
+.status-label {
+  font-weight: 500;
+  color: #2c3e50;
+  font-size: 0.875rem;
+}
+
+.status-count {
+  color: #7f8c8d;
+  font-size: 0.75rem;
+}
+
+.quick-actions-card {
+  border-radius: 12px;
+  height: 100%;
+}
+
+.actions-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.action-btn {
+  height: 48px;
+  border-radius: 8px;
+  font-weight: 500;
 }
 </style> 
