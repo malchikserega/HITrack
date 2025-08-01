@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from rest_framework.validators import UniqueValidator
 from drf_spectacular.utils import extend_schema_field
 from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ComponentVersionVulnerability, Release, RepositoryTagRelease
 
@@ -449,9 +450,25 @@ class ReleaseSerializer(serializers.ModelSerializer):
         model = Release
         fields = ['uuid', 'name', 'description', 'repository_tags_count', 'created_at']
         read_only_fields = ['created_at', 'uuid']
+        extra_kwargs = {
+            'name': {
+                'validators': [
+                    UniqueValidator(
+                        queryset=Release.objects.all(),
+                        message='Release with this name already exists.'
+                    )
+                ]
+            }
+        }
     
     def get_repository_tags_count(self, obj):
         return obj.repository_tags.count()
+    
+    def validate_name(self, value):
+        # Case-insensitive unique validation
+        if Release.objects.filter(name__iexact=value).exists():
+            raise serializers.ValidationError('Release with this name already exists.')
+        return value
 
 
 class RepositoryTagReleaseSerializer(serializers.ModelSerializer):

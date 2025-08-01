@@ -55,6 +55,196 @@ class RepositoryViewSet(BaseViewSet):
         serializer = RepositoryTagSerializer(tags, many=True)
         return Response(serializer.data)
 
+    @action(detail=True, methods=['post'])
+    def create_tag(self, request, uuid=None):
+        """
+        Create a new tag for the repository.
+        """
+        repository = self.get_object()
+        tag_name = request.data.get('tag')
+        description = request.data.get('description', '')
+        
+        print(f"Creating tag: repository={repository.name}, tag={tag_name}, description={description}")
+        print(f"Request data: {request.data}")
+        
+        if not tag_name:
+            return Response(
+                {'error': 'Tag name is required'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check if tag already exists
+        if repository.tags.filter(tag=tag_name).exists():
+            return Response(
+                {'error': 'Tag already exists'}, 
+                status=status.HTTP_409_CONFLICT
+            )
+        
+        try:
+            # Create new tag
+            tag = RepositoryTag.objects.create(
+                repository=repository,
+                tag=tag_name
+            )
+            
+            serializer = RepositoryTagSerializer(tag)
+            return Response(
+                serializer.data, 
+                status=status.HTTP_201_CREATED
+            )
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to create tag: {str(e)}'}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=False, methods=['post'])
+    def create_release_with_tags(self, request):
+        """
+        Create a new release and link it with repository tags.
+        """
+        release_name = request.data.get('release_name')
+        release_description = request.data.get('release_description', '')
+        tag_uuids = request.data.get('tag_uuids', [])
+        
+        print(f"Creating release: name={release_name}, description={release_description}")
+        print(f"Tag UUIDs: {tag_uuids}")
+        
+        if not release_name:
+            return Response(
+                {'error': 'Release name is required'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if not tag_uuids:
+            return Response(
+                {'error': 'At least one tag UUID is required'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            # Check if release name already exists (case-insensitive)
+            if Release.objects.filter(name__iexact=release_name).exists():
+                return Response(
+                    {'release_name': ['Release with this name already exists.']}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Create new release
+            release = Release.objects.create(
+                name=release_name,
+                description=release_description
+            )
+            
+            # Get repository tags and create links
+            repository_tags = RepositoryTag.objects.filter(uuid__in=tag_uuids)
+            created_links = []
+            
+            for tag in repository_tags:
+                # Check if link already exists
+                if not RepositoryTagRelease.objects.filter(
+                    repository_tag=tag, 
+                    release=release
+                ).exists():
+                    link = RepositoryTagRelease.objects.create(
+                        repository_tag=tag,
+                        release=release
+                    )
+                    created_links.append(link)
+            
+            # Return success response
+            return Response({
+                'release_uuid': str(release.uuid),
+                'release_name': release.name,
+                'tags_linked': len(created_links),
+                'total_tags': len(tag_uuids)
+            }, status=status.HTTP_201_CREATED)
+            
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to create release: {str(e)}'}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=False, methods=['post'])
+    def check_helm_releases(self, request):
+        """
+        Check multiple Helm releases against the database.
+        Expects a list of objects with 'name' and 'app_version' fields.
+        """
+        releases_data = request.data.get('releases', [])
+        
+        if not releases_data:
+            return Response(
+                {'error': 'Releases data is required'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            results = []
+            
+            # Get all repositories and tags in one query
+            all_repositories = Repository.objects.all()
+            all_tags = RepositoryTag.objects.select_related('repository').all()
+            
+            # Create lookup dictionaries for faster access
+            repos_by_name = {repo.name: repo for repo in all_repositories}
+            tags_by_repo_and_version = {}
+            
+            for tag in all_tags:
+                key = f"{tag.repository.uuid}_{tag.tag}"
+                tags_by_repo_and_version[key] = tag
+            
+            for release in releases_data:
+                name = release.get('name')
+                app_version = release.get('app_version')
+                
+                if not name or not app_version:
+                    results.append({
+                        'name': name,
+                        'app_version': app_version,
+                        'repository_status': 'Error',
+                        'tag_status': 'Error',
+                        'error': 'Missing name or app_version'
+                    })
+                    continue
+                
+                # Check if repository exists
+                repository = repos_by_name.get(name)
+                repository_status = 'Found' if repository else 'Not Found'
+                
+                # Check if tag exists (only if repository exists)
+                tag_status = 'Not Found'
+                tag_uuid = None
+                if repository:
+                    tag_key = f"{repository.uuid}_{app_version}"
+                    tag = tags_by_repo_and_version.get(tag_key)
+                    if tag:
+                        tag_status = 'Found'
+                        tag_uuid = str(tag.uuid)
+                
+                results.append({
+                    'name': name,
+                    'app_version': app_version,
+                    'repository_status': repository_status,
+                    'tag_status': tag_status,
+                    'repository_uuid': str(repository.uuid) if repository else None,
+                    'tag_uuid': tag_uuid
+                })
+            
+            return Response({
+                'results': results,
+                'total_checked': len(results),
+                'repositories_found': len([r for r in results if r['repository_status'] == 'Found']),
+                'tags_found': len([r for r in results if r['tag_status'] == 'Found'])
+            })
+            
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to check releases: {str(e)}'}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
     @action(detail=False, methods=['get'])
     def get_acr_repos(self, request):
         """

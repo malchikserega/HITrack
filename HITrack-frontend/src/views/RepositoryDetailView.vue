@@ -35,6 +35,14 @@
             @click:append-inner="fetchTags"
           />
           <v-spacer></v-spacer>
+          <v-btn
+            color="primary"
+            prepend-icon="mdi-plus"
+            @click="showAddTagDialog = true"
+            :loading="creatingTag"
+          >
+            Add New Tag
+          </v-btn>
           <v-select
             :items="[10, 20, 50, 100]"
             v-model="tagsPerPage"
@@ -43,6 +51,7 @@
             hide-details
             density="compact"
             variant="outlined"
+            class="ml-4"
             @update:model-value="onTagsPerPageChange"
           />
         </div>
@@ -113,6 +122,20 @@
                 />
               </template>
             </v-tooltip>
+            <v-tooltip text="Delete tag">
+              <template v-slot:activator="{ props }">
+                <v-btn
+                  v-bind="props"
+                  icon="mdi-delete"
+                  variant="tonal"
+                  size="x-small"
+                  color="error"
+                  class="ml-2"
+                  :loading="deletingTag === item.uuid"
+                  @click.stop="onDeleteTag(item)"
+                />
+              </template>
+            </v-tooltip>
           </template>
           <template v-slot:item.updated_at="{ item }">
             {{ $formatDate(item.updated_at) }}
@@ -129,6 +152,99 @@
         </div>
       </v-col>
     </v-row>
+
+    <!-- Add New Tag Dialog -->
+    <v-dialog 
+      v-model="showAddTagDialog" 
+      max-width="500px" 
+      persistent
+      @keydown.esc="cancelAddTag"
+    >
+      <v-card>
+        <v-card-title class="text-h6 font-weight-bold pa-4 pb-2">
+          <v-icon class="mr-2" color="primary">mdi-tag-plus</v-icon>
+          Add New Tag
+        </v-card-title>
+        <v-card-text class="pa-4 pt-0">
+          <v-form ref="addTagForm" @submit.prevent="createNewTag">
+            <v-text-field
+              v-model="newTagName"
+              label="Tag Name"
+              placeholder="Enter tag name (e.g., v1.0.0, latest)"
+              :rules="tagNameRules"
+              required
+              autofocus
+              @keyup.enter="createNewTag"
+            />
+            <v-textarea
+              v-model="newTagDescription"
+              label="Description (Optional)"
+              placeholder="Brief description of this tag"
+              rows="3"
+              auto-grow
+            />
+          </v-form>
+        </v-card-text>
+        <v-card-actions class="pa-4 pt-0">
+          <v-spacer></v-spacer>
+          <v-btn
+            variant="text"
+            @click="cancelAddTag"
+            :disabled="creatingTag"
+          >
+            Cancel
+          </v-btn>
+          <v-btn
+            color="primary"
+            @click="createNewTag"
+            :loading="creatingTag"
+            :disabled="!newTagName || !isValidTagName"
+          >
+            Create Tag
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <!-- Delete Tag Confirmation Dialog -->
+    <v-dialog 
+      v-model="showDeleteDialog" 
+      max-width="400px" 
+      persistent
+      @keydown.esc="cancelDelete"
+    >
+      <v-card>
+        <v-card-title class="text-h6 font-weight-bold pa-4 pb-2">
+          <v-icon class="mr-2" color="error">mdi-delete-alert</v-icon>
+          Delete Tag
+        </v-card-title>
+        <v-card-text class="pa-4 pt-0">
+          <p class="text-body-1">
+            Are you sure you want to delete tag <strong>"{{ tagToDelete?.tag }}"</strong>?
+          </p>
+          <p class="text-body-2 text-medium-emphasis mt-2">
+            This action cannot be undone and will remove all associated data.
+          </p>
+        </v-card-text>
+        <v-card-actions class="pa-4 pt-0">
+          <v-spacer></v-spacer>
+          <v-btn
+            variant="text"
+            @click="cancelDelete"
+            :disabled="!!deletingTag"
+          >
+            Cancel
+          </v-btn>
+          <v-btn
+            color="error"
+            @click="confirmDelete"
+            :loading="!!deletingTag"
+          >
+            Delete
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
   </v-container>
 </template>
 
@@ -190,6 +306,117 @@ const tagsSortBy = ref<SortItem[]>([{ key: 'updated_at', order: 'desc' }])
 const tagsPageCount = computed(() => Math.ceil(tagsTotal.value / tagsPerPage.value) || 1)
 
 const tagsForCharts = ref<any[]>([])
+
+// Add new tag functionality
+const showAddTagDialog = ref(false)
+const creatingTag = ref(false)
+const newTagName = ref('')
+const newTagDescription = ref('')
+const addTagForm = ref<any>(null)
+const deletingTag = ref<string | null>(null)
+const showDeleteDialog = ref(false)
+const tagToDelete = ref<any>(null)
+
+const tagNameRules = [
+  (v: string) => !!v || 'Tag name is required',
+  (v: string) => v.length >= 1 || 'Tag name must be at least 1 character',
+  (v: string) => v.length <= 255 || 'Tag name must be less than 255 characters',
+  (v: string) => /^[a-zA-Z0-9._-]+$/.test(v) || 'Tag name can only contain letters, numbers, dots, underscores, and hyphens'
+]
+
+const isValidTagName = computed(() => {
+  return newTagName.value && 
+         newTagName.value.length >= 1 && 
+         newTagName.value.length <= 255 && 
+         /^[a-zA-Z0-9._-]+$/.test(newTagName.value)
+})
+
+const createNewTag = async () => {
+  if (!isValidTagName.value) {
+    notificationService.error('Please enter a valid tag name')
+    return
+  }
+
+  creatingTag.value = true
+  try {
+    const response = await api.post(`repositories/${route.params.uuid}/create_tag/`, {
+      tag: newTagName.value,
+      description: newTagDescription.value
+    })
+    
+    notificationService.success('Tag created successfully')
+    showAddTagDialog.value = false
+    resetAddTagForm()
+    await fetchTags() // Refresh the tags list
+  } catch (error: any) {
+    console.error('Error creating tag:', error)
+    if (error.response?.status === 409) {
+      notificationService.error('Tag already exists')
+    } else if (error.response?.data?.error) {
+      notificationService.error(error.response.data.error)
+    } else {
+      notificationService.error('Failed to create tag')
+    }
+  } finally {
+    creatingTag.value = false
+  }
+}
+
+const cancelAddTag = () => {
+  showAddTagDialog.value = false
+  resetAddTagForm()
+}
+
+const resetAddTagForm = () => {
+  newTagName.value = ''
+  newTagDescription.value = ''
+  if (addTagForm.value) {
+    addTagForm.value.reset()
+  }
+}
+
+const onDeleteTag = async (tag: any) => {
+  if (!tag.uuid) {
+    notificationService.error('Cannot delete tag: missing UUID')
+    return
+  }
+
+  // Show confirmation dialog
+  tagToDelete.value = tag
+  showDeleteDialog.value = true
+}
+
+const cancelDelete = () => {
+  showDeleteDialog.value = false
+  tagToDelete.value = null
+}
+
+const confirmDelete = async () => {
+  if (!tagToDelete.value?.uuid) {
+    notificationService.error('Cannot delete tag: missing UUID')
+    return
+  }
+
+  deletingTag.value = tagToDelete.value.uuid
+  try {
+    await api.delete(`repository-tags/${tagToDelete.value.uuid}/`)
+    notificationService.success('Tag deleted successfully')
+    await fetchTags() // Refresh the tags list
+  } catch (error: any) {
+    console.error('Error deleting tag:', error)
+    if (error.response?.status === 404) {
+      notificationService.error('Tag not found')
+    } else if (error.response?.data?.error) {
+      notificationService.error(error.response.data.error)
+    } else {
+      notificationService.error('Failed to delete tag')
+    }
+  } finally {
+    deletingTag.value = null
+    showDeleteDialog.value = false
+    tagToDelete.value = null
+  }
+}
 
 const fetchTagsForCharts = async () => {
   try {
