@@ -4,6 +4,41 @@
       <v-row justify="center">
         <v-col cols="12" md="11" lg="10" xl="9">
           <h1 class="text-h4 mb-4 font-weight-black">Report Generator</h1>
+          
+          <!-- Release Selection Card -->
+          <v-card class="mb-4 wide-card">
+            <v-card-title class="text-h6 pa-4">
+              <v-icon class="mr-2" color="primary">mdi-tag</v-icon>
+              Generate Report by Release
+            </v-card-title>
+            <v-card-text class="pa-4">
+              <div class="d-flex align-center gap-8">
+                <v-select
+                  v-model="selectedRelease"
+                  :items="releases"
+                  item-title="name"
+                  item-value="uuid"
+                  label="Select Release"
+                  placeholder="Choose a release to generate report for all its images"
+                  variant="outlined"
+                  clearable
+                  :loading="loadingReleases"
+                  @update:model-value="onReleaseChange"
+                  style="max-width: 350px;"
+                />
+                <v-btn
+                  color="primary"
+                  :loading="generatingReleaseReport"
+                  @click="generateReleaseReport"
+                  icon="mdi-file-excel"
+                  size="large"
+                  title="Generate Release Report"
+                  class="ml-2"
+                />
+              </div>
+            </v-card-text>
+          </v-card>
+          
           <v-card class="mb-4 d-flex flex-column wide-card">
             <v-card-text>
               <v-text-field
@@ -132,6 +167,12 @@ const itemsPerPage = ref(10)
 const totalItems = ref(0)
 const sortBy = ref<DataTableSortItem[]>([{ key: 'updated_at', order: 'desc' }])
 
+// Release selection variables
+const releases = ref<any[]>([])
+const selectedRelease = ref<string | null>(null)
+const loadingReleases = ref(false)
+const generatingReleaseReport = ref(false)
+
 const headers: any[] = [
   { title: 'Name', key: 'name', sortable: true },
   { title: 'Digest', key: 'digest', sortable: true },
@@ -141,6 +182,63 @@ const headers: any[] = [
 ]
 
 const pageCount = computed(() => Math.ceil(totalItems.value / itemsPerPage.value) || 1)
+
+const fetchReleases = async () => {
+  loadingReleases.value = true
+  try {
+    const response = await api.get('/releases/with_stats/')
+    releases.value = response.data
+  } catch (error) {
+    notificationService.error('Failed to load releases')
+  } finally {
+    loadingReleases.value = false
+  }
+}
+
+const onReleaseChange = (releaseUuid: string | null) => {
+  selectedRelease.value = releaseUuid
+  // Clear selected images when release changes
+  selectedImages.value = []
+}
+
+const generateReleaseReport = async () => {
+  if (!selectedRelease.value) return
+
+  generatingReleaseReport.value = true
+  try {
+    const response = await api.post('reports/generate/', {
+      release_uuid: selectedRelease.value
+    }, {
+      responseType: 'blob'
+    })
+
+    // Get filename from Content-Disposition header
+    const contentDisposition = response.headers['content-disposition']
+    let filename = 'release_vulnerability_report.xlsx'
+    if (contentDisposition) {
+      const filenameMatch = contentDisposition.match(/filename="(.+)"/)
+      if (filenameMatch) {
+        filename = filenameMatch[1]
+      }
+    }
+
+    // Create a download link for the file
+    const url = window.URL.createObjectURL(new Blob([response.data]))
+    const link = document.createElement('a')
+    link.href = url
+    link.setAttribute('download', filename)
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    window.URL.revokeObjectURL(url)
+
+    notificationService.success('Release report generated successfully')
+  } catch (error) {
+    notificationService.error('Failed to generate release report')
+  } finally {
+    generatingReleaseReport.value = false
+  }
+}
 
 const fetchImages = async () => {
   loading.value = true
@@ -248,6 +346,7 @@ const onRowClick = (event: MouseEvent, { item }: { item: any }) => {
 
 onMounted(() => {
   fetchImages()
+  fetchReleases()
 })
 </script>
 
@@ -337,5 +436,9 @@ onMounted(() => {
   background: #011 !important;
   color: #39FF14 !important;
   border: 1px solid #39FF14 !important;
+}
+
+:deep(.v-input__details) {
+  display: none !important;
 }
 </style> 

@@ -861,6 +861,12 @@ class ReleaseViewSet(BaseViewSet):
         
         return Response(release_data)
 
+    @action(detail=False, methods=['get'])
+    def names(self, request):
+        """Get only release names and UUIDs for validation purposes"""
+        releases = Release.objects.values('uuid', 'name').order_by('name')
+        return Response(list(releases))
+
 
 class VulnerabilityViewSet(BaseViewSet):
     """
@@ -1150,19 +1156,40 @@ class ReportGeneratorView(APIView):
 
     def post(self, request):
         """
-        Generate a vulnerability report for selected images.
+        Generate a vulnerability report for selected images or a release.
         Returns an Excel file with vulnerability data.
+        
+        Request body:
+        - For images: {"image_uuids": ["uuid1", "uuid2", ...]}
+        - For release: {"release_uuid": "uuid"}
         """
         image_uuids = request.data.get('image_uuids', [])
-        if not image_uuids:
+        release_uuid = request.data.get('release_uuid')
+        
+        if not image_uuids and not release_uuid:
             return Response(
-                {'error': 'No images selected'},
+                {'error': 'No images or release selected'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-
-        try:
+        
+        # If release_uuid is provided, get all images from that release
+        if release_uuid:
+            try:
+                release = Release.objects.get(uuid=release_uuid)
+                # Get all images from repository tags in this release
+                images = Image.objects.filter(
+                    repository_tags__releases__release=release
+                ).distinct()
+            except Release.DoesNotExist:
+                return Response(
+                    {'error': 'Release not found'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+        else:
+            # Use provided image UUIDs
             images = Image.objects.filter(uuid__in=image_uuids)
 
+        try:
             # Create Excel file in memory
             output = BytesIO()
             wb = Workbook()
@@ -1202,7 +1229,13 @@ class ReportGeneratorView(APIView):
 
             from datetime import datetime
             timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            filename = f"vulnerability_report_{timestamp}.xlsx"
+            
+            # Generate appropriate filename based on report type
+            if release_uuid:
+                release_name = Release.objects.get(uuid=release_uuid).name
+                filename = f"release_{release_name}_vulnerability_report_{timestamp}.xlsx"
+            else:
+                filename = f"vulnerability_report_{timestamp}.xlsx"
 
             response = HttpResponse(
                 output.getvalue(),

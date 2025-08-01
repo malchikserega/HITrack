@@ -564,6 +564,7 @@ const router = useRouter()
 
 // Reactive data
 const releases = ref<Release[]>([])
+const releaseNames = ref<{uuid: string, name: string}[]>([])
 const loading = ref(false)
 const saving = ref(false)
 const deleting = ref(false)
@@ -651,8 +652,17 @@ const fetchReleases = async () => {
   }
 }
 
+const fetchReleaseNames = async () => {
+  try {
+    const response = await api.get('/releases/names/')
+    releaseNames.value = response.data
+  } catch (error) {
+    console.error('Error fetching release names:', error)
+  }
+}
+
 const checkReleaseNameExists = (name: string, excludeUuid?: string) => {
-  return releases.value.some(release => 
+  return releaseNames.value.some(release => 
     release.name.toLowerCase() === name.toLowerCase() && 
     release.uuid !== excludeUuid
   )
@@ -700,6 +710,7 @@ const saveRelease = async () => {
     
     closeDialog()
     await fetchReleases()
+    await fetchReleaseNames()
   } catch (error: any) {
     console.error('Error saving release:', error)
     
@@ -736,6 +747,7 @@ const confirmDelete = async () => {
     deleteDialog.value = false
     releaseToDelete.value = null
     await fetchReleases()
+    await fetchReleaseNames()
   } catch (error) {
     console.error('Error deleting release:', error)
     notificationService.error('Failed to delete release')
@@ -1004,6 +1016,7 @@ const createReleaseWithTags = async () => {
     showReleaseStep.value = false
     jsonWizardDialog.value = false
     await fetchReleases()
+    await fetchReleaseNames()
 
   } catch (error: any) {
     console.error('Error creating release:', error)
@@ -1024,6 +1037,7 @@ const createReleaseWithTags = async () => {
 // Lifecycle
 onMounted(() => {
   fetchReleases()
+  fetchReleaseNames()
 })
 </script>
 
