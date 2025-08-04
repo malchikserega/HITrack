@@ -1,6 +1,7 @@
 from rest_framework import serializers
+from rest_framework.validators import UniqueValidator
 from drf_spectacular.utils import extend_schema_field
-from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ComponentVersionVulnerability
+from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ComponentVersionVulnerability, Release, RepositoryTagRelease
 
 
 class ComponentListSerializer(serializers.ModelSerializer):
@@ -270,10 +271,28 @@ class RepositoryTagSerializer(serializers.ModelSerializer):
     vulnerabilities_count = serializers.SerializerMethodField()
     findings = serializers.SerializerMethodField()
     components = serializers.SerializerMethodField()
+    releases = serializers.SerializerMethodField()
 
     class Meta:
         model = RepositoryTag
-        fields = ['uuid', 'tag', 'repository', 'images', 'created_at', 'updated_at', 'vulnerabilities_count', 'processing_status', 'findings', 'components']
+        fields = ['uuid', 'tag', 'repository', 'images', 'created_at', 'updated_at', 'vulnerabilities_count', 'processing_status', 'findings', 'components', 'releases']
+        read_only_fields = ['created_at', 'updated_at', 'uuid']
+
+    def get_releases(self, obj):
+        """Get releases for this repository tag"""
+        releases = obj.releases.all()
+        return [
+            {
+                'uuid': str(release.release.uuid),
+                'name': release.release.name,
+                'description': release.release.description
+            }
+            for release in releases
+        ]
+
+    class Meta:
+        model = RepositoryTag
+        fields = ['uuid', 'tag', 'repository', 'images', 'created_at', 'updated_at', 'vulnerabilities_count', 'processing_status', 'findings', 'components', 'releases']
         read_only_fields = ['created_at', 'updated_at', 'uuid']
 
     @extend_schema_field(serializers.IntegerField())
@@ -327,10 +346,11 @@ class RepositoryListSerializer(serializers.ModelSerializer):
 class RepositoryTagListSerializer(serializers.ModelSerializer):
     findings = serializers.SerializerMethodField()
     components = serializers.SerializerMethodField()
+    releases = serializers.SerializerMethodField()
 
     class Meta:
         model = RepositoryTag
-        fields = ['uuid', 'tag', 'created_at', 'updated_at', 'processing_status', 'findings', 'components']
+        fields = ['uuid', 'tag', 'created_at', 'updated_at', 'processing_status', 'findings', 'components', 'releases']
         read_only_fields = ['created_at', 'updated_at', 'uuid']
 
     @extend_schema_field(serializers.IntegerField())
@@ -344,6 +364,18 @@ class RepositoryTagListSerializer(serializers.ModelSerializer):
     @extend_schema_field(serializers.IntegerField())
     def get_components(self, obj):
         return sum(img.component_versions.count() for img in obj.images.all())
+
+    def get_releases(self, obj):
+        """Get releases for this repository tag"""
+        releases = obj.releases.all()
+        return [
+            {
+                'uuid': str(release.release.uuid),
+                'name': release.release.name,
+                'description': release.release.description
+            }
+            for release in releases
+        ]
 
 
 class ComponentShortSerializer(serializers.ModelSerializer):
@@ -409,3 +441,45 @@ class ImageDropdownSerializer(serializers.ModelSerializer):
 
     def get_has_sbom(self, obj):
         return bool(obj.sbom_data)
+
+
+class ReleaseSerializer(serializers.ModelSerializer):
+    repository_tags_count = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Release
+        fields = ['uuid', 'name', 'description', 'repository_tags_count', 'created_at']
+        read_only_fields = ['created_at', 'uuid']
+        extra_kwargs = {
+            'name': {
+                'validators': [
+                    UniqueValidator(
+                        queryset=Release.objects.all(),
+                        message='Release with this name already exists.'
+                    )
+                ]
+            }
+        }
+    
+    def get_repository_tags_count(self, obj):
+        return obj.repository_tags.count()
+    
+    def validate_name(self, value):
+        # Case-insensitive unique validation
+        if Release.objects.filter(name__iexact=value).exists():
+            raise serializers.ValidationError('Release with this name already exists.')
+        return value
+
+
+class RepositoryTagReleaseSerializer(serializers.ModelSerializer):
+    repository_tag = RepositoryTagSerializer(read_only=True)
+    release = ReleaseSerializer(read_only=True)
+    
+    class Meta:
+        model = RepositoryTagRelease
+        fields = ['uuid', 'repository_tag', 'release', 'added_at']
+        read_only_fields = ['added_at', 'uuid']
+
+
+class ReleaseAssignmentSerializer(serializers.Serializer):
+    release_id = serializers.UUIDField()

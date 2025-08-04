@@ -4,271 +4,305 @@
       <v-row>
         <v-col cols="12">
           <h1 class="text-h4 mb-4 font-weight-black">Vulnerabilities</h1>
-          <v-btn color="primary" @click="openDialog('New Vulnerability')" class="mb-4">
-            Add Vulnerability
-          </v-btn>
         </v-col>
       </v-row>
 
       <v-row>
         <v-col cols="12">
-          <v-data-table
-            :headers="headers"
-            :items="vulnerabilities"
-            :loading="loading"
-            class="elevation-1"
-          >
-            <template v-slot:item.created_at="{ item }">
-              {{ $formatDate(item.created_at) }}
-            </template>
-            <template v-slot:item.updated_at="{ item }">
-              {{ $formatDate(item.updated_at) }}
-            </template>
-            <template v-slot:item.actions="{ item }">
-              <v-tooltip text="Edit vulnerability">
-                <template v-slot:activator="{ props }">
-                  <v-btn
-                    v-bind="props"
-                    icon="mdi-pencil"
-                    variant="tonal"
-                    size="x-small"
-                    color="secondary"
-                    @click="onEdit(item)"
-                  />
-                </template>
-              </v-tooltip>
-              <v-tooltip text="Delete vulnerability">
-                <template v-slot:activator="{ props }">
-                  <v-btn
-                    v-bind="props"
-                    icon="mdi-delete"
-                    variant="tonal"
-                    size="x-small"
-                    color="red"
-                    @click="onDelete(item)"
-                  />
-                </template>
-              </v-tooltip>
-            </template>
-          </v-data-table>
+          <!-- Search and Filters -->
+          <v-card class="mb-4">
+            <v-card-text>
+              <v-row>
+                <v-col cols="12" md="6">
+                  <v-text-field
+                    v-model="searchQuery"
+                    label="Search vulnerabilities"
+                    placeholder="Search by vulnerability ID (e.g., CVE-2023-1234)"
+                    prepend-inner-icon="mdi-magnify"
+                    :append-inner-icon="loading ? 'mdi-loading mdi-spin' : undefined"
+                    variant="outlined"
+                    clearable
+                    @click:clear="searchQuery = ''"
+                  ></v-text-field>
+                </v-col>
+                <v-col cols="12" md="3">
+                  <v-select
+                    v-model="severityFilter"
+                    :items="severityOptions"
+                    label="Severity"
+                    variant="outlined"
+                    clearable
+                    @update:model-value="onFilterChange"
+                  ></v-select>
+                </v-col>
+                <v-col cols="12" md="2">
+                  <v-select
+                    v-model="typeFilter"
+                    :items="typeOptions"
+                    label="Type"
+                    variant="outlined"
+                    clearable
+                    @update:model-value="onFilterChange"
+                  ></v-select>
+                </v-col>
+                <v-col cols="12" md="1">
+                  <v-checkbox
+                    v-model="fixableFilter"
+                    label="Fixable"
+                    @update:model-value="onFilterChange"
+                  ></v-checkbox>
+                </v-col>
+              </v-row>
+              <div v-if="searchQuery" class="text-caption text-grey mt-2">
+                Found {{ total }} result{{ total !== 1 ? 's' : '' }}
+              </div>
+            </v-card-text>
+          </v-card>
+
+          <!-- Vulnerabilities Table -->
+          <v-card>
+            <v-data-table
+              :headers="headers"
+              :items="vulnerabilities"
+              :loading="loading"
+              :items-per-page="itemsPerPage"
+              :page="currentPage"
+              :sort-by="sortBy"
+              :sort-desc="sortDesc"
+              hide-default-footer
+              class="elevation-1"
+              hover
+              density="comfortable"
+              @click:row="onVulnerabilityRowClick"
+              :no-data-text="searchQuery ? 'No vulnerabilities found matching your search' : 'No vulnerabilities found'"
+            >
+              <template v-slot:item.vulnerability_id="{ item }">
+                <v-chip
+                  size="small"
+                  color="primary"
+                  variant="tonal"
+                  class="font-weight-medium cursor-pointer"
+                >
+                  {{ item.vulnerability_id }}
+                </v-chip>
+              </template>
+              <template v-slot:item.vulnerability_type="{ item }">
+                <v-chip
+                  size="small"
+                  :color="getVulnerabilityTypeColor(item.vulnerability_type)"
+                  variant="tonal"
+                >
+                  {{ item.vulnerability_type }}
+                </v-chip>
+              </template>
+              <template v-slot:item.severity="{ item }">
+                <v-chip
+                  size="small"
+                  :color="getSeverityColor(item.severity)"
+                  variant="tonal"
+                  class="font-weight-medium"
+                >
+                  {{ item.severity }}
+                </v-chip>
+              </template>
+              <template v-slot:item.epss="{ item }">
+                <v-chip
+                  size="small"
+                  :color="getEpssColor(item.epss)"
+                  variant="tonal"
+                >
+                  {{ (item.epss * 100).toFixed(1) }}%
+                </v-chip>
+              </template>
+              <template v-slot:item.description="{ item }">
+                <div class="text-truncate" style="max-width: 300px;" :title="item.description">
+                  {{ item.description }}
+                </div>
+              </template>
+              <template v-slot:item.created_at="{ item }">
+                {{ $formatDate(item.created_at) }}
+              </template>
+              <template v-slot:item.updated_at="{ item }">
+                {{ $formatDate(item.updated_at) }}
+              </template>
+            </v-data-table>
+
+            <!-- Pagination -->
+            <div class="d-flex align-center justify-end mt-4 gap-4 pa-4">
+              <v-select
+                :items="[10, 20, 50, 100]"
+                v-model="itemsPerPage"
+                label="Items per page"
+                style="max-width: 150px"
+                hide-details
+                density="compact"
+                variant="outlined"
+                @update:model-value="onItemsPerPageChange"
+              />
+              <v-pagination
+                v-model="currentPage"
+                :length="pageCount"
+                @update:model-value="fetchVulnerabilities"
+                :total-visible="7"
+                density="comfortable"
+              />
+            </div>
+          </v-card>
         </v-col>
       </v-row>
-
-      <v-dialog v-model="dialog" max-width="500px">
-        <v-card :title="formTitle">
-          <v-card-text>
-            <v-row>
-              <v-col cols="12">
-                <v-text-field
-                  v-model="editedItem.vulnerability_id"
-                  label="CVE"
-                  variant="outlined"
-                  :rules="[rules.required]"
-                ></v-text-field>
-              </v-col>
-              <v-col cols="12">
-                <v-text-field
-                  v-model="editedItem.description"
-                  label="Description"
-                  variant="outlined"
-                  :rules="[rules.required]"
-                ></v-text-field>
-              </v-col>
-              <v-col cols="12">
-                <v-select
-                  v-model="editedItem.severity"
-                  :items="severityLevels"
-                  label="Severity"
-                  variant="outlined"
-                  :rules="[rules.required]"
-                ></v-select>
-              </v-col>
-            </v-row>
-          </v-card-text>
-
-          <v-card-actions>
-            <v-spacer></v-spacer>
-            <v-btn color="red-darken-1" variant="text" @click="closeDialog">
-              Cancel
-            </v-btn>
-            <v-btn variant="text" @click="save" :loading="saving">
-              Save
-            </v-btn>
-          </v-card-actions>
-        </v-card>
-      </v-dialog>
-
-      <v-dialog v-model="dialogDelete" max-width="500px">
-        <v-card title="Delete Vulnerability">
-          <v-card-text>Are you sure you want to delete <b>{{ itemToDelete?.vulnerability_id }}</b> vulnerability?</v-card-text>
-          <v-card-actions>
-            <v-spacer></v-spacer>
-            <v-btn color="red-darken-1" variant="text" @click="closeDelete">Cancel</v-btn>
-            <v-btn variant="text" @click="deleteItem" :loading="deleting">Delete</v-btn>
-          </v-card-actions>
-        </v-card>
-      </v-dialog>
     </v-container>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
 import api from '../plugins/axios'
 import { notificationService } from '../plugins/notifications'
+import { debounce } from '../utils/debounce'
+import { getVulnerabilityTypeColor, getSeverityColor, getEpssColor } from '../utils/colors'
 import type { Vulnerability, PaginatedResponse } from '../types/interfaces'
+import type { DataTableSortItem } from 'vuetify'
 
-const defaultItem = {
-  id: undefined,
-  uuid: '',
-  vulnerability_id: '',
-  vulnerability_type: '',
-  severity: '',
-  description: '',
-  epss: 0,
-  fixable: false,
-  fix: '',
-  created_at: '',
-  updated_at: ''
-}
-const editedItem = ref<Vulnerability>({...defaultItem})
+const router = useRouter()
+const route = useRoute()
+
+// Reactive data
 const vulnerabilities = ref<Vulnerability[]>([])
 const loading = ref(false)
-const saving = ref(false)
-const deleting = ref(false)
-const dialog = ref(false)
-const dialogDelete = ref(false)
-const itemToDelete = ref<Vulnerability | null>(null)
-const formTitle = ref('New Vulnerability')
-const severityLevels = [
-  'LOW',
-  'MEDIUM',
-  'HIGH',
-  'CRITICAL'
-]
+const total = ref(0)
 
-const headers: any[] = [
-  { title: 'CVE', key: 'vulnerability_id', width: '150px' },
-  { title: 'Description', key: 'description' },
-  { title: 'Severity', key: 'severity' },
-  { title: 'Created', key: 'created_at' },
-  { title: 'Updated', key: 'updated_at' },
-  { title: 'Actions', key: 'actions', sortable: false }
-]
+// Pagination state
+const currentPage = ref(1)
+const itemsPerPage = ref(20)
+const pageCount = computed(() => Math.ceil(total.value / itemsPerPage.value))
 
-const rules = {
-  required: (v: string) => !!v || 'This field is required'
-}
+// Sorting state
+const sortBy = ref<readonly DataTableSortItem[]>([])
+const sortDesc = ref<boolean[]>([])
 
+// Search and filter state
+const searchQuery = ref('')
+const severityFilter = ref('')
+const typeFilter = ref('')
+const fixableFilter = ref(false)
+
+// Filter options
+const severityOptions = [
+  { title: 'Critical', value: 'CRITICAL' },
+  { title: 'High', value: 'HIGH' },
+  { title: 'Medium', value: 'MEDIUM' },
+  { title: 'Low', value: 'LOW' },
+  { title: 'Unknown', value: 'UNKNOWN' }
+] as const
+
+const typeOptions = [
+  { title: 'CVE', value: 'CVE' },
+  { title: 'GHSA', value: 'GHSA' },
+  { title: 'RUSTSEC', value: 'RUSTSEC' },
+  { title: 'PYSEC', value: 'PYSEC' },
+  { title: 'NPM', value: 'NPM' }
+] as const
+
+// Table configuration
+const headers = [
+  { title: 'Vulnerability ID', key: 'vulnerability_id', sortable: true },
+  { title: 'Type', key: 'vulnerability_type', sortable: true },
+  { title: 'Severity', key: 'severity', sortable: true },
+  { title: 'EPSS', key: 'epss', sortable: true },
+  { title: 'Description', key: 'description', sortable: false },
+  { title: 'Created', key: 'created_at', sortable: true },
+  { title: 'Updated', key: 'updated_at', sortable: true }
+] as const
+
+// Fetch vulnerabilities with optimized parameters
 const fetchVulnerabilities = async () => {
   loading.value = true
   try {
-    const response = await api.get<PaginatedResponse<Vulnerability>>('vulnerabilities/')
-    vulnerabilities.value = response.data.results
-  } catch (error) {
-    console.error('Error fetching vulnerabilities:', error)
-    notificationService.error('Failed to fetch vulnerabilities')
+    // Build query parameters
+    const params: Record<string, any> = {
+      page: currentPage.value,
+      page_size: itemsPerPage.value
+    }
+
+    // Add sorting
+    const sortField = sortBy.value[0]
+    const sortDescValue = sortDesc.value[0]
+    if (sortField) {
+      params.ordering = `${sortDescValue ? '-' : ''}${sortField}`
+    }
+
+    // Add search and filters
+    if (searchQuery.value) params.search = searchQuery.value
+    if (severityFilter.value) params.severity = severityFilter.value
+    if (typeFilter.value) params.vulnerability_type = typeFilter.value
+    if (fixableFilter.value) params.fixable = 'true'
+
+    const resp = await api.get<PaginatedResponse<Vulnerability>>('vulnerabilities/', { params })
+    vulnerabilities.value = resp.data.results
+    total.value = resp.data.count
+  } catch (e: any) {
+    vulnerabilities.value = []
+    total.value = 0
+    if (e?.response?.status !== 404) {
+      notificationService.error('Failed to fetch vulnerabilities')
+    }
   } finally {
     loading.value = false
   }
 }
 
-const openDialog = (title: string, item?: Vulnerability) => {
-  formTitle.value = title
-  if (item) {
-    editedItem.value = {
-      id: item.id,
-      uuid: item.uuid,
-      vulnerability_id: item.vulnerability_id,
-      vulnerability_type: item.vulnerability_type,
-      description: item.description,
-      severity: item.severity,
-      epss: item.epss,
-      fixable: item.fixable ?? false,
-      fix: item.fix ?? '',
-      created_at: item.created_at,
-      updated_at: item.updated_at
-    }
-  } else {
-    editedItem.value = Object.assign({}, defaultItem)
-  }
-  dialog.value = true
-}
+// Debounced search function
+const debouncedFetchVulnerabilities = debounce(fetchVulnerabilities, 300)
 
-const closeDialog = () => {
-  dialog.value = false
-  editedItem.value = Object.assign({}, defaultItem)
-}
-
-const save = async () => {
-  saving.value = true
-  try {
-    const data = {
-      vulnerability_id: editedItem.value.vulnerability_id,
-      description: editedItem.value.description,
-      severity: editedItem.value.severity
-    }
-    
-    if (editedItem.value.uuid) {
-      await api.put(`vulnerabilities/${editedItem.value.uuid}/`, data)
-      notificationService.success('Vulnerability updated successfully')
-    } else {
-      await api.post('vulnerabilities/', data)
-      notificationService.success('Vulnerability created successfully')
-    }
-    await fetchVulnerabilities()
-    closeDialog()
-  } catch (error) {
-    console.error('Error saving vulnerability:', error)
-    notificationService.error('Failed to save vulnerability')
-  } finally {
-    saving.value = false
-  }
-}
-
-const confirmDelete = (item: Vulnerability) => {
-  if (!item.uuid) {
-    notificationService.error('Cannot delete vulnerability: missing UUID')
-    return
-  }
-  itemToDelete.value = item
-  dialogDelete.value = true
-}
-
-const deleteItem = async () => {
-  if (!itemToDelete.value?.uuid) {
-    notificationService.error('Cannot delete vulnerability: missing UUID')
-    return
+// Handle URL parameters for filters
+const handleUrlParams = () => {
+  const severity = route.query.severity as string
+  const fixable = route.query.fixable as string
+  
+  if (severity) {
+    severityFilter.value = severity
   }
   
-  deleting.value = true
-  try {
-    await api.delete(`vulnerabilities/${itemToDelete.value.uuid}/`)
-    await fetchVulnerabilities()
-    notificationService.success('Vulnerability deleted successfully')
-  } catch (error) {
-    console.error('Error deleting vulnerability:', error)
-    notificationService.error('Failed to delete vulnerability')
-  } finally {
-    deleting.value = false
-    closeDelete()
+  if (fixable === 'true') {
+    fixableFilter.value = true
   }
 }
 
-const closeDelete = () => {
-  dialogDelete.value = false
-  itemToDelete.value = null
+// Event handlers
+const onVulnerabilityRowClick = (_: MouseEvent, { item }: { item: Vulnerability }) => {
+  item?.uuid && router.push({ name: 'vulnerability-detail', params: { uuid: item.uuid } })
 }
 
-const onEdit = (vuln: Vulnerability) => {
-  openDialog('Edit Vulnerability', vuln);
-};
-const onDelete = (vuln: Vulnerability) => {
-  console.log('Delete click:', vuln);
-  confirmDelete(vuln);
-};
+const onItemsPerPageChange = (val: number) => {
+  itemsPerPage.value = val
+  currentPage.value = 1
+  fetchVulnerabilities()
+}
 
+const onFilterChange = () => {
+  currentPage.value = 1
+  fetchVulnerabilities()
+}
+
+// Color utilities imported from utils/colors.ts
+
+// Watchers
+watch([
+  currentPage,
+  itemsPerPage,
+  sortBy,
+  sortDesc
+], fetchVulnerabilities)
+
+watch(searchQuery, () => {
+  currentPage.value = 1
+  debouncedFetchVulnerabilities()
+})
+
+// Initialize
 onMounted(() => {
+  handleUrlParams()
   fetchVulnerabilities()
 })
 </script>
@@ -278,6 +312,9 @@ onMounted(() => {
   padding: 20px;
 }
 
+/* Component-specific styles */
+
+/* Table styling */
 :deep(.v-table) {
   background: transparent;
 }
@@ -296,12 +333,11 @@ onMounted(() => {
   letter-spacing: 0.5px;
   padding: 12px 16px;
   border-bottom: 2px solid #e0e0e0;
-  transition: all 0.3s ease;
+  transition: background-color 0.3s ease;
 }
 
 :deep(.v-table .v-table__wrapper > table > thead > tr > th:hover) {
   background-color: #e3f2fd;
-  color: rgba(0, 0, 0, 0.87);
 }
 
 :deep(.v-table .v-table__wrapper > table > tbody > tr > td) {
@@ -313,6 +349,7 @@ onMounted(() => {
   background-color: #f5f5f5;
 }
 
+/* Matrix theme override */
 .v-theme--matrix :deep(.v-table .v-table__wrapper > table > thead > tr > th) {
   background: #011 !important;
   color: #39FF14 !important;

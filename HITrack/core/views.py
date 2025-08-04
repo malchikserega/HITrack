@@ -4,14 +4,15 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.generics import ListAPIView, GenericAPIView
 from django_filters.rest_framework import DjangoFilterBackend
-from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ContainerRegistry, ComponentVersionVulnerability
+from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ContainerRegistry, ComponentVersionVulnerability, Release, RepositoryTagRelease
 from .serializers import (
     RepositorySerializer, RepositoryTagSerializer, ImageSerializer, ImageListSerializer,
     ComponentSerializer, ComponentVersionSerializer, VulnerabilitySerializer, ComponentListSerializer,
     RepositoryListSerializer, RepositoryTagListSerializer, ComponentVersionListSerializer,
     HasACRRegistryResponseSerializer, ListACRRegistriesResponseSerializer,
     StatsResponseSerializer, JobAddRepositoriesRequestSerializer,
-    JobAddRepositoriesResponseSerializer, ImageDropdownSerializer
+    JobAddRepositoriesResponseSerializer, ImageDropdownSerializer,
+    ReleaseSerializer, RepositoryTagReleaseSerializer, ReleaseAssignmentSerializer
 )
 from django.db import models
 from .pagination import CustomPageNumberPagination
@@ -22,7 +23,6 @@ from io import BytesIO
 from rest_framework.views import APIView
 from django.http import HttpResponse
 from openpyxl import Workbook
-from core.models import ComponentVersionVulnerability
 from django.shortcuts import render
 from packaging import version as packaging_version
 import re
@@ -49,11 +49,201 @@ class RepositoryViewSet(BaseViewSet):
         return RepositorySerializer
 
     @action(detail=True, methods=['get'])
-    def tags(self, request, pk=None):
+    def tags(self, request, uuid=None):
         repository = self.get_object()
         tags = repository.tags.all()
         serializer = RepositoryTagSerializer(tags, many=True)
         return Response(serializer.data)
+
+    @action(detail=True, methods=['post'])
+    def create_tag(self, request, uuid=None):
+        """
+        Create a new tag for the repository.
+        """
+        repository = self.get_object()
+        tag_name = request.data.get('tag')
+        description = request.data.get('description', '')
+        
+        print(f"Creating tag: repository={repository.name}, tag={tag_name}, description={description}")
+        print(f"Request data: {request.data}")
+        
+        if not tag_name:
+            return Response(
+                {'error': 'Tag name is required'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Check if tag already exists
+        if repository.tags.filter(tag=tag_name).exists():
+            return Response(
+                {'error': 'Tag already exists'}, 
+                status=status.HTTP_409_CONFLICT
+            )
+        
+        try:
+            # Create new tag
+            tag = RepositoryTag.objects.create(
+                repository=repository,
+                tag=tag_name
+            )
+            
+            serializer = RepositoryTagSerializer(tag)
+            return Response(
+                serializer.data, 
+                status=status.HTTP_201_CREATED
+            )
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to create tag: {str(e)}'}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=False, methods=['post'])
+    def create_release_with_tags(self, request):
+        """
+        Create a new release and link it with repository tags.
+        """
+        release_name = request.data.get('release_name')
+        release_description = request.data.get('release_description', '')
+        tag_uuids = request.data.get('tag_uuids', [])
+        
+        print(f"Creating release: name={release_name}, description={release_description}")
+        print(f"Tag UUIDs: {tag_uuids}")
+        
+        if not release_name:
+            return Response(
+                {'error': 'Release name is required'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if not tag_uuids:
+            return Response(
+                {'error': 'At least one tag UUID is required'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            # Check if release name already exists (case-insensitive)
+            if Release.objects.filter(name__iexact=release_name).exists():
+                return Response(
+                    {'release_name': ['Release with this name already exists.']}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Create new release
+            release = Release.objects.create(
+                name=release_name,
+                description=release_description
+            )
+            
+            # Get repository tags and create links
+            repository_tags = RepositoryTag.objects.filter(uuid__in=tag_uuids)
+            created_links = []
+            
+            for tag in repository_tags:
+                # Check if link already exists
+                if not RepositoryTagRelease.objects.filter(
+                    repository_tag=tag, 
+                    release=release
+                ).exists():
+                    link = RepositoryTagRelease.objects.create(
+                        repository_tag=tag,
+                        release=release
+                    )
+                    created_links.append(link)
+            
+            # Return success response
+            return Response({
+                'release_uuid': str(release.uuid),
+                'release_name': release.name,
+                'tags_linked': len(created_links),
+                'total_tags': len(tag_uuids)
+            }, status=status.HTTP_201_CREATED)
+            
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to create release: {str(e)}'}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=False, methods=['post'])
+    def check_helm_releases(self, request):
+        """
+        Check multiple Helm releases against the database.
+        Expects a list of objects with 'name' and 'app_version' fields.
+        """
+        releases_data = request.data.get('releases', [])
+        
+        if not releases_data:
+            return Response(
+                {'error': 'Releases data is required'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            results = []
+            
+            # Get all repositories and tags in one query
+            all_repositories = Repository.objects.all()
+            all_tags = RepositoryTag.objects.select_related('repository').all()
+            
+            # Create lookup dictionaries for faster access
+            repos_by_name = {repo.name: repo for repo in all_repositories}
+            tags_by_repo_and_version = {}
+            
+            for tag in all_tags:
+                key = f"{tag.repository.uuid}_{tag.tag}"
+                tags_by_repo_and_version[key] = tag
+            
+            for release in releases_data:
+                name = release.get('name')
+                app_version = release.get('app_version')
+                
+                if not name or not app_version:
+                    results.append({
+                        'name': name,
+                        'app_version': app_version,
+                        'repository_status': 'Error',
+                        'tag_status': 'Error',
+                        'error': 'Missing name or app_version'
+                    })
+                    continue
+                
+                # Check if repository exists
+                repository = repos_by_name.get(name)
+                repository_status = 'Found' if repository else 'Not Found'
+                
+                # Check if tag exists (only if repository exists)
+                tag_status = 'Not Found'
+                tag_uuid = None
+                if repository:
+                    tag_key = f"{repository.uuid}_{app_version}"
+                    tag = tags_by_repo_and_version.get(tag_key)
+                    if tag:
+                        tag_status = 'Found'
+                        tag_uuid = str(tag.uuid)
+                
+                results.append({
+                    'name': name,
+                    'app_version': app_version,
+                    'repository_status': repository_status,
+                    'tag_status': tag_status,
+                    'repository_uuid': str(repository.uuid) if repository else None,
+                    'tag_uuid': tag_uuid
+                })
+            
+            return Response({
+                'results': results,
+                'total_checked': len(results),
+                'repositories_found': len([r for r in results if r['repository_status'] == 'Found']),
+                'tags_found': len([r for r in results if r['tag_status'] == 'Found'])
+            })
+            
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to check releases: {str(e)}'}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
     @action(detail=False, methods=['get'])
     def get_acr_repos(self, request):
@@ -66,7 +256,7 @@ class RepositoryViewSet(BaseViewSet):
 
         registry_uuid = request.query_params.get('registry_uuid')
         provider = request.query_params.get('provider', 'acr')
-        page_size = int(request.query_params.get('page_size', 50))
+        page_size = int(request.query_params.get('page_size', 100))
         last_repo = request.query_params.get('last')
         
         try:
@@ -163,8 +353,8 @@ class RepositoryViewSet(BaseViewSet):
     @action(detail=True, methods=['get'], url_path='tags-graph')
     def tags_graph(self, request, uuid=None):
         """
-        Returns 30 tags for repository for use in charts (fields: uuid, tag, findings, components, created_at)
-        Tags are sorted by semantic version (numeric part) and then by suffix.
+        Returns the latest 30 tags for repository for use in charts (fields: uuid, tag, findings, components, created_at)
+        Tags are sorted by semantic version (numeric part) and then by suffix, returning the most recent 30 tags.
         """
         repository = self.get_object()
         tags = list(repository.tags.all())
@@ -182,7 +372,7 @@ class RepositoryViewSet(BaseViewSet):
             else:
                 return (packaging_version.Version('0.0.0'), tag.tag)
         
-        sorted_tags = sorted(tags, key=version_key)[:30]
+        sorted_tags = sorted(tags, key=version_key)[-30:]
         serializer = RepositoryTagListSerializer(sorted_tags, many=True)
         return Response(serializer.data)
 
@@ -276,6 +466,80 @@ class RepositoryTagViewSet(BaseViewSet):
             'count': started
         })
 
+    @action(detail=True, methods=['post'])
+    def add_to_release(self, request, uuid=None):
+        """Add repository tag to release"""
+        repository_tag = self.get_object()
+        serializer = ReleaseAssignmentSerializer(data=request.data)
+        
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            release_id = serializer.validated_data['release_id']
+            release = Release.objects.get(uuid=release_id)
+            
+            # Check if assignment already exists
+            assignment, created = RepositoryTagRelease.objects.get_or_create(
+                repository_tag=repository_tag,
+                release=release
+            )
+            
+            if created:
+                return Response({
+                    'message': f'Repository tag added to release "{release.name}"',
+                    'release': ReleaseSerializer(release).data
+                })
+            else:
+                return Response({
+                    'message': f'Repository tag already assigned to release "{release.name}"',
+                    'release': ReleaseSerializer(release).data
+                })
+                
+        except Release.DoesNotExist:
+            return Response(
+                {'error': 'Release not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=True, methods=['delete'])
+    def remove_from_release(self, request, uuid=None):
+        """Remove repository tag from release"""
+        repository_tag = self.get_object()
+        serializer = ReleaseAssignmentSerializer(data=request.data)
+        
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            release_id = serializer.validated_data['release_id']
+            assignment = RepositoryTagRelease.objects.filter(
+                repository_tag=repository_tag,
+                release_id=release_id
+            ).first()
+            
+            if assignment:
+                release_name = assignment.release.name
+                assignment.delete()
+                return Response({
+                    'message': f'Repository tag removed from release "{release_name}"'
+                })
+            else:
+                return Response({
+                    'message': 'Repository tag not assigned to this release'
+                })
+                
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
 class ImageViewSet(BaseViewSet):
     queryset = Image.objects.all()
     filterset_fields = ['repository_tags', 'component_versions']
@@ -315,14 +579,81 @@ class ImageViewSet(BaseViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-    @action(detail=True, methods=['get'])
-    def vulnerabilities(self, request, pk=None):
-        image = self.get_object()
+    @action(detail=True, methods=['get'], url_path='vulnerabilities')
+    def vulnerabilities(self, request, uuid=None):
+        """
+        Paginated list of vulnerabilities for a given image, with search and ordering support.
+        """
+        # Temporarily disable search filter for this action
+        original_filter_backends = self.filter_backends
+        self.filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+        
+        try:
+            image = self.get_object()
+        except Exception:
+            self.filter_backends = original_filter_backends
+            return Response({'error': 'Image not found'}, status=404)
+        
+        # Restore original filter_backends
+        self.filter_backends = original_filter_backends
+        
+        # Get all vulnerabilities linked to this image through component versions
         vulnerabilities = Vulnerability.objects.filter(
             component_versions__images=image
         ).distinct()
-        serializer = VulnerabilitySerializer(vulnerabilities, many=True)
-        return Response(serializer.data)
+
+        # Search
+        search = request.query_params.get('search')
+        if search:
+            vulnerabilities = vulnerabilities.filter(
+                vulnerability_id__icontains=search
+            )
+
+        # Ordering
+        ordering = request.query_params.get('ordering')
+        if ordering:
+            # Support ordering by vulnerability fields
+            ordering_map = {
+                'vulnerability_id': 'vulnerability_id',
+                '-vulnerability_id': '-vulnerability_id',
+                'vulnerability_type': 'vulnerability_type',
+                '-vulnerability_type': '-vulnerability_type',
+                'severity': 'severity',
+                '-severity': '-severity',
+                'epss': 'epss',
+                '-epss': '-epss',
+                'created_at': 'created_at',
+                '-created_at': '-created_at',
+                'updated_at': 'updated_at',
+                '-updated_at': '-updated_at',
+            }
+            ordering_field = ordering_map.get(ordering, ordering)
+            vulnerabilities = vulnerabilities.order_by(ordering_field)
+        else:
+            vulnerabilities = vulnerabilities.order_by('-created_at')
+
+        # Pagination
+        paginator = CustomPageNumberPagination()
+        page = paginator.paginate_queryset(vulnerabilities, request)
+        
+        # Serialize with fix information from ComponentVersionVulnerability
+        vuln_data = []
+        for vuln in page:
+            vuln_dict = VulnerabilitySerializer(vuln).data
+            # Get fix information from ComponentVersionVulnerability
+            cvv = ComponentVersionVulnerability.objects.filter(
+                vulnerability=vuln,
+                component_version__images=image
+            ).first()
+            if cvv:
+                vuln_dict['fixable'] = cvv.fixable
+                vuln_dict['fix'] = cvv.fix
+            else:
+                vuln_dict['fixable'] = False
+                vuln_dict['fix'] = ''
+            vuln_data.append(vuln_dict)
+        
+        return paginator.get_paginated_response(vuln_data)
 
     @action(detail=True, methods=['post'])
     def rescan(self, request, uuid=None):
@@ -437,7 +768,7 @@ class ComponentViewSet(viewsets.ReadOnlyModelViewSet):
         return ComponentSerializer
 
     @action(detail=True, methods=['get'])
-    def versions(self, request, pk=None):
+    def versions(self, request, uuid=None):
         component = self.get_object()
         versions = component.versions.select_related(
             'component'
@@ -465,11 +796,77 @@ class ComponentVersionViewSet(BaseViewSet):
         return ComponentVersionSerializer
 
     @action(detail=True, methods=['get'])
-    def vulnerabilities(self, request, pk=None):
+    def vulnerabilities(self, request, uuid=None):
         version = self.get_object()
         vulnerabilities = version.vulnerabilities.all()
         serializer = VulnerabilitySerializer(vulnerabilities, many=True)
         return Response(serializer.data)
+
+class ReleaseViewSet(BaseViewSet):
+    """
+    API endpoint for managing releases.
+    
+    list:
+    Return a list of all releases.
+    
+    retrieve:
+    Return the details of a specific release.
+    
+    create:
+    Create a new release.
+    
+    update:
+    Update an existing release.
+    
+    partial_update:
+    Partially update an existing release.
+    
+    destroy:
+    Delete a release.
+    """
+    queryset = Release.objects.all()
+    serializer_class = ReleaseSerializer
+    search_fields = ['name', 'description']
+    ordering_fields = ['name', 'created_at']
+    
+    @action(detail=False, methods=['get'])
+    def with_stats(self, request):
+        """Get all releases with repository tag counts and vulnerability stats"""
+        releases = Release.objects.annotate(
+            tag_count=Count('repository_tags')
+        ).prefetch_related('repository_tags')
+        
+        release_data = []
+        for release in releases:
+            # Get vulnerability stats for this release through RepositoryTagRelease
+            critical_vulns = Vulnerability.objects.filter(
+                component_versions__images__repository_tags__releases__release=release,
+                severity='CRITICAL'
+            ).distinct().count()
+            
+            high_vulns = Vulnerability.objects.filter(
+                component_versions__images__repository_tags__releases__release=release,
+                severity='HIGH'
+            ).distinct().count()
+            
+            release_data.append({
+                'uuid': str(release.uuid),
+                'name': release.name,
+                'description': release.description,
+                'tag_count': release.tag_count,
+                'critical_vulnerabilities': critical_vulns,
+                'high_vulnerabilities': high_vulns,
+                'created_at': release.created_at
+            })
+        
+        return Response(release_data)
+
+    @action(detail=False, methods=['get'])
+    def names(self, request):
+        """Get only release names and UUIDs for validation purposes"""
+        releases = Release.objects.values('uuid', 'name').order_by('name')
+        return Response(list(releases))
+
 
 class VulnerabilityViewSet(BaseViewSet):
     """
@@ -498,9 +895,23 @@ class VulnerabilityViewSet(BaseViewSet):
     """
     queryset = Vulnerability.objects.all()
     serializer_class = VulnerabilitySerializer
-    filterset_fields = ['severity', 'component_versions']
-    search_fields = ['cve_id', 'description']
-    ordering_fields = ['cve_id', 'severity', 'epss', 'created_at', 'updated_at']
+    filterset_fields = ['severity', 'vulnerability_type']
+    search_fields = ['vulnerability_id']
+    ordering_fields = ['vulnerability_id', 'severity', 'epss', 'created_at', 'updated_at']
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        
+        # Handle fixable filter
+        fixable = self.request.query_params.get('fixable')
+        if fixable == 'true':
+            # Get vulnerabilities that are fixable (have fixable component versions)
+            fixable_vulnerabilities = ComponentVersionVulnerability.objects.filter(
+                fixable=True
+            ).values_list('vulnerability__uuid', flat=True).distinct()
+            queryset = queryset.filter(uuid__in=fixable_vulnerabilities)
+        
+        return queryset
 
     @action(detail=False, methods=['get'])
     def severity_stats(self, request):
@@ -550,6 +961,120 @@ class StatsViewSet(viewsets.ViewSet):
             'components': Component.objects.count(),
         }
         return Response(data)
+
+    @action(detail=False, methods=['get'])
+    def dashboard_metrics(self, request):
+        """Get comprehensive dashboard metrics with optimized queries"""
+        from django.db.models import Count, Avg, Q
+        from django.utils import timezone
+        from datetime import timedelta
+        
+        # Calculate date once
+        thirty_days_ago = timezone.now() - timedelta(days=30)
+        
+        # Optimized basic counts with select_related/prefetch_related
+        total_repositories = Repository.objects.count()
+        total_images = Image.objects.count()
+        
+        # Optimized severity distribution - single query
+        severity_distribution = Vulnerability.objects.values('severity').annotate(
+            count=Count('uuid')
+        ).order_by('severity')
+        
+        # Optimized vulnerability trends - indexed date field
+        vulnerability_trends = Vulnerability.objects.filter(
+            created_at__gte=thirty_days_ago
+        ).values('created_at__date').annotate(
+            count=Count('uuid')
+        ).order_by('created_at__date')
+        
+        # Optimized top vulnerable components - avoid N+1 with select_related
+        top_vulnerable_components = ComponentVersion.objects.select_related('component').annotate(
+            vuln_count=Count('vulnerabilities')
+        ).filter(vuln_count__gt=0).order_by('-vuln_count')[:10]
+        
+        # Optimized top vulnerabilities by EPSS - limit fields
+        top_vulnerabilities_by_epss = Vulnerability.objects.filter(
+            epss__isnull=False
+        ).only('uuid', 'vulnerability_id', 'severity', 'epss', 'description').order_by('-epss')[:10]
+        
+        # Optimized security metrics - single aggregation query
+        security_metrics = Vulnerability.objects.aggregate(
+            critical_count=Count('uuid', filter=Q(severity='CRITICAL')),
+            total_count=Count('uuid')
+        )
+        
+        # Optimized fixable vulnerabilities count
+        fixable_vulns = ComponentVersionVulnerability.objects.filter(fixable=True).count()
+        
+        # Calculate percentage
+        total_vulns = security_metrics['total_count']
+        fixable_percentage = (fixable_vulns / total_vulns * 100) if total_vulns > 0 else 0
+        
+        # Optimized recent activities - single query with union
+        recent_activities = []
+        
+        # Recent repository scans - optimized with only needed fields
+        recent_scans = Repository.objects.filter(
+            updated_at__gte=thirty_days_ago
+        ).only('name', 'updated_at', 'scan_status').order_by('-updated_at')[:5]
+        
+        for repo in recent_scans:
+            recent_activities.append({
+                'type': 'scan',
+                'title': f'Repository "{repo.name}" scanned',
+                'timestamp': repo.updated_at,
+                'status': repo.scan_status
+            })
+        
+        # Recent vulnerabilities - optimized with only needed fields
+        recent_vulns = Vulnerability.objects.filter(
+            created_at__gte=thirty_days_ago
+        ).only('vulnerability_id', 'created_at', 'severity').order_by('-created_at')[:5]
+        
+        for vuln in recent_vulns:
+            recent_activities.append({
+                'type': 'vulnerability',
+                'title': f'New vulnerability: {vuln.vulnerability_id}',
+                'timestamp': vuln.created_at,
+                'severity': vuln.severity
+            })
+        
+        # Sort activities by timestamp
+        recent_activities.sort(key=lambda x: x['timestamp'], reverse=True)
+        
+        return Response({
+            'basic_stats': {
+                'repositories': total_repositories,
+                'images': total_images
+            },
+            'security_metrics': {
+                'critical_vulnerabilities': security_metrics['critical_count'],
+                'fixable_vulnerabilities': fixable_vulns,
+                'fixable_percentage': round(fixable_percentage, 1)
+            },
+            'severity_distribution': list(severity_distribution),
+            'vulnerability_trends': list(vulnerability_trends),
+            'top_vulnerable_components': [
+                {
+                    'name': cv.component.name,
+                    'version': cv.version,
+                    'vulnerability_count': cv.vuln_count
+                }
+                for cv in top_vulnerable_components
+            ],
+            'top_vulnerabilities_by_epss': [
+                {
+                    'uuid': str(vuln.uuid),
+                    'vulnerability_id': vuln.vulnerability_id,
+                    'severity': vuln.severity,
+                    'epss': round(vuln.epss, 3),
+                    'description': vuln.description[:100] + '...' if len(vuln.description) > 100 else vuln.description
+                }
+                for vuln in top_vulnerabilities_by_epss
+            ],
+            'recent_activities': recent_activities[:10]
+        })
 
 class JobViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
@@ -631,19 +1156,40 @@ class ReportGeneratorView(APIView):
 
     def post(self, request):
         """
-        Generate a vulnerability report for selected images.
+        Generate a vulnerability report for selected images or a release.
         Returns an Excel file with vulnerability data.
+        
+        Request body:
+        - For images: {"image_uuids": ["uuid1", "uuid2", ...]}
+        - For release: {"release_uuid": "uuid"}
         """
         image_uuids = request.data.get('image_uuids', [])
-        if not image_uuids:
+        release_uuid = request.data.get('release_uuid')
+        
+        if not image_uuids and not release_uuid:
             return Response(
-                {'error': 'No images selected'},
+                {'error': 'No images or release selected'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-
-        try:
+        
+        # If release_uuid is provided, get all images from that release
+        if release_uuid:
+            try:
+                release = Release.objects.get(uuid=release_uuid)
+                # Get all images from repository tags in this release
+                images = Image.objects.filter(
+                    repository_tags__releases__release=release
+                ).distinct()
+            except Release.DoesNotExist:
+                return Response(
+                    {'error': 'Release not found'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+        else:
+            # Use provided image UUIDs
             images = Image.objects.filter(uuid__in=image_uuids)
 
+        try:
             # Create Excel file in memory
             output = BytesIO()
             wb = Workbook()
@@ -683,7 +1229,13 @@ class ReportGeneratorView(APIView):
 
             from datetime import datetime
             timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            filename = f"vulnerability_report_{timestamp}.xlsx"
+            
+            # Generate appropriate filename based on report type
+            if release_uuid:
+                release_name = Release.objects.get(uuid=release_uuid).name
+                filename = f"release_{release_name}_vulnerability_report_{timestamp}.xlsx"
+            else:
+                filename = f"vulnerability_report_{timestamp}.xlsx"
 
             response = HttpResponse(
                 output.getvalue(),

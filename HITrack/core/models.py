@@ -190,3 +190,33 @@ class ComponentVersionVulnerability(models.Model):
         verbose_name_plural = 'Component Version Vulnerability Links'
     def __str__(self):
         return f"{self.component_version} <-> {self.vulnerability}"
+
+
+class Release(models.Model):
+    uuid = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=10, unique=True)  # "Product A v1.0", "Product B v2.1"
+    description = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        ordering = ['name']
+        verbose_name = 'Release'
+        verbose_name_plural = 'Releases'
+
+    def __str__(self):
+        return self.name
+
+
+class RepositoryTagRelease(models.Model):
+    uuid = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    repository_tag = models.ForeignKey(RepositoryTag, on_delete=models.CASCADE, related_name='releases')
+    release = models.ForeignKey(Release, on_delete=models.CASCADE, related_name='repository_tags')
+    added_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        unique_together = ['repository_tag', 'release']
+        verbose_name = 'Repository Tag Release Assignment'
+        verbose_name_plural = 'Repository Tag Release Assignments'
+
+    def __str__(self):
+        return f"{self.repository_tag} -> {self.release}"

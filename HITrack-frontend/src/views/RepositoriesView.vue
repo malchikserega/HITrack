@@ -45,11 +45,9 @@
             density="comfortable"
             :items-per-page="itemsPerPage"
             :page="page"
-            :sort-by.sync="sortBy"
+            v-model:sort-by="sortBy"
             :server-items-length="totalItems"
-            :footer-props="{ showFirstLastPage: true, itemsPerPageOptions: [10, 20, 50, 100] }"
-            @update:page="page = $event"
-            @update:items-per-page="itemsPerPage = $event"
+            hide-default-footer
             @update:sort-by="sortBy = $event"
           >
             <template #item="{ item }">
@@ -127,14 +125,30 @@
           </v-data-table>
         </v-col>
       </v-row>
+
       <v-row>
         <v-col cols="12" class="d-flex align-center justify-end mt-2 gap-4">
+          <div class="d-flex align-center gap-4">
+            <span class="text-body-2">Items per page:</span>
+            <v-select
+              :items="[10, 20, 50, 100]"
+              v-model="itemsPerPage"
+              density="compact"
+              variant="outlined"
+              hide-details
+              style="width: 80px"
+              @update:model-value="onItemsPerPageChange"
+            />
+            <span class="text-body-2">
+              {{ ((page - 1) * itemsPerPage) + 1 }}-{{ Math.min(page * itemsPerPage, totalItems) }} of {{ totalItems }}
+            </span>
+          </div>
           <v-pagination
             v-model="page"
             :length="Math.ceil(totalItems / itemsPerPage) || 1"
-            @update:model-value="fetchRepositories"
             :total-visible="7"
             density="comfortable"
+            @update:model-value="onPageChange"
           />
         </v-col>
       </v-row>
@@ -189,7 +203,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, computed, watch } from 'vue'
+import { ref, onMounted, computed, watch, onUnmounted } from 'vue'
 import api from '../plugins/axios'
 import { notificationService } from '../plugins/notifications'
 import type { Repository, PaginatedResponse } from '../types/interfaces'
@@ -268,7 +282,32 @@ const fetchRepositories = async () => {
   }
 }
 
-watch([page, itemsPerPage, repositoriesSearch, sortBy], fetchRepositories)
+// Debounced fetch function to prevent multiple rapid requests
+let fetchTimeout: number | null = null
+let isInitialized = false
+
+const debouncedFetchRepositories = () => {
+  if (!isInitialized) return // Skip during initialization
+  
+  if (fetchTimeout) {
+    clearTimeout(fetchTimeout)
+  }
+  fetchTimeout = setTimeout(() => {
+    fetchRepositories()
+  }, 100)
+}
+
+// Watch for changes and use debounced fetch
+watch([page, itemsPerPage, repositoriesSearch, sortBy], debouncedFetchRepositories, { flush: 'post' })
+
+const onPageChange = (newPage: number) => {
+  page.value = newPage
+}
+
+const onItemsPerPageChange = (newItemsPerPage: number) => {
+  itemsPerPage.value = newItemsPerPage
+  page.value = 1 // Reset to first page when changing items per page
+}
 
 const openDialog = (title: string, item?: Repository) => {
   formTitle.value = title
@@ -420,6 +459,13 @@ const onScan = async (repo: Repository) => {
 
 onMounted(() => {
   fetchRepositories()
+  isInitialized = true
+})
+
+onUnmounted(() => {
+  if (fetchTimeout) {
+    clearTimeout(fetchTimeout)
+  }
 })
 </script>
 

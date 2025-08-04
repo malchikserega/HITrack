@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ContainerRegistry, ComponentVersionVulnerability
+from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ContainerRegistry, ComponentVersionVulnerability, Release, RepositoryTagRelease
 
 @admin.register(ContainerRegistry)
 class ContainerRegistryAdmin(admin.ModelAdmin):
@@ -84,3 +84,19 @@ class ComponentVersionVulnerabilityAdmin(admin.ModelAdmin):
     search_fields = ('component_version__component__name', 'vulnerability__vulnerability_id')
     list_filter = ('fixable',)
     raw_id_fields = ('component_version', 'vulnerability')
+
+
+@admin.register(Release)
+class ReleaseAdmin(admin.ModelAdmin):
+    list_display = ('name', 'description', 'created_at')
+    search_fields = ('name', 'description')
+    readonly_fields = ('created_at',)
+
+
+@admin.register(RepositoryTagRelease)
+class RepositoryTagReleaseAdmin(admin.ModelAdmin):
+    list_display = ('repository_tag', 'release', 'added_at')
+    search_fields = ('repository_tag__tag', 'repository_tag__repository__name', 'release__name')
+    list_filter = ('release',)
+    raw_id_fields = ('repository_tag', 'release')
+    readonly_fields = ('added_at',)

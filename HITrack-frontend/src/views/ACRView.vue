@@ -202,7 +202,7 @@ const submitting = ref(false)
 const isLoading = ref(false)
 const hasMore = ref(true)
 const isLoadingMore = ref(false)
-const pageSize = 50
+const pageSize = 100
 const lastRepo = ref<string | null>(null)
 
 const steps = [

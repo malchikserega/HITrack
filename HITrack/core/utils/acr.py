@@ -93,14 +93,14 @@ def get_paged_data(url: str, token: str) -> Generator[dict, None, None]:
             break
 
 
-def get_repositories(api_url: str, token: str, page_size: int = 50, last_repo: str = None) -> Tuple[list, str]:
+def get_repositories(api_url: str, token: str, page_size: int = 100, last_repo: str = None) -> Tuple[list, str]:
     """
     Get repositories from ACR with pagination.
     
     Args:
         api_url (str): ACR API URL
         token (str): Bearer token for authentication
-        page_size (int): Number of repositories to return
+        page_size (int): Number of repositories to return (default: 100)
         last_repo (str): Name of the last repository from previous page
         
     Returns:

@@ -28,8 +28,8 @@ export interface Vulnerability extends BaseEntity {
   severity: string
   description?: string
   epss: number
-  fixable?: boolean  // Optional because it comes from the through model
-  fix?: string      // Optional because it comes from the through model
+  fixable?: boolean
+  fix?: string
   created_at: string
   updated_at: string
 }
