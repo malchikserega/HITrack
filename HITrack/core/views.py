@@ -789,7 +789,7 @@ class ComponentVersionViewSet(BaseViewSet):
 
     def get_queryset(self):
         qs = super().get_queryset()
-        return qs.annotate(vulnerabilities_count=Count('vulnerabilities'))
+        return qs.annotate(vulnerabilities_count=Count('vulnerabilities')).order_by('component__name', 'version', 'created_at')
 
     def get_serializer_class(self):
         if self.action == 'list':
@@ -1065,7 +1065,7 @@ class VulnerabilityViewSet(BaseViewSet):
                 distinct=True
             ),
             components_count=models.Count('component_versions', distinct=True)
-        )
+        ).order_by('name', 'created_at')
         
         # Apply pagination
         paginator = self.pagination_class()
@@ -1076,6 +1076,31 @@ class VulnerabilityViewSet(BaseViewSet):
             return paginator.get_paginated_response(serializer.data)
         
         serializer = ImageListSerializer(images, many=True)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['get'])
+    def components(self, request, uuid=None):
+        """
+        Get all component versions that contain this vulnerability.
+        """
+        vulnerability = self.get_object()
+        
+        # Get component versions that have this vulnerability with proper ordering
+        component_versions = ComponentVersion.objects.filter(
+            vulnerabilities=vulnerability
+        ).select_related('component').prefetch_related('images').order_by(
+            'component__name', 'version', 'created_at'
+        )
+        
+        # Apply pagination
+        paginator = self.pagination_class()
+        page = paginator.paginate_queryset(component_versions, request)
+        
+        if page is not None:
+            serializer = ComponentVersionListSerializer(page, many=True)
+            return paginator.get_paginated_response(serializer.data)
+        
+        serializer = ComponentVersionListSerializer(component_versions, many=True)
         return Response(serializer.data)
 
 
