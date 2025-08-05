@@ -1085,10 +1085,12 @@ class VulnerabilityViewSet(BaseViewSet):
         """
         vulnerability = self.get_object()
         
-        # Get component versions that have this vulnerability with proper ordering
+        # Get component versions that have this vulnerability with proper ordering and annotations
         component_versions = ComponentVersion.objects.filter(
             vulnerabilities=vulnerability
-        ).select_related('component').prefetch_related('images').order_by(
+        ).select_related('component').prefetch_related('images').annotate(
+            vulnerabilities_count=models.Count('vulnerabilities', distinct=True)
+        ).order_by(
             'component__name', 'version', 'created_at'
         )
         
