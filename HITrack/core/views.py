@@ -1041,6 +1041,43 @@ class VulnerabilityViewSet(BaseViewSet):
             'message': 'Critical vulnerability details update started'
         })
 
+    @action(detail=True, methods=['get'])
+    def images(self, request, uuid=None):
+        """
+        Get all images that contain this vulnerability.
+        """
+        vulnerability = self.get_object()
+        
+        # Optimized query with prefetch_related and annotations
+        images = Image.objects.filter(
+            component_versions__vulnerabilities=vulnerability
+        ).distinct().prefetch_related(
+            'repository_tags__repository',
+            'component_versions'
+        ).annotate(
+            findings_count=models.Count(
+                'component_versions__componentversionvulnerability',
+                filter=models.Q(component_versions__componentversionvulnerability__vulnerability=vulnerability)
+            ),
+            unique_findings_count=models.Count(
+                'component_versions__componentversionvulnerability__vulnerability',
+                filter=models.Q(component_versions__componentversionvulnerability__vulnerability=vulnerability),
+                distinct=True
+            ),
+            components_count=models.Count('component_versions', distinct=True)
+        )
+        
+        # Apply pagination
+        paginator = self.pagination_class()
+        page = paginator.paginate_queryset(images, request)
+        
+        if page is not None:
+            serializer = ImageListSerializer(page, many=True)
+            return paginator.get_paginated_response(serializer.data)
+        
+        serializer = ImageListSerializer(images, many=True)
+        return Response(serializer.data)
+
 
 class VulnerabilityDetailsViewSet(viewsets.ReadOnlyModelViewSet):
     """
