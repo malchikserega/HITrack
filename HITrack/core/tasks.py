@@ -5,6 +5,9 @@ import logging
 import re
 from datetime import timedelta
 from django.utils import timezone
+from typing import List, Dict
+from django.db import transaction
+import time
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -1308,3 +1311,565 @@ def delete_old_repository_tags(days: int = 1):
     cutoff = timezone.now() - timedelta(days=days)
     deleted_count, _ = RepositoryTag.objects.filter(created_at__lt=cutoff).delete()
     return f"Deleted {deleted_count} old repository tags older than {days} days"
+
+@celery_app.task()
+def update_vulnerability_details(vulnerability_uuid: str):
+    """
+    Update detailed information for a specific vulnerability.
+    This task can be triggered manually or as part of a batch update.
+    """
+    from .models import Vulnerability, VulnerabilityDetails
+    from .utils.vulnerability_sources import collect_vulnerability_data
+    from django.utils import timezone
+    import time
+
+    logger.info(f"Starting vulnerability details update for {vulnerability_uuid}")
+    start_time = time.time()
+
+    try:
+        vulnerability = Vulnerability.objects.get(uuid=vulnerability_uuid)
+        
+        # Check if details exist using the correct method
+        try:
+            existing_details = vulnerability.details
+            has_details = True
+        except VulnerabilityDetails.DoesNotExist:
+            has_details = False
+        
+        # Skip if already updated recently (within 24 hours)
+        if has_details:
+            details = existing_details
+            if details.last_updated and (timezone.now() - details.last_updated).days < 1:
+                logger.info(f"Skipping {vulnerability.vulnerability_id} - updated recently")
+                return {
+                    "status": "skipped",
+                    "reason": "updated recently",
+                    "vulnerability_id": vulnerability.vulnerability_id
+                }
+
+        # Collect data from external sources
+        cve_details, exploit_info = collect_vulnerability_data(vulnerability.vulnerability_id)
+        
+        # Create or update vulnerability details even if no data collected
+        if has_details:
+            details = existing_details
+            created = False
+        else:
+            # Determine data source based on what data is available
+            data_sources = []
+            if cve_details:
+                data_sources.append('CVE-CIRCL')
+            if exploit_info:
+                exploit_sources = []
+                if exploit_info.get('exploit_available'):
+                    exploit_sources.append('Exploit-DB')
+                if any('github' in link for link in exploit_info.get('exploit_links', [])):
+                    exploit_sources.append('GitHub-Advisories')
+                if any('nvd' in link for link in exploit_info.get('exploit_links', [])):
+                    exploit_sources.append('NVD')
+                if exploit_info.get('cisa_kev_known_exploited'):
+                    exploit_sources.append('CISA-KEV')
+                if exploit_sources:
+                    data_sources.extend(exploit_sources)
+            
+            data_source = ' + '.join(data_sources) if data_sources else 'manual'
+            
+            details = VulnerabilityDetails.objects.create(
+                vulnerability=vulnerability,
+                data_source=data_source
+            )
+            created = True
+
+        # Update CVE details if available
+        if cve_details:
+            for field, value in cve_details.items():
+                if value is not None:
+                    setattr(details, field, value)
+
+        # Update exploit information if available
+        if exploit_info:
+            for field, value in exploit_info.items():
+                if value is not None:
+                    setattr(details, field, value)
+
+        # Update data source with current sources
+        data_sources = []
+        if cve_details:
+            data_sources.append('CVE-CIRCL')
+        if exploit_info:
+            exploit_sources = []
+            if exploit_info.get('exploit_available'):
+                exploit_sources.append('Exploit-DB')
+            if any('github' in link for link in exploit_info.get('exploit_links', [])):
+                exploit_sources.append('GitHub-Advisories')
+            if any('nvd' in link for link in exploit_info.get('exploit_links', [])):
+                exploit_sources.append('NVD')
+            if exploit_info.get('cisa_kev_known_exploited'):
+                exploit_sources.append('CISA-KEV')
+            if exploit_sources:
+                data_sources.extend(exploit_sources)
+        
+        if data_sources:
+            details.data_source = ' + '.join(data_sources)
+
+        # Always update the last_updated timestamp
+        details.last_updated = timezone.now()
+        details.save()
+
+        processing_time = time.time() - start_time
+        logger.info(f"Updated vulnerability details for {vulnerability.vulnerability_id} in {processing_time:.2f}s")
+
+        return {
+            "status": "success",
+            "vulnerability_id": vulnerability.vulnerability_id,
+            "created": created,
+            "processing_time": processing_time,
+            "has_cve_details": cve_details is not None,
+            "has_exploit_info": exploit_info is not None
+        }
+
+    except Vulnerability.DoesNotExist:
+        logger.error(f"Vulnerability with UUID {vulnerability_uuid} not found")
+        return {
+            "status": "error",
+            "error": f"Vulnerability with UUID {vulnerability_uuid} not found"
+        }
+    except Exception as e:
+        logger.error(f"Error updating vulnerability details for {vulnerability_uuid}: {str(e)}")
+        return {
+            "status": "error",
+            "error": str(e)
+        }
+
+
+@celery_app.task()
+def update_all_vulnerability_details():
+    """
+    Update detailed information for all vulnerabilities in the database.
+    This is a periodic task that should be scheduled to run daily.
+    """
+    from .models import Vulnerability
+    from django.db import transaction
+    import time
+
+    logger.info("Starting bulk vulnerability details update")
+    start_time = time.time()
+
+    try:
+        # Get all vulnerabilities that need updating
+        vulnerabilities = Vulnerability.objects.all()
+        total_vulnerabilities = vulnerabilities.count()
+        
+        logger.info(f"Found {total_vulnerabilities} vulnerabilities to process")
+        
+        processed_count = 0
+        success_count = 0
+        error_count = 0
+        
+        # Process vulnerabilities in batches to avoid memory issues
+        BATCH_SIZE = 50
+        for i in range(0, total_vulnerabilities, BATCH_SIZE):
+            batch = vulnerabilities[i:i + BATCH_SIZE]
+            batch_start_time = time.time()
+            
+            logger.info(f"Processing batch {i//BATCH_SIZE + 1}/{(total_vulnerabilities + BATCH_SIZE - 1)//BATCH_SIZE}")
+            
+            for vulnerability in batch:
+                try:
+                    # Call the individual update task
+                    result = update_vulnerability_details(str(vulnerability.uuid))
+                    processed_count += 1
+                    
+                    # Check if the update was successful
+                    if result.get('status') == 'success':
+                        success_count += 1
+                    elif result.get('status') == 'skipped':
+                        # Count skipped as successful since it means data is up to date
+                        success_count += 1
+                    else:
+                        error_count += 1
+                        logger.warning(f"Failed to update {vulnerability.vulnerability_id}: {result.get('error', 'Unknown error')}")
+                    
+                    # Wait a bit to be respectful to external APIs
+                    time.sleep(0.5)
+                    
+                except Exception as e:
+                    logger.error(f"Error processing vulnerability {vulnerability.vulnerability_id}: {str(e)}")
+                    error_count += 1
+                    continue
+            
+            batch_time = time.time() - batch_start_time
+            logger.info(f"Completed batch in {batch_time:.2f}s")
+
+        total_time = time.time() - start_time
+        logger.info(f"Bulk vulnerability update completed in {total_time:.2f}s")
+        logger.info(f"Processed: {processed_count}, Success: {success_count}, Errors: {error_count}")
+
+        return {
+            "status": "completed",
+            "total_vulnerabilities": total_vulnerabilities,
+            "processed_count": processed_count,
+            "success_count": success_count,
+            "error_count": error_count,
+            "processing_time": total_time
+        }
+
+    except Exception as e:
+        logger.error(f"Error in bulk vulnerability update: {str(e)}")
+        return {
+            "status": "error",
+            "error": str(e)
+        }
+
+
+@celery_app.task()
+def update_critical_vulnerability_details():
+    """
+    Update detailed information for critical and high severity vulnerabilities.
+    This task should be scheduled to run more frequently than the full update.
+    """
+    from .models import Vulnerability
+    from django.utils import timezone
+    from datetime import timedelta
+    import time
+
+    logger.info("Starting critical vulnerability details update")
+    start_time = time.time()
+
+    try:
+        # Get critical and high severity vulnerabilities
+        critical_vulns = Vulnerability.objects.filter(
+            severity__in=['CRITICAL', 'HIGH']
+        )
+        
+        # Also include vulnerabilities updated more than 7 days ago
+        week_ago = timezone.now() - timedelta(days=7)
+        old_vulns = Vulnerability.objects.filter(
+            details__last_updated__lt=week_ago
+        )
+        
+        # Combine and deduplicate
+        vulnerabilities = (critical_vulns | old_vulns).distinct()
+        total_vulnerabilities = vulnerabilities.count()
+        
+        logger.info(f"Found {total_vulnerabilities} critical/old vulnerabilities to process")
+        
+        processed_count = 0
+        success_count = 0
+        error_count = 0
+        
+        for vulnerability in vulnerabilities:
+            try:
+                result = update_vulnerability_details.delay(str(vulnerability.uuid))
+                processed_count += 1
+                
+                # Shorter delay for critical vulnerabilities
+                time.sleep(0.2)
+                
+            except Exception as e:
+                logger.error(f"Error processing critical vulnerability {vulnerability.vulnerability_id}: {str(e)}")
+                error_count += 1
+                continue
+
+        total_time = time.time() - start_time
+        logger.info(f"Critical vulnerability update completed in {total_time:.2f}s")
+
+        return {
+            "status": "completed",
+            "total_vulnerabilities": total_vulnerabilities,
+            "processed_count": processed_count,
+            "success_count": success_count,
+            "error_count": error_count,
+            "processing_time": total_time
+        }
+
+    except Exception as e:
+        logger.error(f"Error in critical vulnerability update: {str(e)}")
+        return {
+            "status": "error",
+            "error": str(e)
+        }
+
+
+@celery_app.task()
+def cleanup_old_vulnerability_data():
+    """
+    Clean up old vulnerability data and archive outdated information.
+    This task should be scheduled to run weekly.
+    """
+    from .models import VulnerabilityDetails
+    from django.utils import timezone
+    from datetime import timedelta
+    import logging
+
+    logger = logging.getLogger(__name__)
+    logger.info("Starting vulnerability data cleanup")
+
+    try:
+        # Remove details for vulnerabilities that haven't been updated in 30 days
+        cutoff_date = timezone.now() - timedelta(days=30)
+        old_details = VulnerabilityDetails.objects.filter(
+            last_updated__lt=cutoff_date
+        )
+        
+        deleted_count = old_details.count()
+        old_details.delete()
+        
+        logger.info(f"Deleted {deleted_count} old vulnerability detail records")
+        
+        return {
+            "status": "completed",
+            "deleted_records": deleted_count
+        }
+
+    except Exception as e:
+        logger.error(f"Error in vulnerability data cleanup: {str(e)}")
+        return {
+            "status": "error",
+            "error": str(e)
+        }
+
+
+@celery_app.task()
+def update_vulnerability_details_bulk(vulnerability_uuids: List[str], batch_size: int = 50):
+    """
+    Bulk update vulnerability details for multiple vulnerabilities.
+    
+    Args:
+        vulnerability_uuids: List of vulnerability UUIDs to update
+        batch_size: Number of vulnerabilities to process in each batch
+    """
+    start_time = time.time()
+    
+    try:
+        # Get vulnerabilities
+        vulnerabilities = Vulnerability.objects.filter(uuid__in=vulnerability_uuids)
+        total_count = vulnerabilities.count()
+        
+        logger.info(f"Starting bulk update for {total_count} vulnerabilities")
+        
+        processed_count = 0
+        success_count = 0
+        error_count = 0
+        
+        # Process in batches
+        for i in range(0, total_count, batch_size):
+            batch_vulnerabilities = vulnerabilities[i:i + batch_size]
+            batch_cve_ids = [v.vulnerability_id for v in batch_vulnerabilities]
+            
+            logger.info(f"Processing batch {i//batch_size + 1}: {len(batch_cve_ids)} vulnerabilities")
+            
+            try:
+                # Collect data in bulk using optimized collector
+                from .utils.vulnerability_sources import collect_vulnerability_data_bulk
+                bulk_data = collect_vulnerability_data_bulk(batch_cve_ids)
+                
+                # Update database
+                with transaction.atomic():
+                    for vulnerability in batch_vulnerabilities:
+                        try:
+                            cve_details, exploit_info = bulk_data.get(vulnerability.vulnerability_id, (None, None))
+                            
+                            # Get or create vulnerability details
+                            try:
+                                details = vulnerability.details
+                                created = False
+                            except VulnerabilityDetails.DoesNotExist:
+                                details = VulnerabilityDetails.objects.create(
+                                    vulnerability=vulnerability,
+                                    data_source='manual'
+                                )
+                                created = True
+                            
+                            # Determine data source
+                            data_sources = []
+                            if cve_details:
+                                data_sources.append('CVE-CIRCL')
+                            if exploit_info:
+                                exploit_sources = []
+                                if exploit_info.get('exploit_available'):
+                                    exploit_sources.append('Exploit-DB')
+                                if any('github' in link for link in exploit_info.get('exploit_links', [])):
+                                    exploit_sources.append('GitHub-Advisories')
+                                if any('nvd' in link for link in exploit_info.get('exploit_links', [])):
+                                    exploit_sources.append('NVD')
+                                if exploit_info.get('cisa_kev_known_exploited'):
+                                    exploit_sources.append('CISA-KEV')
+                                if exploit_sources:
+                                    data_sources.extend(exploit_sources)
+                            
+                            data_source_str = ' + '.join(data_sources) if data_sources else 'manual'
+                            
+                            # Update CVE details if available
+                            if cve_details:
+                                for field, value in cve_details.items():
+                                    if value is not None:
+                                        setattr(details, field, value)
+                            
+                            # Update exploit information if available
+                            if exploit_info:
+                                for field, value in exploit_info.items():
+                                    if value is not None:
+                                        setattr(details, field, value)
+                            
+                            # Update data source
+                            details.data_source = data_source_str
+                            details.last_updated = timezone.now()
+                            details.save()
+                            
+                            success_count += 1
+                            
+                        except Exception as e:
+                            logger.error(f"Error updating vulnerability {vulnerability.vulnerability_id}: {str(e)}")
+                            error_count += 1
+                
+                processed_count += len(batch_vulnerabilities)
+                
+                # Rate limiting between batches
+                time.sleep(2)
+                
+            except Exception as e:
+                logger.error(f"Error processing batch {i//batch_size + 1}: {str(e)}")
+                error_count += len(batch_vulnerabilities)
+                processed_count += len(batch_vulnerabilities)
+        
+        processing_time = time.time() - start_time
+        
+        result = {
+            'status': 'completed',
+            'total_vulnerabilities': total_count,
+            'processed_count': processed_count,
+            'success_count': success_count,
+            'error_count': error_count,
+            'processing_time': processing_time
+        }
+        
+        logger.info(f"Bulk update completed: {result}")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error in bulk update: {str(e)}")
+        return {
+            'status': 'error',
+            'error': str(e)
+        }
+
+
+@celery_app.task()
+def update_critical_vulnerabilities_bulk():
+    """
+    Update details for all critical vulnerabilities using bulk processing.
+    """
+    try:
+        # Get critical vulnerabilities that haven't been updated recently
+        cutoff_time = timezone.now() - timedelta(hours=24)
+        
+        critical_vulnerabilities = Vulnerability.objects.filter(
+            severity='CRITICAL'
+        ).exclude(
+            details__last_updated__gte=cutoff_time
+        )
+        
+        vulnerability_uuids = list(critical_vulnerabilities.values_list('uuid', flat=True))
+        
+        if not vulnerability_uuids:
+            logger.info("No critical vulnerabilities need updating")
+            return {
+                'status': 'completed',
+                'message': 'No critical vulnerabilities need updating',
+                'total_vulnerabilities': 0
+            }
+        
+        logger.info(f"Found {len(vulnerability_uuids)} critical vulnerabilities to update")
+        
+        # Use bulk update task
+        return update_vulnerability_details_bulk.delay(vulnerability_uuids, batch_size=25)
+        
+    except Exception as e:
+        logger.error(f"Error updating critical vulnerabilities: {str(e)}")
+        return {
+            'status': 'error',
+            'error': str(e)
+        }
+
+
+@celery_app.task()
+def update_cisa_kev_vulnerabilities():
+    """
+    Update details for vulnerabilities found in CISA KEV catalog.
+    """
+    try:
+        from .utils.vulnerability_sources import VulnerabilityDataCollector
+        
+        collector = VulnerabilityDataCollector()
+        
+        # Get all vulnerabilities
+        all_vulnerabilities = Vulnerability.objects.all()
+        all_cve_ids = list(all_vulnerabilities.values_list('vulnerability_id', flat=True))
+        
+        logger.info(f"Checking {len(all_cve_ids)} vulnerabilities against CISA KEV")
+        
+        # Check which CVEs are in CISA KEV
+        kev_results = collector._check_cisa_kev_bulk(set(all_cve_ids))
+        kev_cve_ids = list(kev_results.keys())
+        
+        if not kev_cve_ids:
+            logger.info("No vulnerabilities found in CISA KEV")
+            return {
+                'status': 'completed',
+                'message': 'No vulnerabilities found in CISA KEV',
+                'total_vulnerabilities': 0
+            }
+        
+        # Get UUIDs for KEV vulnerabilities
+        kev_vulnerabilities = Vulnerability.objects.filter(vulnerability_id__in=kev_cve_ids)
+        vulnerability_uuids = list(kev_vulnerabilities.values_list('uuid', flat=True))
+        
+        logger.info(f"Found {len(vulnerability_uuids)} vulnerabilities in CISA KEV")
+        
+        # Use bulk update task
+        return update_vulnerability_details_bulk.delay(vulnerability_uuids, batch_size=25)
+        
+    except Exception as e:
+        logger.error(f"Error updating CISA KEV vulnerabilities: {str(e)}")
+        return {
+            'status': 'error',
+            'error': str(e)
+        }
+
+
+def get_vulnerability_statistics() -> Dict:
+    """Get statistics about vulnerability details."""
+    try:
+        total_vulnerabilities = Vulnerability.objects.count()
+        vulnerabilities_with_details = VulnerabilityDetails.objects.count()
+        
+        # Count vulnerabilities with exploits
+        vulnerabilities_with_exploits = VulnerabilityDetails.objects.filter(
+            exploit_available=True
+        ).count()
+        
+        # Count CISA KEV vulnerabilities
+        cisa_kev_vulnerabilities = VulnerabilityDetails.objects.filter(
+            cisa_kev_known_exploited=True
+        ).count()
+        
+        # Count ransomware vulnerabilities
+        ransomware_vulnerabilities = VulnerabilityDetails.objects.filter(
+            cisa_kev_ransomware_use='Known'
+        ).count()
+        
+        return {
+            'total_vulnerabilities': total_vulnerabilities,
+            'vulnerabilities_with_details': vulnerabilities_with_details,
+            'vulnerabilities_with_exploits': vulnerabilities_with_exploits,
+            'cisa_kev_vulnerabilities': cisa_kev_vulnerabilities,
+            'ransomware_vulnerabilities': ransomware_vulnerabilities,
+            'details_percentage': (vulnerabilities_with_details / total_vulnerabilities * 100) if total_vulnerabilities > 0 else 0,
+            'exploits_percentage': (vulnerabilities_with_exploits / total_vulnerabilities * 100) if total_vulnerabilities > 0 else 0,
+            'kev_percentage': (cisa_kev_vulnerabilities / total_vulnerabilities * 100) if total_vulnerabilities > 0 else 0
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting vulnerability statistics: {str(e)}")
+        return {}

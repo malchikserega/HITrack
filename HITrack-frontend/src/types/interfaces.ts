@@ -20,6 +20,35 @@ export interface Repository extends BaseEntity {
 }
 
 /**
+ * Vulnerability Details interface
+ */
+export interface VulnerabilityDetails extends BaseEntity {
+  cve_details_score?: number
+  cve_details_severity?: string
+  cve_details_published_date?: string
+  cve_details_updated_date?: string
+  cve_details_summary?: string
+  cve_details_references?: string[]
+  exploit_available: boolean
+  exploit_public: boolean
+  exploit_verified: boolean
+  exploit_links?: string[]
+  cisa_kev_known_exploited: boolean
+  cisa_kev_date_added?: string
+  cisa_kev_vendor_project?: string
+  cisa_kev_product?: string
+  cisa_kev_vulnerability_name?: string
+  cisa_kev_short_description?: string
+  cisa_kev_required_action?: string
+  cisa_kev_due_date?: string
+  cisa_kev_ransomware_use?: string
+  cisa_kev_notes?: string
+  cisa_kev_cwes?: string[]
+  last_updated: string
+  data_source: string
+}
+
+/**
  * Vulnerability interface
  */
 export interface Vulnerability extends BaseEntity {
@@ -30,6 +59,10 @@ export interface Vulnerability extends BaseEntity {
   epss: number
   fixable?: boolean
   fix?: string
+  details?: VulnerabilityDetails
+  has_details: boolean
+  exploit_available: boolean
+  cisa_kev: boolean
   created_at: string
   updated_at: string
 }

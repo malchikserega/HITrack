@@ -3,7 +3,21 @@
     <v-container>
       <v-row>
         <v-col cols="12">
-          <h1 class="text-h4 mb-4 font-weight-black">Vulnerabilities</h1>
+          <div class="d-flex align-center justify-space-between mb-4">
+            <h1 class="text-h4 font-weight-black">Vulnerabilities</h1>
+            <div v-if="activeFilter" class="d-flex align-center">
+              <v-chip 
+                :color="getFilterColor()" 
+                size="small" 
+                class="mr-2"
+                closable
+                @click:close="clearActiveFilter"
+              >
+                <v-icon size="16" class="mr-1">{{ getFilterIcon() }}</v-icon>
+                {{ activeFilter }}
+              </v-chip>
+            </div>
+          </div>
         </v-col>
       </v-row>
 
@@ -53,8 +67,42 @@
                   ></v-checkbox>
                 </v-col>
               </v-row>
-              <div v-if="searchQuery" class="text-caption text-grey mt-2">
-                Found {{ total }} result{{ total !== 1 ? 's' : '' }}
+              <div class="d-flex align-center justify-space-between mt-3">
+                <div v-if="searchQuery" class="text-caption text-grey">
+                  Found {{ total }} result{{ total !== 1 ? 's' : '' }}
+                </div>
+                <div class="d-flex gap-2">
+                  <v-btn
+                    size="small"
+                    variant="outlined"
+                    :color="route.query.cisa_kev === 'true' ? 'error' : 'default'"
+                    @click="toggleFilter('cisa_kev')"
+                    class="text-caption"
+                  >
+                    <v-icon size="16" class="mr-1">mdi-shield-alert</v-icon>
+                    CISA KEV
+                  </v-btn>
+                  <v-btn
+                    size="small"
+                    variant="outlined"
+                    :color="route.query.exploit_available === 'true' ? 'warning' : 'default'"
+                    @click="toggleFilter('exploit_available')"
+                    class="text-caption"
+                  >
+                    <v-icon size="16" class="mr-1">mdi-bug</v-icon>
+                    Exploit Available
+                  </v-btn>
+                  <v-btn
+                    size="small"
+                    variant="outlined"
+                    :color="route.query.ransomware === 'true' ? 'error' : 'default'"
+                    @click="toggleFilter('ransomware')"
+                    class="text-caption"
+                  >
+                    <v-icon size="16" class="mr-1">mdi-lock-alert</v-icon>
+                    Ransomware
+                  </v-btn>
+                </div>
               </div>
             </v-card-text>
           </v-card>
@@ -112,6 +160,42 @@
                   variant="tonal"
                 >
                   {{ (item.epss * 100).toFixed(1) }}%
+                </v-chip>
+              </template>
+              <template v-slot:item.cisa_kev="{ item }">
+                <v-chip
+                  size="small"
+                  :color="item.cisa_kev ? 'error' : 'success'"
+                  variant="tonal"
+                >
+                  <v-icon size="16" class="mr-1">
+                    {{ item.cisa_kev ? 'mdi-shield-alert' : 'mdi-shield-check' }}
+                  </v-icon>
+                  {{ item.cisa_kev ? 'Yes' : 'No' }}
+                </v-chip>
+              </template>
+              <template v-slot:item.exploit_available="{ item }">
+                <v-chip
+                  size="small"
+                  :color="item.exploit_available ? 'warning' : 'success'"
+                  variant="tonal"
+                >
+                  <v-icon size="16" class="mr-1">
+                    {{ item.exploit_available ? 'mdi-bug' : 'mdi-shield-check' }}
+                  </v-icon>
+                  {{ item.exploit_available ? 'Yes' : 'No' }}
+                </v-chip>
+              </template>
+              <template v-slot:item.has_details="{ item }">
+                <v-chip
+                  size="small"
+                  :color="item.has_details ? 'info' : 'grey'"
+                  variant="tonal"
+                >
+                  <v-icon size="16" class="mr-1">
+                    {{ item.has_details ? 'mdi-information' : 'mdi-information-outline' }}
+                  </v-icon>
+                  {{ item.has_details ? 'Yes' : 'No' }}
                 </v-chip>
               </template>
               <template v-slot:item.description="{ item }">
@@ -186,6 +270,7 @@ const searchQuery = ref('')
 const severityFilter = ref('')
 const typeFilter = ref('')
 const fixableFilter = ref(false)
+const activeFilter = ref('')
 
 // Filter options
 const severityOptions = [
@@ -210,6 +295,9 @@ const headers = [
   { title: 'Type', key: 'vulnerability_type', sortable: true },
   { title: 'Severity', key: 'severity', sortable: true },
   { title: 'EPSS', key: 'epss', sortable: true },
+  { title: 'CISA KEV', key: 'cisa_kev', sortable: false },
+  { title: 'Exploit', key: 'exploit_available', sortable: false },
+  { title: 'Details', key: 'has_details', sortable: false },
   { title: 'Description', key: 'description', sortable: false },
   { title: 'Created', key: 'created_at', sortable: true },
   { title: 'Updated', key: 'updated_at', sortable: true }
@@ -237,6 +325,11 @@ const fetchVulnerabilities = async () => {
     if (severityFilter.value) params.severity = severityFilter.value
     if (typeFilter.value) params.vulnerability_type = typeFilter.value
     if (fixableFilter.value) params.fixable = 'true'
+    
+    // Add special filters from URL parameters
+    if (route.query.cisa_kev === 'true') params.cisa_kev = 'true'
+    if (route.query.exploit_available === 'true') params.exploit_available = 'true'
+    if (route.query.ransomware === 'true') params.ransomware = 'true'
 
     const resp = await api.get<PaginatedResponse<Vulnerability>>('vulnerabilities/', { params })
     vulnerabilities.value = resp.data.results
@@ -259,6 +352,9 @@ const debouncedFetchVulnerabilities = debounce(fetchVulnerabilities, 300)
 const handleUrlParams = () => {
   const severity = route.query.severity as string
   const fixable = route.query.fixable as string
+  const cisaKev = route.query.cisa_kev as string
+  const exploitAvailable = route.query.exploit_available as string
+  const ransomware = route.query.ransomware as string
   
   if (severity) {
     severityFilter.value = severity
@@ -266,6 +362,21 @@ const handleUrlParams = () => {
   
   if (fixable === 'true') {
     fixableFilter.value = true
+  }
+  
+  if (cisaKev === 'true') {
+    // Set CISA KEV filter
+    activeFilter.value = 'CISA KEV Vulnerabilities'
+  }
+  
+  if (exploitAvailable === 'true') {
+    // Set exploit available filter
+    activeFilter.value = 'Exploit Available'
+  }
+  
+  if (ransomware === 'true') {
+    // Set ransomware filter
+    activeFilter.value = 'Ransomware Vulnerabilities'
   }
 }
 
@@ -299,6 +410,57 @@ watch(searchQuery, () => {
   currentPage.value = 1
   debouncedFetchVulnerabilities()
 })
+
+// Filter utility methods
+const getFilterColor = (): string => {
+  if (route.query.cisa_kev === 'true') return 'error'
+  if (route.query.exploit_available === 'true') return 'warning'
+  if (route.query.ransomware === 'true') return 'error'
+  return 'primary'
+}
+
+const getFilterIcon = (): string => {
+  if (route.query.cisa_kev === 'true') return 'mdi-shield-alert'
+  if (route.query.exploit_available === 'true') return 'mdi-bug'
+  if (route.query.ransomware === 'true') return 'mdi-lock-alert'
+  return 'mdi-filter'
+}
+
+const clearActiveFilter = () => {
+  activeFilter.value = ''
+  router.push({ query: {} })
+  fetchVulnerabilities()
+}
+
+const toggleFilter = (filterType: string) => {
+  const currentQuery = { ...route.query }
+  
+  if (currentQuery[filterType] === 'true') {
+    // Remove filter
+    delete currentQuery[filterType]
+  } else {
+    // Add filter
+    currentQuery[filterType] = 'true'
+  }
+  
+  router.push({ query: currentQuery })
+}
+
+// Update active filter based on route query
+watch(() => route.query, (newQuery) => {
+  if (newQuery.cisa_kev === 'true') {
+    activeFilter.value = 'CISA KEV Vulnerabilities'
+  } else if (newQuery.exploit_available === 'true') {
+    activeFilter.value = 'Exploit Available'
+  } else if (newQuery.ransomware === 'true') {
+    activeFilter.value = 'Ransomware Vulnerabilities'
+  } else {
+    activeFilter.value = ''
+  }
+  
+  // Refetch data when query parameters change
+  fetchVulnerabilities()
+}, { immediate: true })
 
 // Initialize
 onMounted(() => {

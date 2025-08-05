@@ -175,6 +175,53 @@ class Vulnerability(models.Model):
     def __str__(self):
         return f"{self.vulnerability_id} ({self.severity})"
 
+
+class VulnerabilityDetails(models.Model):
+    """
+    Additional vulnerability information from external sources like CVE Details,
+    exploit databases, and other security sources.
+    """
+    uuid = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    vulnerability = models.OneToOneField(Vulnerability, on_delete=models.CASCADE, related_name='details')
+    
+    # CVE Details information
+    cve_details_score = models.FloatField(null=True, blank=True, help_text='CVSS Score from CVE Details')
+    cve_details_severity = models.CharField(max_length=20, blank=True, null=True, help_text='Severity from CVE Details')
+    cve_details_published_date = models.DateField(null=True, blank=True, help_text='Published date from CVE Details')
+    cve_details_updated_date = models.DateField(null=True, blank=True, help_text='Last updated date from CVE Details')
+    cve_details_summary = models.TextField(blank=True, null=True, help_text='Detailed summary from CVE Details')
+    cve_details_references = models.JSONField(default=list, blank=True, help_text='References from CVE Details')
+    
+    # Exploit information
+    exploit_available = models.BooleanField(default=False, help_text='Whether exploit is publicly available')
+    exploit_public = models.BooleanField(default=False, help_text='Whether exploit is in public databases')
+    exploit_verified = models.BooleanField(default=False, help_text='Whether exploit has been verified')
+    exploit_links = models.JSONField(default=list, blank=True, help_text='Links to exploit information')
+    
+    # CISA KEV information
+    cisa_kev_known_exploited = models.BooleanField(default=False, help_text='Whether vulnerability is in CISA KEV catalog')
+    cisa_kev_date_added = models.DateField(null=True, blank=True, help_text='Date added to CISA KEV catalog')
+    cisa_kev_vendor_project = models.CharField(max_length=255, blank=True, null=True, help_text='Vendor/Project from CISA KEV')
+    cisa_kev_product = models.CharField(max_length=255, blank=True, null=True, help_text='Product from CISA KEV')
+    cisa_kev_vulnerability_name = models.CharField(max_length=255, blank=True, null=True, help_text='Vulnerability name from CISA KEV')
+    cisa_kev_short_description = models.TextField(blank=True, null=True, help_text='Short description from CISA KEV')
+    cisa_kev_required_action = models.TextField(blank=True, null=True, help_text='Required action from CISA KEV')
+    cisa_kev_due_date = models.DateField(null=True, blank=True, help_text='Due date from CISA KEV')
+    cisa_kev_ransomware_use = models.CharField(max_length=20, blank=True, null=True, help_text='Known ransomware campaign use')
+    cisa_kev_notes = models.TextField(blank=True, null=True, help_text='Notes from CISA KEV')
+    cisa_kev_cwes = models.JSONField(default=list, blank=True, help_text='CWE codes from CISA KEV')
+    
+    # Additional metadata
+    last_updated = models.DateTimeField(auto_now=True, help_text='When this record was last updated')
+    data_source = models.CharField(max_length=100, default='manual', help_text='Source of this information')
+    
+    class Meta:
+        verbose_name = 'Vulnerability Details'
+        verbose_name_plural = 'Vulnerability Details'
+    
+    def __str__(self):
+        return f"Details for {self.vulnerability.vulnerability_id}"
+
 # Through model for ComponentVersion <-> Vulnerability with fix info
 class ComponentVersionVulnerability(models.Model):
     component_version = models.ForeignKey(ComponentVersion, on_delete=models.CASCADE)

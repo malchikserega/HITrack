@@ -66,6 +66,56 @@
         </v-col>
       </v-row>
 
+      <!-- Additional Security Metrics -->
+      <v-row>
+        <v-col cols="12">
+          <v-row justify="center">
+            <v-col cols="12" sm="6" md="3">
+              <MetricCard
+                title="CISA KEV Vulnerabilities"
+                :value="dashboardData.security_metrics?.cisa_kev_vulnerabilities || 0"
+                icon="mdi-shield-alert"
+                color="error"
+                :subtitle="`${dashboardData.security_metrics?.cisa_kev_percentage || 0}% of total`"
+                :clickable="true"
+                :clickAction="viewCisaKevVulnerabilities"
+              />
+            </v-col>
+            <v-col cols="12" sm="6" md="3">
+              <MetricCard
+                title="Exploit Available"
+                :value="dashboardData.security_metrics?.exploit_available_vulnerabilities || 0"
+                icon="mdi-bug"
+                color="warning"
+                :subtitle="`${dashboardData.security_metrics?.exploit_percentage || 0}% of total`"
+                :clickable="true"
+                :clickAction="viewExploitVulnerabilities"
+              />
+            </v-col>
+            <v-col cols="12" sm="6" md="3">
+              <MetricCard
+                title="Ransomware Vulnerabilities"
+                :value="dashboardData.security_metrics?.ransomware_vulnerabilities || 0"
+                icon="mdi-lock-alert"
+                color="error"
+                :subtitle="`${dashboardData.security_metrics?.ransomware_percentage || 0}% of total`"
+                :clickable="true"
+                :clickAction="viewRansomwareVulnerabilities"
+              />
+            </v-col>
+            <v-col cols="12" sm="6" md="3">
+              <MetricCard
+                title="Vulnerabilities with Details"
+                :value="dashboardData.security_metrics?.vulnerabilities_with_details || 0"
+                icon="mdi-information"
+                color="info"
+                :subtitle="`${dashboardData.security_metrics?.details_percentage || 0}% of total`"
+              />
+            </v-col>
+          </v-row>
+        </v-col>
+      </v-row>
+
       <!-- Charts Row 1 -->
       <v-row>
         <v-col cols="12" md="6">
@@ -309,6 +359,18 @@ const viewCriticalVulnerabilities = () => {
 
 const viewFixableVulnerabilities = () => {
   router.push('/vulnerabilities?fixable=true')
+}
+
+const viewCisaKevVulnerabilities = () => {
+  router.push('/vulnerabilities?cisa_kev=true')
+}
+
+const viewExploitVulnerabilities = () => {
+  router.push('/vulnerabilities?exploit_available=true')
+}
+
+const viewRansomwareVulnerabilities = () => {
+  router.push('/vulnerabilities?ransomware=true')
 }
 
 const getStatusColor = (status: string) => {

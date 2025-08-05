@@ -4,7 +4,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.generics import ListAPIView, GenericAPIView
 from django_filters.rest_framework import DjangoFilterBackend
-from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ContainerRegistry, ComponentVersionVulnerability, Release, RepositoryTagRelease
+from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ContainerRegistry, ComponentVersionVulnerability, Release, RepositoryTagRelease, VulnerabilityDetails
 from .serializers import (
     RepositorySerializer, RepositoryTagSerializer, ImageSerializer, ImageListSerializer,
     ComponentSerializer, ComponentVersionSerializer, VulnerabilitySerializer, ComponentListSerializer,
@@ -12,7 +12,8 @@ from .serializers import (
     HasACRRegistryResponseSerializer, ListACRRegistriesResponseSerializer,
     StatsResponseSerializer, JobAddRepositoriesRequestSerializer,
     JobAddRepositoriesResponseSerializer, ImageDropdownSerializer,
-    ReleaseSerializer, RepositoryTagReleaseSerializer, ReleaseAssignmentSerializer
+    ReleaseSerializer, RepositoryTagReleaseSerializer, ReleaseAssignmentSerializer,
+    VulnerabilityListSerializer, VulnerabilityDetailsSerializer
 )
 from django.db import models
 from .pagination import CustomPageNumberPagination
@@ -892,6 +893,12 @@ class VulnerabilityViewSet(BaseViewSet):
     
     severity_stats:
     Return statistics about vulnerabilities grouped by severity.
+    
+    update_details:
+    Update detailed information for a vulnerability from external sources.
+    
+    exploit_stats:
+    Return statistics about vulnerabilities with exploit information.
     """
     queryset = Vulnerability.objects.all()
     serializer_class = VulnerabilitySerializer
@@ -900,30 +907,172 @@ class VulnerabilityViewSet(BaseViewSet):
     ordering_fields = ['vulnerability_id', 'severity', 'epss', 'created_at', 'updated_at']
 
     def get_queryset(self):
-        queryset = super().get_queryset()
+        queryset = Vulnerability.objects.all()
+
         
-        # Handle fixable filter
-        fixable = self.request.query_params.get('fixable')
-        if fixable == 'true':
-            # Get vulnerabilities that are fixable (have fixable component versions)
-            fixable_vulnerabilities = ComponentVersionVulnerability.objects.filter(
-                fixable=True
-            ).values_list('vulnerability__uuid', flat=True).distinct()
-            queryset = queryset.filter(uuid__in=fixable_vulnerabilities)
+        # Add filters for exploit information
+        exploit_available = self.request.query_params.get('exploit_available', None)
+        if exploit_available is not None:
+            exploit_available = exploit_available.lower() == 'true'
+            if exploit_available:
+                queryset = queryset.filter(details__exploit_available=True)
+            else:
+                queryset = queryset.filter(
+                    Q(details__exploit_available=False) | Q(details__isnull=True)
+                )
+        
+        # Add filter for vulnerabilities with details
+        has_details = self.request.query_params.get('has_details', None)
+        if has_details is not None:
+            has_details = has_details.lower() == 'true'
+            if has_details:
+                queryset = queryset.filter(details__isnull=False)
+            else:
+                queryset = queryset.filter(details__isnull=True)
+        
+        # Add filter for CISA KEV vulnerabilities
+        cisa_kev = self.request.query_params.get('cisa_kev', None)
+        if cisa_kev is not None:
+            cisa_kev = cisa_kev.lower() == 'true'
+            if cisa_kev:
+                queryset = queryset.filter(details__cisa_kev_known_exploited=True)
+            else:
+                queryset = queryset.filter(
+                    Q(details__cisa_kev_known_exploited=False) | Q(details__isnull=True)
+                )
+        
+        # Add filter for ransomware vulnerabilities
+        ransomware = self.request.query_params.get('ransomware', None)
+        if ransomware is not None:
+            ransomware = ransomware.lower() == 'true'
+            if ransomware:
+                queryset = queryset.filter(details__cisa_kev_ransomware_use='Known')
+            else:
+                queryset = queryset.filter(
+                    Q(details__cisa_kev_ransomware_use__in=['Unknown', 'None']) | Q(details__isnull=True)
+                )
         
         return queryset
 
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return VulnerabilityListSerializer
+        return VulnerabilitySerializer
+
     @action(detail=False, methods=['get'])
     def severity_stats(self, request):
-        """
-        Return statistics about vulnerabilities grouped by severity.
-        
-        Returns a count of vulnerabilities for each severity level.
-        """
+        """Return statistics about vulnerabilities grouped by severity."""
         stats = Vulnerability.objects.values('severity').annotate(
-            count=models.Count('id')
+            count=Count('id')
         ).order_by('severity')
-        return Response(stats)
+        
+        return Response({
+            'severity_stats': list(stats),
+            'total_vulnerabilities': Vulnerability.objects.count()
+        })
+
+    @action(detail=True, methods=['post'])
+    def update_details(self, request, uuid=None):
+        """
+        Update detailed information for a vulnerability from external sources.
+        """
+        from .tasks import update_vulnerability_details
+        
+        vulnerability = self.get_object()
+        
+        # Trigger the update task
+        task = update_vulnerability_details.delay(str(vulnerability.uuid))
+        
+        return Response({
+            'status': 'task_started',
+            'task_id': task.id,
+            'vulnerability_id': vulnerability.vulnerability_id,
+            'message': 'Vulnerability details update started'
+        })
+
+    @action(detail=False, methods=['get'])
+    def exploit_stats(self, request):
+        """Return statistics about vulnerabilities with exploit information."""
+        total_vulns = Vulnerability.objects.count()
+        vulns_with_details = Vulnerability.objects.filter(details__isnull=False).count()
+        vulns_with_exploits = Vulnerability.objects.filter(details__exploit_available=True).count()
+        vulns_with_public_exploits = Vulnerability.objects.filter(details__exploit_public=True).count()
+        vulns_with_verified_exploits = Vulnerability.objects.filter(details__exploit_verified=True).count()
+        
+        return Response({
+            'total_vulnerabilities': total_vulns,
+            'vulnerabilities_with_details': vulns_with_details,
+            'vulnerabilities_with_exploits': vulns_with_exploits,
+            'vulnerabilities_with_public_exploits': vulns_with_public_exploits,
+            'vulnerabilities_with_verified_exploits': vulns_with_verified_exploits,
+            'percentage_with_details': round((vulns_with_details / total_vulns * 100), 2) if total_vulns > 0 else 0,
+            'percentage_with_exploits': round((vulns_with_exploits / total_vulns * 100), 2) if total_vulns > 0 else 0
+        })
+
+    @action(detail=False, methods=['post'])
+    def bulk_update_details(self, request):
+        """
+        Update detailed information for all vulnerabilities.
+        """
+        from .tasks import update_all_vulnerability_details
+        
+        # Trigger the bulk update task
+        task = update_all_vulnerability_details.delay()
+        
+        return Response({
+            'status': 'task_started',
+            'task_id': task.id,
+            'message': 'Bulk vulnerability details update started'
+        })
+
+    @action(detail=False, methods=['post'])
+    def update_critical_details(self, request):
+        """
+        Update detailed information for critical and high severity vulnerabilities.
+        """
+        from .tasks import update_critical_vulnerability_details
+        
+        # Trigger the critical update task
+        task = update_critical_vulnerability_details.delay()
+        
+        return Response({
+            'status': 'task_started',
+            'task_id': task.id,
+            'message': 'Critical vulnerability details update started'
+        })
+
+
+class VulnerabilityDetailsViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    API endpoint for viewing vulnerability details.
+    
+    list:
+    Return a list of all vulnerability details.
+    
+    retrieve:
+    Return the details of a specific vulnerability detail record.
+    """
+    queryset = VulnerabilityDetails.objects.all()
+    serializer_class = VulnerabilityDetailsSerializer
+    filterset_fields = ['exploit_available', 'exploit_public', 'exploit_verified', 'data_source']
+    ordering_fields = ['last_updated', 'cve_details_score']
+    ordering = ['-last_updated']
+
+    @action(detail=False, methods=['get'])
+    def exploit_summary(self, request):
+        """Return summary of exploit information."""
+        total_details = VulnerabilityDetails.objects.count()
+        with_exploits = VulnerabilityDetails.objects.filter(exploit_available=True).count()
+        with_public_exploits = VulnerabilityDetails.objects.filter(exploit_public=True).count()
+        with_verified_exploits = VulnerabilityDetails.objects.filter(exploit_verified=True).count()
+        
+        return Response({
+            'total_details': total_details,
+            'with_exploits': with_exploits,
+            'with_public_exploits': with_public_exploits,
+            'with_verified_exploits': with_verified_exploits,
+            'percentage_with_exploits': round((with_exploits / total_details * 100), 2) if total_details > 0 else 0
+        })
 
 class HasACRRegistryView(GenericAPIView):
     permission_classes = [IsAuthenticated]
@@ -1011,6 +1160,18 @@ class StatsViewSet(viewsets.ViewSet):
         total_vulns = security_metrics['total_count']
         fixable_percentage = (fixable_vulns / total_vulns * 100) if total_vulns > 0 else 0
         
+        # Additional security metrics
+        cisa_kev_vulns = Vulnerability.objects.filter(details__cisa_kev_known_exploited=True).count()
+        exploit_available_vulns = Vulnerability.objects.filter(details__exploit_available=True).count()
+        ransomware_vulns = Vulnerability.objects.filter(details__cisa_kev_ransomware_use='Known').count()
+        vulns_with_details = Vulnerability.objects.filter(details__isnull=False).count()
+        
+        # Calculate percentages
+        cisa_kev_percentage = (cisa_kev_vulns / total_vulns * 100) if total_vulns > 0 else 0
+        exploit_percentage = (exploit_available_vulns / total_vulns * 100) if total_vulns > 0 else 0
+        ransomware_percentage = (ransomware_vulns / total_vulns * 100) if total_vulns > 0 else 0
+        details_percentage = (vulns_with_details / total_vulns * 100) if total_vulns > 0 else 0
+        
         # Optimized recent activities - single query with union
         recent_activities = []
         
@@ -1051,7 +1212,15 @@ class StatsViewSet(viewsets.ViewSet):
             'security_metrics': {
                 'critical_vulnerabilities': security_metrics['critical_count'],
                 'fixable_vulnerabilities': fixable_vulns,
-                'fixable_percentage': round(fixable_percentage, 1)
+                'fixable_percentage': round(fixable_percentage, 1),
+                'cisa_kev_vulnerabilities': cisa_kev_vulns,
+                'cisa_kev_percentage': round(cisa_kev_percentage, 1),
+                'exploit_available_vulnerabilities': exploit_available_vulns,
+                'exploit_percentage': round(exploit_percentage, 1),
+                'ransomware_vulnerabilities': ransomware_vulns,
+                'ransomware_percentage': round(ransomware_percentage, 1),
+                'vulnerabilities_with_details': vulns_with_details,
+                'details_percentage': round(details_percentage, 1)
             },
             'severity_distribution': list(severity_distribution),
             'vulnerability_trends': list(vulnerability_trends),
