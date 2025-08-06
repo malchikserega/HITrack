@@ -6,6 +6,29 @@
           <v-btn variant="text" @click="router.back()" class="mb-2">
             ← Back
           </v-btn>
+          
+          <!-- Breadcrumb Navigation -->
+          <div v-if="image?.repository_info" class="mb-4">
+            <v-breadcrumbs :items="breadcrumbItems" class="pa-0">
+              <template v-slot:divider>
+                <v-icon size="small">mdi-chevron-right</v-icon>
+              </template>
+              <template v-slot:title="{ item }">
+                <v-btn
+                  v-if="item.to && !item.disabled"
+                  variant="text"
+                  :to="item.to"
+                  class="text-decoration-none"
+                  density="compact"
+                  size="small"
+                >
+                  {{ item.title }}
+                </v-btn>
+                <span v-else class="text-body-2 text-grey">{{ item.title }}</span>
+              </template>
+            </v-breadcrumbs>
+          </div>
+          
           <h1 class="text-h4 mb-4 font-weight-black">Image Details</h1>
         </v-col>
       </v-row>
@@ -181,9 +204,6 @@
                       <template v-slot:item.created_at="{ item }">
                         {{ $formatDate(item.created_at) }}
                       </template>
-                      <template v-slot:item.updated_at="{ item }">
-                        {{ $formatDate(item.updated_at) }}
-                      </template>
                     </v-data-table>
                     <div class="d-flex align-center justify-end mt-2 gap-4">
                       <v-select
@@ -298,12 +318,6 @@
                         <span v-if="item.fix" class="text-caption">{{ item.fix }}</span>
                         <span v-else class="text-caption text-grey">No fix available</span>
                       </template>
-                      <template v-slot:item.created_at="{ item }">
-                        {{ $formatDate(item.created_at) }}
-                      </template>
-                      <template v-slot:item.updated_at="{ item }">
-                        {{ $formatDate(item.updated_at) }}
-                      </template>
                     </v-data-table>
                     <div class="d-flex align-center justify-end mt-2 gap-4">
                       <v-select
@@ -345,6 +359,13 @@ import { getComponentTypeColor, getVulnerabilityTypeColor, getSeverityColor, get
 import type { Image, ComponentVersion, PaginatedResponse, Vulnerability } from '../types/interfaces'
 import PieChart from '../components/PieChart.vue'
 import type { DataTableSortItem } from 'vuetify'
+
+// Define breadcrumb item type
+interface BreadcrumbItem {
+  title: string
+  to?: { name: string; params?: Record<string, string>; query?: Record<string, string> }
+  disabled?: boolean
+}
 
 const router = useRouter()
 const route = useRoute()
@@ -410,6 +431,55 @@ const pieChartData = computed(() => {
       }
     ]
   }
+})
+
+const breadcrumbItems = computed((): BreadcrumbItem[] => {
+  if (!image.value?.repository_info) {
+    return []
+  }
+  
+  const { repository_name, repository_uuid, tag, tag_uuid } = image.value.repository_info
+  
+  const items: BreadcrumbItem[] = [
+    {
+      title: 'Repositories',
+      to: { name: 'repositories' }
+    }
+  ]
+  
+  // Add repository link only if we have a valid UUID
+  if (repository_name && repository_uuid) {
+    items.push({
+      title: repository_name,
+      to: { name: 'RepositoryDetail', params: { uuid: repository_uuid } }
+    })
+  } else if (repository_name) {
+    items.push({
+      title: repository_name,
+      disabled: true
+    })
+  }
+  
+  // Add tag link only if we have valid UUIDs
+  if (tag && tag_uuid) {
+    items.push({
+      title: `Tag: ${tag}`,
+      to: { name: 'tag-images', params: { uuid: tag_uuid } }
+    })
+  } else if (tag) {
+    items.push({
+      title: `Tag: ${tag}`,
+      disabled: true
+    })
+  }
+  
+  // Always add current image name
+  items.push({
+    title: image.value.name,
+    disabled: true // Current page, no link
+  })
+  
+  return items
 })
 
 function onLegendClick(i: number) {
@@ -528,8 +598,7 @@ const componentHeaders = [
   { title: 'Version', key: 'version', sortable: true },
   { title: 'Type', key: 'component.type', sortable: true },
   { title: 'Vulnerabilities', key: 'vulnerabilities_count', sortable: true },
-  { title: 'Used in:', key: 'used_count', sortable: true },
-  { title: 'Updated', key: 'updated_at', sortable: true }
+  { title: 'Used in:', key: 'used_count', sortable: true }
 ] as const
 
 const fetchComponents = async () => {
@@ -593,8 +662,7 @@ const vulnerabilityHeaders = [
   { title: 'Severity', key: 'severity', sortable: true },
   { title: 'EPSS', key: 'epss', sortable: true },
   { title: 'Fixable', key: 'fixable', sortable: true },
-  { title: 'Fix', key: 'fix', sortable: false },
-  { title: 'Updated', key: 'updated_at', sortable: true }
+  { title: 'Fix', key: 'fix', sortable: false }
 ] as const
 
 const fetchVulnerabilities = async () => {
@@ -791,6 +859,27 @@ onMounted(fetchImage)
 }
 .switch-fixable-findings {
   margin-right: 8px;
+}
+
+/* Breadcrumb styles */
+.v-breadcrumbs {
+  background: transparent;
+  padding: 8px 0;
+}
+
+.v-breadcrumbs .v-btn {
+  font-weight: 500;
+  color: #666;
+  transition: color 0.2s;
+}
+
+.v-breadcrumbs .v-btn:hover {
+  color: #1976d2;
+}
+
+.v-breadcrumbs .text-grey {
+  color: #999;
+  font-weight: 400;
 }
 
 /* Component-specific styles */

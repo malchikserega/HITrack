@@ -211,6 +211,14 @@ class VulnerabilityDetails(models.Model):
     cisa_kev_notes = models.TextField(blank=True, null=True, help_text='Notes from CISA KEV')
     cisa_kev_cwes = models.JSONField(default=list, blank=True, help_text='CWE codes from CISA KEV')
     
+    # Exploit-DB information
+    exploit_db_available = models.BooleanField(default=False, help_text='Whether exploit is available in Exploit-DB')
+    exploit_db_verified = models.BooleanField(default=False, help_text='Whether exploit is verified in Exploit-DB')
+    exploit_db_count = models.IntegerField(default=0, help_text='Number of exploits found in Exploit-DB')
+    exploit_db_verified_count = models.IntegerField(default=0, help_text='Number of verified exploits in Exploit-DB')
+    exploit_db_working_count = models.IntegerField(default=0, help_text='Number of working exploits in Exploit-DB')
+    exploit_db_links = models.JSONField(default=list, blank=True, help_text='Links to Exploit-DB entries')
+    
     # Additional metadata
     last_updated = models.DateTimeField(auto_now=True, help_text='When this record was last updated')
     data_source = models.CharField(max_length=100, default='manual', help_text='Source of this information')

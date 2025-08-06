@@ -558,7 +558,15 @@ class ImageViewSet(BaseViewSet):
 
     def get_queryset(self):
         # Always apply search and filters, even for dropdown
-        return super().get_queryset()
+        queryset = super().get_queryset()
+        
+        # Optimize for repository_info by prefetching repository_tags and their repositories
+        if self.action == 'retrieve':
+            queryset = queryset.prefetch_related(
+                'repository_tags__repository'
+            )
+        
+        return queryset
 
     @action(detail=True, methods=['post'])
     def update_latest_versions(self, request, uuid=None):
@@ -1217,10 +1225,12 @@ class StatsViewSet(viewsets.ViewSet):
             total_count=Count('uuid')
         )
         
-        # Optimized fixable vulnerabilities count
-        fixable_vulns = ComponentVersionVulnerability.objects.filter(fixable=True).count()
+        # Optimized fixable vulnerabilities count - count unique vulnerabilities that are fixable
+        fixable_vulns = ComponentVersionVulnerability.objects.filter(
+            fixable=True
+        ).values('vulnerability').distinct().count()
         
-        # Calculate percentage
+        # Calculate percentage based on unique vulnerabilities
         total_vulns = security_metrics['total_count']
         fixable_percentage = (fixable_vulns / total_vulns * 100) if total_vulns > 0 else 0
         

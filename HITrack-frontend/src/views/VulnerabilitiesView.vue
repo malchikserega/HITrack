@@ -203,12 +203,6 @@
                   {{ item.description }}
                 </div>
               </template>
-              <template v-slot:item.created_at="{ item }">
-                {{ $formatDate(item.created_at) }}
-              </template>
-              <template v-slot:item.updated_at="{ item }">
-                {{ $formatDate(item.updated_at) }}
-              </template>
             </v-data-table>
 
             <!-- Pagination -->
@@ -298,9 +292,7 @@ const headers = [
   { title: 'CISA KEV', key: 'cisa_kev', sortable: false },
   { title: 'Exploit', key: 'exploit_available', sortable: false },
   { title: 'Details', key: 'has_details', sortable: false },
-  { title: 'Description', key: 'description', sortable: false },
-  { title: 'Created', key: 'created_at', sortable: true },
-  { title: 'Updated', key: 'updated_at', sortable: true }
+  { title: 'Description', key: 'description', sortable: false }
 ] as const
 
 // Fetch vulnerabilities with optimized parameters

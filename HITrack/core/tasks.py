@@ -798,7 +798,7 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
     Process Grype scan results for an image and update the database with vulnerability information.
     Optimized for bulk operations and safe parallel execution.
     """
-    from .models import Image, Component, ComponentVersion, Vulnerability, ComponentVersionVulnerability
+    from .models import Image, Component, ComponentVersion, Vulnerability, ComponentVersionVulnerability, VulnerabilityDetails
     from django.db import IntegrityError
     import logging
 
@@ -1355,28 +1355,9 @@ def update_vulnerability_details(vulnerability_uuid: str):
             details = existing_details
             created = False
         else:
-            # Determine data source based on what data is available
-            data_sources = []
-            if cve_details:
-                data_sources.append('CVE-CIRCL')
-            if exploit_info:
-                exploit_sources = []
-                if exploit_info.get('exploit_available'):
-                    exploit_sources.append('Exploit-DB')
-                if any('github' in link for link in exploit_info.get('exploit_links', [])):
-                    exploit_sources.append('GitHub-Advisories')
-                if any('nvd' in link for link in exploit_info.get('exploit_links', [])):
-                    exploit_sources.append('NVD')
-                if exploit_info.get('cisa_kev_known_exploited'):
-                    exploit_sources.append('CISA-KEV')
-                if exploit_sources:
-                    data_sources.extend(exploit_sources)
-            
-            data_source = ' + '.join(data_sources) if data_sources else 'manual'
-            
             details = VulnerabilityDetails.objects.create(
                 vulnerability=vulnerability,
-                data_source=data_source
+                data_source='manual'  # Will be updated below
             )
             created = True
 
@@ -1397,17 +1378,17 @@ def update_vulnerability_details(vulnerability_uuid: str):
         if cve_details:
             data_sources.append('CVE-CIRCL')
         if exploit_info:
-            exploit_sources = []
-            if exploit_info.get('exploit_available'):
-                exploit_sources.append('Exploit-DB')
-            if any('github' in link for link in exploit_info.get('exploit_links', [])):
-                exploit_sources.append('GitHub-Advisories')
-            if any('nvd' in link for link in exploit_info.get('exploit_links', [])):
-                exploit_sources.append('NVD')
+            # Check CISA KEV
             if exploit_info.get('cisa_kev_known_exploited'):
-                exploit_sources.append('CISA-KEV')
-            if exploit_sources:
-                data_sources.extend(exploit_sources)
+                data_sources.append('CISA-KEV')
+            
+            # Check Exploit-DB (separate tracking)
+            if exploit_info.get('exploit_db_available'):
+                data_sources.append('Exploit-DB')
+            
+            # Check NVD (for reference links)
+            if any('nvd' in link for link in exploit_info.get('exploit_links', [])):
+                data_sources.append('NVD')
         
         if data_sources:
             details.data_source = ' + '.join(data_sources)
@@ -1686,17 +1667,17 @@ def update_vulnerability_details_bulk(vulnerability_uuids: List[str], batch_size
                             if cve_details:
                                 data_sources.append('CVE-CIRCL')
                             if exploit_info:
-                                exploit_sources = []
-                                if exploit_info.get('exploit_available'):
-                                    exploit_sources.append('Exploit-DB')
-                                if any('github' in link for link in exploit_info.get('exploit_links', [])):
-                                    exploit_sources.append('GitHub-Advisories')
-                                if any('nvd' in link for link in exploit_info.get('exploit_links', [])):
-                                    exploit_sources.append('NVD')
+                                # Check CISA KEV
                                 if exploit_info.get('cisa_kev_known_exploited'):
-                                    exploit_sources.append('CISA-KEV')
-                                if exploit_sources:
-                                    data_sources.extend(exploit_sources)
+                                    data_sources.append('CISA-KEV')
+                                
+                                # Check Exploit-DB (separate tracking)
+                                if exploit_info.get('exploit_db_available'):
+                                    data_sources.append('Exploit-DB')
+                                
+                                # Check NVD (for reference links)
+                                if any('nvd' in link for link in exploit_info.get('exploit_links', [])):
+                                    data_sources.append('NVD')
                             
                             data_source_str = ' + '.join(data_sources) if data_sources else 'manual'
                             

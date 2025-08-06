@@ -151,9 +151,9 @@ class VulnerabilityAdmin(admin.ModelAdmin):
 
 @admin.register(VulnerabilityDetails)
 class VulnerabilityDetailsAdmin(admin.ModelAdmin):
-    list_display = ('vulnerability', 'cve_details_score', 'cve_details_severity', 'exploit_available', 'exploit_public', 'cisa_kev_known_exploited', 'get_data_source_display', 'last_updated')
+    list_display = ('vulnerability', 'cve_details_score', 'cve_details_severity', 'exploit_available', 'exploit_public', 'exploit_db_available', 'cisa_kev_known_exploited', 'get_data_source_display', 'last_updated')
     search_fields = ('vulnerability__vulnerability_id', 'cve_details_summary')
-    list_filter = ('cve_details_severity', 'exploit_available', 'exploit_public', 'exploit_verified', 'data_source')
+    list_filter = ('cve_details_severity', 'exploit_available', 'exploit_public', 'exploit_verified', 'exploit_db_available', 'exploit_db_verified', 'data_source')
     readonly_fields = ('uuid', 'last_updated', 'get_data_source_links')
     raw_id_fields = ('vulnerability',)
     
@@ -204,6 +204,10 @@ class VulnerabilityDetailsAdmin(admin.ModelAdmin):
         }),
         ('Exploit Information', {
             'fields': ('exploit_available', 'exploit_public', 'exploit_verified', 'exploit_links'),
+            'classes': ('collapse',)
+        }),
+        ('Exploit-DB Information', {
+            'fields': ('exploit_db_available', 'exploit_db_verified', 'exploit_db_count', 'exploit_db_verified_count', 'exploit_db_working_count', 'exploit_db_links'),
             'classes': ('collapse',)
         }),
         ('CISA KEV Information', {

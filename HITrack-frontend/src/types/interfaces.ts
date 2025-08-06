@@ -44,6 +44,12 @@ export interface VulnerabilityDetails extends BaseEntity {
   cisa_kev_ransomware_use?: string
   cisa_kev_notes?: string
   cisa_kev_cwes?: string[]
+  exploit_db_available: boolean
+  exploit_db_verified: boolean
+  exploit_db_count: number
+  exploit_db_verified_count: number
+  exploit_db_working_count: number
+  exploit_db_links?: string[]
   last_updated: string
   data_source: string
 }
@@ -95,6 +101,13 @@ export interface Image extends BaseEntity {
   fixable_severity_counts: { [key: string]: number }
   unique_severity_counts: { [key: string]: number }
   fixable_unique_severity_counts: { [key: string]: number }
+  repository_info?: {
+    repository_name: string
+    repository_uuid: string
+    tag: string
+    tag_uuid: string
+    repository_type: string
+  }
   updated_at: string
   repository_tags?: RepositoryTag[]
   component_versions?: ComponentVersion[]
