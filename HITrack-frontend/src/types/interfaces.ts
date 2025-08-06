@@ -156,3 +156,74 @@ export interface Stats {
   vulnerabilities: number
   components: number
 }
+
+// Celery Task Interfaces
+export interface TaskResult {
+  task_id: string;
+  task_name: string;
+  status: 'success' | 'error' | 'pending' | 'in_process';
+  result_summary?: any;
+  duration?: number;
+  created: string;
+  updated?: string;
+  traceback?: string;
+}
+
+export interface TaskResultList {
+  task_id: string;
+  task_name: string;
+  status: 'success' | 'error' | 'pending' | 'in_process';
+  duration?: number;
+  created: string;
+}
+
+export interface TaskStatistics {
+  total_tasks: number;
+  successful_tasks: number;
+  failed_tasks: number;
+  pending_tasks: number;
+  running_tasks: number;
+  average_duration: number;
+  recent_tasks: TaskResultList[];
+}
+
+export interface TaskTypeStats {
+  task_name: string;
+  total: number;
+  success: number;
+  failure: number;
+  pending: number;
+  running: number;
+}
+
+export interface TaskDetails {
+  task_id: string;
+  task_name: string;
+  status: string;
+  created: string;
+  updated?: string;
+  duration?: number;
+  result?: any;
+  traceback?: string;
+  meta?: any;
+}
+
+export interface PeriodicTask {
+  id: number;
+  name: string;
+  task: string;
+  enabled: boolean;
+  schedule_info?: {
+    type: 'interval' | 'crontab';
+    every?: number;
+    period?: string;
+    minute?: string;
+    hour?: string;
+    day_of_week?: string;
+    day_of_month?: string;
+    month_of_year?: string;
+  };
+  next_run?: string;
+  last_run_at?: string;
+  total_run_count: number;
+}

@@ -13,7 +13,8 @@ from .serializers import (
     StatsResponseSerializer, JobAddRepositoriesRequestSerializer,
     JobAddRepositoriesResponseSerializer, ImageDropdownSerializer,
     ReleaseSerializer, RepositoryTagReleaseSerializer, ReleaseAssignmentSerializer,
-    VulnerabilityListSerializer, VulnerabilityDetailsSerializer
+    VulnerabilityListSerializer, VulnerabilityDetailsSerializer,
+    TaskResultSerializer, TaskResultListSerializer, PeriodicTaskSerializer, TaskStatisticsSerializer
 )
 from django.db import models
 from .pagination import CustomPageNumberPagination
@@ -1631,3 +1632,357 @@ class ComponentMatrixView(APIView):
             'type': comparison_type,
             'component_types': component_types
         })
+
+# Celery Task Views
+from django_celery_results.models import TaskResult
+from django_celery_beat.models import PeriodicTask
+from django.db.models import Q, Avg, Count
+from django.utils import timezone
+from datetime import timedelta
+from rest_framework.decorators import action
+from rest_framework.response import Response
+from rest_framework import status
+from celery import current_app
+import json
+
+# Import task serializers after they are defined
+from .serializers import (
+    TaskResultSerializer, TaskResultListSerializer, 
+    PeriodicTaskSerializer, TaskStatisticsSerializer
+)
+
+class TestViewSet(viewsets.ViewSet):
+    """
+    Simple test viewset to check if imports work
+    """
+    permission_classes = [IsAuthenticated]
+    
+    @action(detail=False, methods=['get'])
+    def test(self, request):
+        """Simple test endpoint"""
+        return Response({
+            'message': 'Test endpoint works!',
+            'task_count': TaskResult.objects.count(),
+            'periodic_task_count': PeriodicTask.objects.count()
+        })
+    
+    @action(detail=False, methods=['get'], url_path='endpoint')
+    def test_endpoint(self, request):
+        """Simple test endpoint for frontend"""
+        return Response({
+            'message': 'Test endpoint works!',
+            'status': 'success'
+        })
+    
+    @action(detail=False, methods=['get'], url_path='direct')
+    def test_direct(self, request):
+        """Direct test endpoint"""
+        return Response({
+            'message': 'Direct API test works!',
+            'status': 'success',
+            'timestamp': timezone.now().isoformat()
+        })
+
+class TaskManagementViewSet(BaseViewSet):
+    """
+    ViewSet for managing and monitoring Celery tasks
+    """
+    queryset = TaskResult.objects.all().order_by('-date_created')
+    serializer_class = TaskResultSerializer
+    filterset_fields = ['status', 'task_name']
+    search_fields = ['task_id', 'task_name']
+    ordering_fields = ['date_created', 'date_done', 'status']
+    ordering = ['-date_created']
+    
+    def get_serializer_class(self):
+        """Use different serializers for list and detail views"""
+        if self.action == 'list':
+            return TaskResultListSerializer
+        return TaskResultSerializer
+    
+    def list(self, request):
+        """List tasks with proper pagination and filtering"""
+        # Use the parent class's list method which handles pagination, filtering, and search
+        return super().list(request)
+    
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        
+        # Filter by date range
+        days = self.request.query_params.get('days', None)
+        if days:
+            try:
+                days = int(days)
+                cutoff_date = timezone.now() - timedelta(days=days)
+                queryset = queryset.filter(date_created__gte=cutoff_date)
+            except ValueError:
+                pass
+        
+        # Filter by status
+        status_filter = self.request.query_params.get('status', None)
+        if status_filter:
+            if status_filter == 'success':
+                queryset = queryset.filter(status='SUCCESS')
+            elif status_filter == 'error':
+                queryset = queryset.filter(status='FAILURE')
+            elif status_filter == 'pending':
+                queryset = queryset.filter(status='PENDING')
+            elif status_filter == 'in_process':
+                queryset = queryset.filter(status='STARTED')
+        
+        return queryset
+    
+    @action(detail=False, methods=['get'])
+    def statistics(self, request):
+        """Get task statistics"""
+        # Get date range
+        days = int(request.query_params.get('days', 7))
+        cutoff_date = timezone.now() - timedelta(days=days)
+        
+        # Get tasks in date range
+        tasks = TaskResult.objects.filter(date_created__gte=cutoff_date)
+        
+        # Calculate statistics
+        total_tasks = tasks.count()
+        successful_tasks = tasks.filter(status='SUCCESS').count()
+        failed_tasks = tasks.filter(status='FAILURE').count()
+        pending_tasks = tasks.filter(status='PENDING').count()
+        running_tasks = tasks.filter(status='STARTED').count()
+        
+        # Calculate average duration
+        completed_tasks = tasks.filter(status='SUCCESS', date_done__isnull=False)
+        if completed_tasks.exists():
+            # Calculate duration for each task and then average
+            total_duration = 0
+            count = 0
+            for task in completed_tasks:
+                if task.date_done and task.date_created:
+                    duration = task.date_done - task.date_created
+                    total_duration += duration.total_seconds()
+                    count += 1
+            
+            avg_duration = total_duration / count if count > 0 else 0.0
+        else:
+            avg_duration = 0.0
+        
+        # Get recent tasks
+        recent_tasks = tasks.order_by('-date_created')[:10]
+        recent_tasks_data = []
+        for task in recent_tasks:
+            duration = None
+            if task.date_done and task.date_created:
+                duration = (task.date_done - task.date_created).total_seconds()
+            
+            # Get proper task name
+            task_name = task.task_name
+            if not task_name:
+                try:
+                    from celery import current_app
+                    task_func = current_app.tasks.get(task.task_id)
+                    if task_func:
+                        task_name = task_func.name
+                except:
+                    pass
+            
+            if not task_name:
+                task_name = f"Task-{task.task_id[:8]}" if task.task_id else 'Unknown'
+            
+            recent_tasks_data.append({
+                'task_id': task.task_id,
+                'task_name': task_name,
+                'status': task.status,
+                'duration': duration,
+                'created': task.date_created
+            })
+        
+        data = {
+            'total_tasks': total_tasks,
+            'successful_tasks': successful_tasks,
+            'failed_tasks': failed_tasks,
+            'pending_tasks': pending_tasks,
+            'running_tasks': running_tasks,
+            'average_duration': avg_duration,
+            'recent_tasks': recent_tasks_data
+        }
+        
+        return Response(data)
+    
+    @action(detail=False, methods=['get'])
+    def task_types(self, request):
+        """Get statistics by task type"""
+        days = int(request.query_params.get('days', 7))
+        cutoff_date = timezone.now() - timedelta(days=days)
+        
+        tasks = TaskResult.objects.filter(date_created__gte=cutoff_date)
+        
+        # Group by task name and status
+        task_stats = tasks.values('task_name').annotate(
+            total=Count('id'),
+            success=Count('id', filter=Q(status='SUCCESS')),
+            failure=Count('id', filter=Q(status='FAILURE')),
+            pending=Count('id', filter=Q(status='PENDING')),
+            running=Count('id', filter=Q(status='STARTED'))
+        ).order_by('-total')
+        
+        return Response(task_stats)
+    
+    @action(detail=True, methods=['get'])
+    def result_details(self, request, pk=None):
+        """Get detailed result information for a task"""
+        task = self.get_object()
+        
+        # Parse result if it's JSON
+        result_data = None
+        if task.result:
+            try:
+                result_data = json.loads(task.result)
+            except (json.JSONDecodeError, TypeError):
+                result_data = str(task.result)
+        
+        data = {
+            'task_id': task.task_id,
+            'task_name': task.task_name,
+            'status': task.status,
+            'created': task.date_created,
+            'updated': task.date_done,
+            'duration': (task.date_done - task.date_created).total_seconds() if task.date_done else None,
+            'result': result_data,
+            'traceback': task.traceback,
+            'meta': task.meta
+        }
+        
+        return Response(data)
+    
+    @action(detail=False, methods=['post'])
+    def retry_task(self, request):
+        """Retry a failed task"""
+        task_id = request.data.get('task_id')
+        if not task_id:
+            return Response(
+                {'error': 'task_id is required'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        try:
+            task = TaskResult.objects.get(task_id=task_id)
+            if task.status != 'FAILURE':
+                return Response(
+                    {'error': 'Only failed tasks can be retried'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Retry the task
+            celery_app = current_app
+            celery_app.control.revoke(task_id, terminate=True)
+            
+            # Get the task function and retry it
+            if task.task_name:
+                task_func = celery_app.tasks.get(task.task_name)
+                if task_func:
+                    # Retry the task
+                    result = task_func.delay()
+                    return Response({
+                        'message': 'Task retry initiated',
+                        'new_task_id': result.id
+                    })
+            
+            return Response(
+                {'error': 'Could not retry task'}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+            
+        except TaskResult.DoesNotExist:
+            return Response(
+                {'error': 'Task not found'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+class PeriodicTaskViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    ViewSet for managing periodic tasks
+    """
+    queryset = PeriodicTask.objects.all().order_by('name')
+    serializer_class = PeriodicTaskSerializer
+    filterset_fields = ['enabled', 'task']
+    search_fields = ['name', 'task']
+    ordering_fields = ['name', 'last_run_at', 'total_run_count']
+    ordering = ['name']
+    
+    @action(detail=True, methods=['post'])
+    def toggle_enabled(self, request, pk=None):
+        """Toggle periodic task enabled/disabled status"""
+        task = self.get_object()
+        task.enabled = not task.enabled
+        task.save()
+        
+        return Response({
+            'id': task.id,
+            'name': task.name,
+            'enabled': task.enabled
+        })
+    
+    @action(detail=True, methods=['post'])
+    def run_now(self, request, pk=None):
+        """Run a periodic task immediately"""
+        task = self.get_object()
+        
+        try:
+            # Get the task function and run it
+            celery_app = current_app
+            task_func = celery_app.tasks.get(task.task)
+            if task_func:
+                result = task_func.delay()
+                return Response({
+                    'message': 'Task started',
+                    'task_id': result.id
+                })
+            else:
+                return Response(
+                    {'error': 'Task function not found'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        except Exception as e:
+            return Response(
+                {'error': str(e)}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+class TestTaskViewSet(viewsets.ViewSet):
+    """
+    ViewSet for testing tasks
+    """
+    permission_classes = [IsAuthenticated]
+    
+    @action(detail=False, methods=['post'])
+    def run_test_task(self, request):
+        """Run a simple test task"""
+        from .tasks import test_task
+        
+        try:
+            result = test_task.delay()
+            return Response({
+                'message': 'Test task started',
+                'task_id': result.id
+            })
+        except Exception as e:
+            return Response(
+                {'error': str(e)}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+    
+    @action(detail=False, methods=['post'])
+    def run_failing_task(self, request):
+        """Run a task that will fail"""
+        from .tasks import test_failing_task
+        
+        try:
+            result = test_failing_task.delay()
+            return Response({
+                'message': 'Failing test task started',
+                'task_id': result.id
+            })
+        except Exception as e:
+            return Response(
+                {'error': str(e)}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )

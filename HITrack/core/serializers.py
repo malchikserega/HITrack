@@ -2,7 +2,11 @@ from rest_framework import serializers
 from rest_framework.validators import UniqueValidator
 from drf_spectacular.utils import extend_schema_field
 from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ComponentVersionVulnerability, Release, RepositoryTagRelease, VulnerabilityDetails
-
+# Celery Task Serializers
+from django_celery_results.models import TaskResult
+from django_celery_beat.models import PeriodicTask, IntervalSchedule, CrontabSchedule
+from datetime import datetime
+import json
 
 class VulnerabilityDetailsSerializer(serializers.ModelSerializer):
     class Meta:
@@ -630,3 +634,218 @@ class RepositoryTagReleaseSerializer(serializers.ModelSerializer):
 
 class ReleaseAssignmentSerializer(serializers.Serializer):
     release_id = serializers.UUIDField() 
+
+
+class TaskResultSerializer(serializers.ModelSerializer):
+    """Serializer for Celery task results"""
+    task_name = serializers.SerializerMethodField()
+    status = serializers.SerializerMethodField()
+    result_summary = serializers.SerializerMethodField()
+    duration = serializers.SerializerMethodField()
+    created = serializers.DateTimeField(source='date_created')
+    updated = serializers.DateTimeField(source='date_done')
+    
+    class Meta:
+        model = TaskResult
+        fields = [
+            'task_id', 'task_name', 'status', 'result_summary', 
+            'duration', 'created', 'updated', 'traceback'
+        ]
+    
+    def get_task_name(self, obj):
+        """Extract task name from task_id or result"""
+        if obj.task_name:
+            return obj.task_name
+        
+        # Try to extract from result if available
+        if obj.result:
+            try:
+                result_data = json.loads(obj.result)
+                if isinstance(result_data, dict) and 'task_name' in result_data:
+                    return result_data['task_name']
+            except (json.JSONDecodeError, TypeError):
+                pass
+        
+        # Try to extract from task_id or other fields
+        if hasattr(obj, 'task_id') and obj.task_id:
+            # Try to get task name from Celery registry
+            try:
+                from celery import current_app
+                task_func = current_app.tasks.get(obj.task_id)
+                if task_func:
+                    return task_func.name
+            except:
+                pass
+        
+        # Fallback to a more descriptive name
+        if obj.task_id:
+            return f"Task-{obj.task_id[:8]}"
+        
+        return 'Unknown Task'
+    
+    def get_status(self, obj):
+        """Get task status"""
+        if obj.status == 'SUCCESS':
+            return 'success'
+        elif obj.status == 'FAILURE':
+            return 'error'
+        elif obj.status == 'PENDING':
+            return 'pending'
+        elif obj.status == 'STARTED':
+            return 'in_process'
+        else:
+            return obj.status.lower()
+    
+    def get_result_summary(self, obj):
+        """Get a summary of the result"""
+        if not obj.result:
+            return None
+        
+        try:
+            result_data = json.loads(obj.result)
+            if isinstance(result_data, dict):
+                # Extract key information
+                summary = {}
+                if 'status' in result_data:
+                    summary['status'] = result_data['status']
+                if 'message' in result_data:
+                    summary['message'] = result_data['message']
+                if 'processed_items' in result_data:
+                    summary['processed_items'] = result_data['processed_items']
+                if 'errors' in result_data:
+                    summary['errors'] = result_data['errors']
+                return summary
+            else:
+                return str(result_data)[:200] + '...' if len(str(result_data)) > 200 else str(result_data)
+        except (json.JSONDecodeError, TypeError):
+            return str(obj.result)[:200] + '...' if len(str(obj.result)) > 200 else str(obj.result)
+    
+    def get_duration(self, obj):
+        """Calculate task duration"""
+        if obj.date_created and obj.date_done:
+            duration = obj.date_done - obj.date_created
+            return duration.total_seconds()
+        return None
+
+class TaskResultListSerializer(serializers.ModelSerializer):
+    """Simplified serializer for task list"""
+    task_name = serializers.SerializerMethodField()
+    status = serializers.SerializerMethodField()
+    result_summary = serializers.SerializerMethodField()
+    duration = serializers.SerializerMethodField()
+    created = serializers.DateTimeField(source='date_created')
+    
+    class Meta:
+        model = TaskResult
+        fields = ['task_id', 'task_name', 'status', 'result_summary', 'duration', 'created']
+    
+    def get_task_name(self, obj):
+        if obj.task_name:
+            return obj.task_name
+        
+        # Try to extract from task_id or other fields
+        if hasattr(obj, 'task_id') and obj.task_id:
+            # Try to get task name from Celery registry
+            try:
+                from celery import current_app
+                task_func = current_app.tasks.get(obj.task_id)
+                if task_func:
+                    return task_func.name
+            except:
+                pass
+        
+        # Fallback to a more descriptive name
+        if obj.task_id:
+            return f"Task-{obj.task_id[:8]}"
+        
+        return 'Unknown Task'
+    
+    def get_status(self, obj):
+        if obj.status == 'SUCCESS':
+            return 'success'
+        elif obj.status == 'FAILURE':
+            return 'error'
+        elif obj.status == 'PENDING':
+            return 'pending'
+        elif obj.status == 'STARTED':
+            return 'in_process'
+        else:
+            return obj.status.lower()
+    
+    def get_result_summary(self, obj):
+        """Get a summary of the result"""
+        if not obj.result:
+            return None
+        
+        try:
+            result_data = json.loads(obj.result)
+            if isinstance(result_data, dict):
+                # Extract key information
+                summary = {}
+                if 'status' in result_data:
+                    summary['status'] = result_data['status']
+                if 'message' in result_data:
+                    summary['message'] = result_data['message']
+                if 'processed_items' in result_data:
+                    summary['processed_items'] = result_data['processed_items']
+                if 'errors' in result_data:
+                    summary['errors'] = result_data['errors']
+                return summary
+            else:
+                return str(result_data)[:100] + '...' if len(str(result_data)) > 100 else str(result_data)
+        except (json.JSONDecodeError, TypeError):
+            return str(obj.result)[:100] + '...' if len(str(obj.result)) > 100 else str(obj.result)
+    
+    def get_duration(self, obj):
+        if obj.date_created and obj.date_done:
+            duration = obj.date_done - obj.date_created
+            return duration.total_seconds()
+        return None
+
+class PeriodicTaskSerializer(serializers.ModelSerializer):
+    """Serializer for periodic tasks"""
+    schedule_info = serializers.SerializerMethodField()
+    next_run = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = PeriodicTask
+        fields = [
+            'id', 'name', 'task', 'enabled', 'schedule_info', 
+            'next_run', 'last_run_at', 'total_run_count'
+        ]
+    
+    def get_schedule_info(self, obj):
+        """Get schedule information"""
+        if obj.interval:
+            return {
+                'type': 'interval',
+                'every': obj.interval.every,
+                'period': obj.interval.period
+            }
+        elif obj.crontab:
+            return {
+                'type': 'crontab',
+                'minute': obj.crontab.minute,
+                'hour': obj.crontab.hour,
+                'day_of_week': obj.crontab.day_of_week,
+                'day_of_month': obj.crontab.day_of_month,
+                'month_of_year': obj.crontab.month_of_year
+            }
+        return None
+    
+    def get_next_run(self, obj):
+        """Get next run time"""
+        try:
+            return obj.schedule.next_run_at
+        except:
+            return None
+
+class TaskStatisticsSerializer(serializers.Serializer):
+    """Serializer for task statistics"""
+    total_tasks = serializers.IntegerField()
+    successful_tasks = serializers.IntegerField()
+    failed_tasks = serializers.IntegerField()
+    pending_tasks = serializers.IntegerField()
+    running_tasks = serializers.IntegerField()
+    average_duration = serializers.FloatField()
+    recent_tasks = serializers.ListField(child=TaskResultListSerializer()) 

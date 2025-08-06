@@ -1858,3 +1858,19 @@ def get_vulnerability_statistics() -> Dict:
     except Exception as e:
         logger.error(f"Error getting vulnerability statistics: {str(e)}")
         return {}
+
+@celery_app.task()
+def test_task():
+    """
+    Simple test task for debugging
+    """
+    import time
+    time.sleep(2)  # Simulate some work
+    return {"status": "success", "message": "Test task completed successfully"}
+
+@celery_app.task()
+def test_failing_task():
+    """
+    Simple test task that fails
+    """
+    raise Exception("This is a test failure")

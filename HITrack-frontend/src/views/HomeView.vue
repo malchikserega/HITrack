@@ -223,10 +223,13 @@
 
       <!-- Activity and Quick Actions -->
       <v-row>
-        <v-col cols="12" md="8">
+        <v-col cols="12" md="6">
           <RecentActivityFeed :activities="dashboardData.recent_activities || []" />
         </v-col>
-        <v-col cols="12" md="4">
+        <v-col cols="12" md="3">
+          <RecentTasksCard />
+        </v-col>
+        <v-col cols="12" md="3">
           <v-card class="quick-actions-card" elevation="2">
             <v-card-title class="text-h6 font-weight-bold pa-4 pb-2">
               Quick Actions
@@ -293,6 +296,7 @@ import MetricCard from '../components/MetricCard.vue'
 import SeverityDistributionChart from '../components/SeverityDistributionChart.vue'
 import VulnerabilityTrendChart from '../components/VulnerabilityTrendChart.vue'
 import RecentActivityFeed from '../components/RecentActivityFeed.vue'
+import RecentTasksCard from '../components/RecentTasksCard.vue'
 
 const router = useRouter()
 const theme = useTheme()

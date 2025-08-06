@@ -91,6 +91,12 @@ const router = createRouter({
       name: 'releases',
       component: () => import('../views/ReleasesView.vue'),
       meta: { requiresAuth: true }
+    },
+    {
+      path: '/tasks',
+      name: 'tasks',
+      component: () => import('../views/TaskManagementView.vue'),
+      meta: { requiresAuth: true }
     }
   ]
 })

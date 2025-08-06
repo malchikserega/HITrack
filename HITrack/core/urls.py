@@ -5,7 +5,8 @@ from .views import (
     ComponentViewSet, ComponentVersionViewSet, VulnerabilityViewSet,
     StatsViewSet, JobViewSet, HasACRRegistryView, ListACRRegistriesView,
     RepositoryTagListForRepositoryView, ReportGeneratorView,
-    ComponentMatrixView, ReleaseViewSet, VulnerabilityDetailsViewSet
+    ComponentMatrixView, ReleaseViewSet, VulnerabilityDetailsViewSet,
+    TaskManagementViewSet, PeriodicTaskViewSet, TestTaskViewSet, TestViewSet
 )
 
 router = DefaultRouter()
@@ -19,6 +20,10 @@ router.register(r'vulnerability-details', VulnerabilityDetailsViewSet, basename=
 router.register(r'releases', ReleaseViewSet, basename='release')
 router.register(r'stats', StatsViewSet, basename='stats')
 router.register(r'jobs', JobViewSet, basename='job')
+router.register(r'tasks', TaskManagementViewSet, basename='task')
+router.register(r'periodic-tasks', PeriodicTaskViewSet, basename='periodic-task')
+router.register(r'test-tasks', TestTaskViewSet, basename='test-task')
+router.register(r'test', TestViewSet, basename='test')
 
 urlpatterns = [
     path('', include(router.urls)),
