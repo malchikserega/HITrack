@@ -1321,6 +1321,7 @@ def update_vulnerability_details(vulnerability_uuid: str):
     from .models import Vulnerability, VulnerabilityDetails
     from .utils.vulnerability_sources import collect_vulnerability_data
     from django.utils import timezone
+    from django.db import transaction
     import time
 
     logger.info(f"Starting vulnerability details update for {vulnerability_uuid}")
@@ -1329,73 +1330,67 @@ def update_vulnerability_details(vulnerability_uuid: str):
     try:
         vulnerability = Vulnerability.objects.get(uuid=vulnerability_uuid)
         
-        # Check if details exist using the correct method
+        # Skip if already updated recently (within 24 hours)
         try:
             existing_details = vulnerability.details
-            has_details = True
-        except VulnerabilityDetails.DoesNotExist:
-            has_details = False
-        
-        # Skip if already updated recently (within 24 hours)
-        if has_details:
-            details = existing_details
-            if details.last_updated and (timezone.now() - details.last_updated).days < 1:
+            if existing_details.last_updated and (timezone.now() - existing_details.last_updated).days < 1:
                 logger.info(f"Skipping {vulnerability.vulnerability_id} - updated recently")
                 return {
                     "status": "skipped",
                     "reason": "updated recently",
                     "vulnerability_id": vulnerability.vulnerability_id
                 }
+        except VulnerabilityDetails.DoesNotExist:
+            pass  # No existing details, will create new ones
 
         # Collect data from external sources
         cve_details, exploit_info = collect_vulnerability_data(vulnerability.vulnerability_id)
         
-        # Create or update vulnerability details even if no data collected
-        if has_details:
-            details = existing_details
-            created = False
-        else:
-            details = VulnerabilityDetails.objects.create(
+        # Use transaction to ensure atomicity
+        with transaction.atomic():
+            # Use get_or_create to avoid race conditions
+            details, created = VulnerabilityDetails.objects.get_or_create(
                 vulnerability=vulnerability,
-                data_source='manual'  # Will be updated below
+                defaults={
+                    'data_source': 'manual'  # Will be updated below
+                }
             )
-            created = True
 
-        # Update CVE details if available
-        if cve_details:
-            for field, value in cve_details.items():
-                if value is not None:
-                    setattr(details, field, value)
+            # Update CVE details if available
+            if cve_details:
+                for field, value in cve_details.items():
+                    if value is not None:
+                        setattr(details, field, value)
 
-        # Update exploit information if available
-        if exploit_info:
-            for field, value in exploit_info.items():
-                if value is not None:
-                    setattr(details, field, value)
+            # Update exploit information if available
+            if exploit_info:
+                for field, value in exploit_info.items():
+                    if value is not None:
+                        setattr(details, field, value)
 
-        # Update data source with current sources
-        data_sources = []
-        if cve_details:
-            data_sources.append('CVE-CIRCL')
-        if exploit_info:
-            # Check CISA KEV
-            if exploit_info.get('cisa_kev_known_exploited'):
-                data_sources.append('CISA-KEV')
+            # Update data source with current sources
+            data_sources = []
+            if cve_details:
+                data_sources.append('CVE-CIRCL')
+            if exploit_info:
+                # Check CISA KEV
+                if exploit_info.get('cisa_kev_known_exploited'):
+                    data_sources.append('CISA-KEV')
+                
+                # Check Exploit-DB (separate tracking)
+                if exploit_info.get('exploit_db_available'):
+                    data_sources.append('Exploit-DB')
+                
+                # Check NVD (for reference links)
+                if any('nvd' in link for link in exploit_info.get('exploit_links', [])):
+                    data_sources.append('NVD')
             
-            # Check Exploit-DB (separate tracking)
-            if exploit_info.get('exploit_db_available'):
-                data_sources.append('Exploit-DB')
-            
-            # Check NVD (for reference links)
-            if any('nvd' in link for link in exploit_info.get('exploit_links', [])):
-                data_sources.append('NVD')
-        
-        if data_sources:
-            details.data_source = ' + '.join(data_sources)
+            if data_sources:
+                details.data_source = ' + '.join(data_sources)
 
-        # Always update the last_updated timestamp
-        details.last_updated = timezone.now()
-        details.save()
+            # Always update the last_updated timestamp
+            details.last_updated = timezone.now()
+            details.save()
 
         processing_time = time.time() - start_time
         logger.info(f"Updated vulnerability details for {vulnerability.vulnerability_id} in {processing_time:.2f}s")
@@ -1443,41 +1438,38 @@ def update_all_vulnerability_details():
         
         logger.info(f"Found {total_vulnerabilities} vulnerabilities to process")
         
+        # Process vulnerabilities in batches to avoid memory issues
+        BATCH_SIZE = 100  # Increased batch size for better performance
         processed_count = 0
         success_count = 0
         error_count = 0
         
-        # Process vulnerabilities in batches to avoid memory issues
-        BATCH_SIZE = 50
         for i in range(0, total_vulnerabilities, BATCH_SIZE):
             batch = vulnerabilities[i:i + BATCH_SIZE]
             batch_start_time = time.time()
             
             logger.info(f"Processing batch {i//BATCH_SIZE + 1}/{(total_vulnerabilities + BATCH_SIZE - 1)//BATCH_SIZE}")
             
+            # Schedule tasks for this batch
+            batch_tasks = []
             for vulnerability in batch:
+                # Schedule individual task asynchronously
+                task = update_vulnerability_details.delay(str(vulnerability.uuid))
+                batch_tasks.append(task)
+                processed_count += 1
+            
+            # Wait for all tasks in this batch to complete
+            for task in batch_tasks:
                 try:
-                    # Call the individual update task
-                    result = update_vulnerability_details(str(vulnerability.uuid))
-                    processed_count += 1
-                    
-                    # Check if the update was successful
-                    if result.get('status') == 'success':
-                        success_count += 1
-                    elif result.get('status') == 'skipped':
-                        # Count skipped as successful since it means data is up to date
+                    result = task.get(timeout=300)  # 5 minute timeout per task
+                    if result.get('status') in ['success', 'skipped']:
                         success_count += 1
                     else:
                         error_count += 1
-                        logger.warning(f"Failed to update {vulnerability.vulnerability_id}: {result.get('error', 'Unknown error')}")
-                    
-                    # Wait a bit to be respectful to external APIs
-                    time.sleep(0.5)
-                    
+                        logger.warning(f"Task failed: {result.get('error', 'Unknown error')}")
                 except Exception as e:
-                    logger.error(f"Error processing vulnerability {vulnerability.vulnerability_id}: {str(e)}")
+                    logger.error(f"Task failed with exception: {str(e)}")
                     error_count += 1
-                    continue
             
             batch_time = time.time() - batch_start_time
             logger.info(f"Completed batch in {batch_time:.2f}s")
@@ -1539,18 +1531,33 @@ def update_critical_vulnerability_details():
         success_count = 0
         error_count = 0
         
-        for vulnerability in vulnerabilities:
-            try:
-                result = update_vulnerability_details.delay(str(vulnerability.uuid))
+        # Process in batches for better performance
+        BATCH_SIZE = 50
+        batch_tasks = []
+        
+        for i in range(0, total_vulnerabilities, BATCH_SIZE):
+            batch = vulnerabilities[i:i + BATCH_SIZE]
+            
+            # Schedule tasks for this batch
+            for vulnerability in batch:
+                task = update_vulnerability_details.delay(str(vulnerability.uuid))
+                batch_tasks.append(task)
                 processed_count += 1
-                
-                # Shorter delay for critical vulnerabilities
-                time.sleep(0.2)
-                
-            except Exception as e:
-                logger.error(f"Error processing critical vulnerability {vulnerability.vulnerability_id}: {str(e)}")
-                error_count += 1
-                continue
+            
+            # Wait for batch to complete
+            for task in batch_tasks:
+                try:
+                    result = task.get(timeout=300)  # 5 minute timeout
+                    if result.get('status') in ['success', 'skipped']:
+                        success_count += 1
+                    else:
+                        error_count += 1
+                        logger.warning(f"Critical vulnerability update failed: {result.get('error', 'Unknown error')}")
+                except Exception as e:
+                    logger.error(f"Critical vulnerability task failed: {str(e)}")
+                    error_count += 1
+            
+            batch_tasks = []  # Reset for next batch
 
         total_time = time.time() - start_time
         logger.info(f"Critical vulnerability update completed in {total_time:.2f}s")
@@ -1623,8 +1630,8 @@ def update_vulnerability_details_bulk(vulnerability_uuids: List[str], batch_size
     start_time = time.time()
     
     try:
-        # Get vulnerabilities
-        vulnerabilities = Vulnerability.objects.filter(uuid__in=vulnerability_uuids)
+        # Get vulnerabilities with select_related to optimize queries
+        vulnerabilities = Vulnerability.objects.filter(uuid__in=vulnerability_uuids).select_related()
         total_count = vulnerabilities.count()
         
         logger.info(f"Starting bulk update for {total_count} vulnerabilities")
@@ -1645,22 +1652,19 @@ def update_vulnerability_details_bulk(vulnerability_uuids: List[str], batch_size
                 from .utils.vulnerability_sources import collect_vulnerability_data_bulk
                 bulk_data = collect_vulnerability_data_bulk(batch_cve_ids)
                 
-                # Update database
+                # Update database with transaction for atomicity
                 with transaction.atomic():
                     for vulnerability in batch_vulnerabilities:
                         try:
                             cve_details, exploit_info = bulk_data.get(vulnerability.vulnerability_id, (None, None))
                             
-                            # Get or create vulnerability details
-                            try:
-                                details = vulnerability.details
-                                created = False
-                            except VulnerabilityDetails.DoesNotExist:
-                                details = VulnerabilityDetails.objects.create(
-                                    vulnerability=vulnerability,
-                                    data_source='manual'
-                                )
-                                created = True
+                            # Use get_or_create to avoid race conditions
+                            details, created = VulnerabilityDetails.objects.get_or_create(
+                                vulnerability=vulnerability,
+                                defaults={
+                                    'data_source': 'manual'
+                                }
+                            )
                             
                             # Determine data source
                             data_sources = []
@@ -1706,8 +1710,8 @@ def update_vulnerability_details_bulk(vulnerability_uuids: List[str], batch_size
                 
                 processed_count += len(batch_vulnerabilities)
                 
-                # Rate limiting between batches
-                time.sleep(2)
+                # Rate limiting between batches (reduced for better performance)
+                time.sleep(1)
                 
             except Exception as e:
                 logger.error(f"Error processing batch {i//batch_size + 1}: {str(e)}")
