@@ -1133,6 +1133,96 @@ def scan_image_with_grype(self, image_uuid: str):
             pass
         self.retry(exc=e, countdown=60 * (2 ** self.request.retries))
 
+@celery_app.task(name="Rescan All Images with SBOM")
+def rescan_all_images_with_sbom():
+    """
+    Re-analyze all images that have SBOM data using Grype.
+    This task will process images one by one and wait for each to complete.
+    """
+    from .models import Image
+    from django.db.models import Q
+    import time
+
+    logger.info("Starting mass rescan of all images with SBOM")
+    start_time = time.time()
+
+    try:
+        # Get all images that have SBOM data and are not currently being processed
+        images = Image.objects.filter(
+            Q(sbom_data__isnull=False) & 
+            ~Q(sbom_data={}) &
+            ~Q(scan_status__in=['in_process', 'pending'])
+        ).order_by('updated_at')
+
+        total_images = images.count()
+        logger.info(f"Found {total_images} images with SBOM data to rescan")
+
+        if total_images == 0:
+            logger.info("No images with SBOM data found")
+            return {
+                "status": "success",
+                "task_name": "Rescan All Images with SBOM",
+                "message": "No images with SBOM data found",
+                "images_processed": 0,
+                "processing_time": 0
+            }
+
+        processed_count = 0
+        error_count = 0
+        current_image = 0
+
+        for image in images:
+            current_image += 1
+            remaining = total_images - current_image + 1
+            
+            logger.info(f"[{current_image}/{total_images}] Processing image {image.uuid} ({image.name})")
+            logger.info(f"Remaining images: {remaining}")
+            
+            try:
+                # Run Grype scan for this image and wait for completion
+                logger.info(f"Starting Grype scan for image {image.name}")
+                result = scan_image_with_grype.apply_async(args=[str(image.uuid)])
+                
+                # Wait for the task to complete
+                task_result = result.get(timeout=300)  # 5 minutes timeout per image
+                
+                if task_result.get('status') == 'success':
+                    processed_count += 1
+                    logger.info(f"✅ Successfully processed image {image.name}")
+                else:
+                    error_count += 1
+                    logger.error(f"❌ Failed to process image {image.name}: {task_result.get('error', 'Unknown error')}")
+                
+            except Exception as e:
+                error_count += 1
+                logger.error(f"❌ Error processing image {image.uuid} ({image.name}): {str(e)}")
+                continue
+
+        total_time = time.time() - start_time
+        logger.info(f"🎉 Mass rescan completed in {total_time:.2f} seconds")
+        logger.info(f"📊 Summary:")
+        logger.info(f"   - Total images found: {total_images}")
+        logger.info(f"   - Successfully processed: {processed_count}")
+        logger.info(f"   - Errors: {error_count}")
+        logger.info(f"   - Processing time: {total_time:.2f} seconds")
+
+        return {
+            "status": "success",
+            "task_name": "Rescan All Images with SBOM",
+            "total_images": total_images,
+            "images_processed": processed_count,
+            "errors": error_count,
+            "processing_time": total_time
+        }
+
+    except Exception as e:
+        logger.error(f"❌ Error in mass rescan task: {str(e)}")
+        return {
+            "status": "error",
+            "task_name": "Rescan All Images with SBOM",
+            "error": str(e)
+        }
+
 @celery_app.task(name="Scan Repository Tags")
 def scan_repository_tags(repository_uuid: str):
     """

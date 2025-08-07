@@ -2206,3 +2206,20 @@ class TestTaskViewSet(viewsets.ViewSet):
                 {'error': str(e)}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
+
+    @action(detail=False, methods=['post'])
+    def rescan_all_images_with_sbom(self, request):
+        """Re-analyze all images that have SBOM data using Grype"""
+        from .tasks import rescan_all_images_with_sbom
+        
+        try:
+            result = rescan_all_images_with_sbom.delay()
+            return Response({
+                'message': 'Mass rescan of all images with SBOM started',
+                'task_id': result.id
+            })
+        except Exception as e:
+            return Response(
+                {'error': str(e)}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
