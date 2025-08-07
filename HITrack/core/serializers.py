@@ -654,7 +654,8 @@ class TaskResultSerializer(serializers.ModelSerializer):
     
     def get_task_name(self, obj):
         """Extract task name from task_id or result"""
-        if obj.task_name:
+        # First check if task_name is set and not None/empty
+        if obj.task_name and obj.task_name != 'None' and obj.task_name.strip():
             return obj.task_name
         
         # Try to extract from result if available
@@ -764,8 +765,18 @@ class TaskResultListSerializer(serializers.ModelSerializer):
         fields = ['task_id', 'task_name', 'status', 'result_summary', 'duration', 'created']
     
     def get_task_name(self, obj):
-        if obj.task_name:
+        # First check if task_name is set and not None/empty
+        if obj.task_name and obj.task_name != 'None' and obj.task_name.strip():
             return obj.task_name
+        
+        # Try to extract from result if available
+        if obj.result:
+            try:
+                result_data = json.loads(obj.result)
+                if isinstance(result_data, dict) and 'task_name' in result_data:
+                    return result_data['task_name']
+            except (json.JSONDecodeError, TypeError):
+                pass
         
         # Try to extract from task_id or other fields
         if hasattr(obj, 'task_id') and obj.task_id:

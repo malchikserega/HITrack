@@ -315,7 +315,7 @@ class RepositoryViewSet(BaseViewSet):
         
         try:
             from .tasks import scan_repository_tags
-            scan_repository_tags.delay(str(repository.uuid))
+            scan_repository_tags.apply_async(args=[str(repository.uuid)], task_name="Scan Repository Tags")
             return Response({
                 'status': 'success',
                 'message': 'Repository tags scan scheduled successfully'
@@ -426,7 +426,7 @@ class RepositoryTagViewSet(BaseViewSet):
         
         try:
             from .tasks import process_single_tag
-            process_single_tag.delay(str(tag.uuid))
+            process_single_tag.apply_async(args=[str(tag.uuid)], task_name="Process Single Tag")
             return Response({
                 'status': 'success',
                 'message': 'Tag processing scheduled successfully'
@@ -457,9 +457,12 @@ class RepositoryTagViewSet(BaseViewSet):
                 image.save()
                 repo_tag = image.repository_tags.first()
                 art_type = repo_tag.repository.repository_type if repo_tag else 'docker'
-                generate_sbom_and_create_components.delay(
-                    image_uuid=str(image.uuid),
-                    art_type=art_type
+                generate_sbom_and_create_components.apply_async(
+                    kwargs={
+                        'image_uuid': str(image.uuid),
+                        'art_type': art_type
+                    },
+                    task_name="Generate SBOM and Create Components"
                 )
                 started += 1
         return Response({
@@ -1986,8 +1989,8 @@ class TestTaskViewSet(viewsets.ViewSet):
         from .tasks import test_task
         
         try:
-            result = test_task.delay()
-        except Exception as e:
+            # Use apply_async with explicit task name
+            result = test_task.apply_async(task_name="Test Task")
             return Response({
                 'message': 'Test task started',
                 'task_id': result.id
@@ -2004,7 +2007,8 @@ class TestTaskViewSet(viewsets.ViewSet):
         from .tasks import test_failing_task
         
         try:
-            result = test_failing_task.delay()
+            # Use apply_async with explicit task name
+            result = test_failing_task.apply_async(task_name="Test Failing Task")
             return Response({
                 'message': 'Failing test task started',
                 'task_id': result.id

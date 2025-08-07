@@ -327,6 +327,14 @@ def scan_repository(repository_name: str, repository_url: str, scan_option: str)
         repository.last_scanned = datetime.now()
         repository.save()
         logger.info(f"Successfully scanned repository {repository_name}")
+        
+        return {
+            "status": "success",
+            "message": f"Successfully scanned repository {repository_name}",
+            "task_name": "Scan Repository",
+            "repository_name": repository_name,
+            "tags_processed": len(tags_to_scan)
+        }
 
     except Exception as e:
         logger.error(f"Error scanning repository {repository_name}: {str(e)}")
@@ -438,6 +446,7 @@ def process_all_tags():
 
     return {
         "status": "completed",
+        "task_name": "Process All Tags",
         "results": results
     }
 
@@ -647,6 +656,7 @@ def parse_sbom_and_create_components(image_uuid: str):
 
         return {
             "status": "success",
+            "task_name": "Parse SBOM and Create Components",
             "image_uuid": str(image_uuid),
             "components_created": components_created,
             "components_updated": components_updated,
@@ -775,6 +785,7 @@ def update_components_latest_versions(image_uuid: str):
         logger.info(f"Updated latest versions for {updated_count} component versions")
         return {
             "status": "success",
+            "task_name": "Update Components Latest Versions",
             "image_uuid": str(image_uuid),
             "component_versions_updated": updated_count,
             "processing_time": total_time
@@ -966,6 +977,7 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
         logger.info(f"Successfully processed Grype scan results for image {image_uuid}")
         return {
             "status": "success",
+            "task_name": "Process Grype Scan Results",
             "image_uuid": str(image_uuid),
             "vulnerabilities_processed": len(matches)
         }
@@ -1064,6 +1076,7 @@ def scan_image_with_grype(self, image_uuid: str):
             logger.info(f"Successfully scanned image {image_uuid} with Grype")
             return {
                 "status": "success",
+                "task_name": "Scan Image with Grype",
                 "image_uuid": str(image_uuid)
             }
 
@@ -1159,9 +1172,21 @@ def scan_repository_tags(repository_uuid: str):
         repository.last_scanned = datetime.now()
         repository.save()
         logger.info(f"Successfully completed repository tags scan for {repository.name}")
+        
+        return {
+            "status": "success",
+            "task_name": "Scan Repository Tags",
+            "repository_name": repository.name,
+            "tags_processed": len(all_tags)
+        }
 
     except Repository.DoesNotExist:
         logger.error(f"Repository with UUID {repository_uuid} not found")
+        return {
+            "status": "error",
+            "task_name": "Scan Repository Tags",
+            "error": f"Repository with UUID {repository_uuid} not found"
+        }
     except Exception as e:
         logger.error(f"Error scanning repository {repository_uuid}: {str(e)}")
         try:
@@ -1170,6 +1195,11 @@ def scan_repository_tags(repository_uuid: str):
             repository.save()
         except Exception:
             pass
+        return {
+            "status": "error",
+            "task_name": "Scan Repository Tags",
+            "error": str(e)
+        }
 
 @celery_app.task(name="Process Single Tag")
 def process_single_tag(tag_uuid: str):
@@ -1277,6 +1307,7 @@ def process_single_tag(tag_uuid: str):
 
         return {
             "status": "success",
+            "task_name": "Process Single Tag",
             "tag_uuid": str(tag_uuid),
             "repository": tag.repository.name,
             "tag": tag.tag,
@@ -1310,7 +1341,12 @@ def delete_old_repository_tags(days: int = 1):
     from .models import RepositoryTag
     cutoff = timezone.now() - timedelta(days=days)
     deleted_count, _ = RepositoryTag.objects.filter(created_at__lt=cutoff).delete()
-    return f"Deleted {deleted_count} old repository tags older than {days} days"
+    return {
+        "status": "success",
+        "task_name": "Delete Old Repository Tags",
+        "deleted_count": deleted_count,
+        "message": f"Deleted {deleted_count} old repository tags older than {days} days"
+    }
 
 @celery_app.task(name="Update Vulnerability Details")
 def update_vulnerability_details(vulnerability_uuid: str):
@@ -1397,6 +1433,7 @@ def update_vulnerability_details(vulnerability_uuid: str):
 
         return {
             "status": "success",
+            "task_name": "Update Vulnerability Details",
             "vulnerability_id": vulnerability.vulnerability_id,
             "created": created,
             "processing_time": processing_time,
@@ -1480,6 +1517,7 @@ def update_all_vulnerability_details():
 
         return {
             "status": "completed",
+            "task_name": "Update All Vulnerability Details",
             "total_vulnerabilities": total_vulnerabilities,
             "processed_count": processed_count,
             "success_count": success_count,
@@ -1491,6 +1529,7 @@ def update_all_vulnerability_details():
         logger.error(f"Error in bulk vulnerability update: {str(e)}")
         return {
             "status": "error",
+            "task_name": "Update All Vulnerability Details",
             "error": str(e)
         }
 
@@ -1564,6 +1603,7 @@ def update_critical_vulnerability_details():
 
         return {
             "status": "completed",
+            "task_name": "Update Critical Vulnerability Details",
             "total_vulnerabilities": total_vulnerabilities,
             "processed_count": processed_count,
             "success_count": success_count,
@@ -1607,6 +1647,7 @@ def cleanup_old_vulnerability_data():
         
         return {
             "status": "completed",
+            "task_name": "Cleanup Old Vulnerability Data",
             "deleted_records": deleted_count
         }
 
@@ -1802,6 +1843,7 @@ def update_cisa_kev_vulnerabilities():
             logger.info("No vulnerabilities found in CISA KEV")
             return {
                 'status': 'completed',
+                'task_name': 'Update CISA KEV Vulnerabilities',
                 'message': 'No vulnerabilities found in CISA KEV',
                 'total_vulnerabilities': 0
             }
@@ -1865,8 +1907,14 @@ def test_task():
     Simple test task for debugging
     """
     import time
+    
     time.sleep(2)  # Simulate some work
-    return {"status": "success", "message": "Test task completed successfully"}
+    
+    return {
+        'status': 'success',
+        'message': 'Test task completed successfully',
+        'task_name': 'Test Task'
+    }
 
 @celery_app.task(name="Test Failing Task")
 def test_failing_task():
