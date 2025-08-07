@@ -1927,7 +1927,11 @@ def test_failing_task():
 def update_all_components_latest_versions():
     """
     Update latest versions for all component versions in the system.
-    This task should be scheduled to run periodically (e.g., weekly).
+    This task should be scheduled to run periodically (e.g., monthly).
+    
+    Restrictions:
+    - Skips components updated within the last 30 days
+    - Processes in batches of 50 components
     """
     from .models import ComponentVersion
     import time
@@ -1943,30 +1947,17 @@ def update_all_components_latest_versions():
     try:
         # Get all component versions that need updating
         now = timezone.now()
-        # Skip components updated within the last 7 days
-        cutoff_date = now - timedelta(days=7)
-        
-        # Additional restrictions to limit the scope
-        # Only process components that have been used recently (last 30 days)
-        recent_cutoff = now - timedelta(days=30)
+        # Skip components updated within the last 30 days (month)
+        cutoff_date = now - timedelta(days=30)
         
         component_versions = ComponentVersion.objects.filter(
-            purl__isnull=False,
-            # Only process components that have been used recently
-            images__created_at__gte=recent_cutoff
+            purl__isnull=False
         ).exclude(
             latest_version_updated_at__gte=cutoff_date
-        ).distinct()
+        )
         
         total_count = component_versions.count()
-        logger.info(f"Found {total_count} component versions to process")
-        
-        # Limit total processing to avoid very long running tasks
-        MAX_COMPONENTS = 1000
-        if total_count > MAX_COMPONENTS:
-            logger.warning(f"Limiting processing to {MAX_COMPONENTS} components (found {total_count})")
-            component_versions = component_versions[:MAX_COMPONENTS]
-            total_count = MAX_COMPONENTS
+        logger.info(f"Found {total_count} component versions to process (skipping components updated within last 30 days)")
         
         # Process in batches to avoid memory issues and improve performance
         BATCH_SIZE = 50  # Reduced batch size for better memory management
@@ -1990,7 +1981,7 @@ def update_all_components_latest_versions():
                     
                     # Skip if already updated recently (double-check)
                     if (component_version.latest_version_updated_at and 
-                        (now - component_version.latest_version_updated_at).days < 7):
+                        (now - component_version.latest_version_updated_at).days < 30):
                         skipped_count += 1
                         continue
                     
