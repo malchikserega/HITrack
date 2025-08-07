@@ -103,6 +103,22 @@ class ComponentListSerializer(serializers.ModelSerializer):
         read_only_fields = ['created_at', 'updated_at', 'uuid']
 
 
+class VulnerabilityShortSerializer(serializers.ModelSerializer):
+    """Optimized serializer for vulnerabilities in component-versions context"""
+    class Meta:
+        model = Vulnerability
+        fields = ['uuid', 'vulnerability_id', 'severity', 'description']
+        read_only_fields = ['uuid']
+
+
+class ImageShortSerializer(serializers.ModelSerializer):
+    """Short serializer for images in component-versions context"""
+    class Meta:
+        model = Image
+        fields = ['uuid', 'name', 'digest']
+        read_only_fields = ['uuid']
+
+
 class ComponentVersionVulnerabilitySerializer(serializers.ModelSerializer):
     class Meta:
         model = ComponentVersionVulnerability
@@ -115,18 +131,20 @@ class ComponentVersionSerializer(serializers.ModelSerializer):
     vulnerabilities_count = serializers.SerializerMethodField()
     used_count = serializers.SerializerMethodField()
     locations = serializers.SerializerMethodField()
+    images = serializers.SerializerMethodField()
 
     class Meta:
         model = ComponentVersion
         fields = ['uuid', 'version', 'component', 'images', 'vulnerabilities', 'vulnerabilities_count', 'used_count', 'locations', 'created_at', 'updated_at']
         read_only_fields = ['created_at', 'updated_at', 'uuid']
 
-    @extend_schema_field(serializers.ListField(child=VulnerabilitySerializer()))
+    @extend_schema_field(serializers.ListField(child=VulnerabilityShortSerializer()))
     def get_vulnerabilities(self, obj):
         # Get vulnerabilities with their fix information through the through model
+        # Using optimized serializer that returns uuid, vulnerability_id, severity, and description
         vulns = []
         for cvv in obj.componentversionvulnerability_set.select_related('vulnerability').all():
-            vuln_data = VulnerabilitySerializer(cvv.vulnerability).data
+            vuln_data = VulnerabilityShortSerializer(cvv.vulnerability).data
             vuln_data['fixable'] = cvv.fixable
             vuln_data['fix'] = cvv.fix
             vulns.append(vuln_data)
@@ -139,6 +157,12 @@ class ComponentVersionSerializer(serializers.ModelSerializer):
     @extend_schema_field(serializers.IntegerField())
     def get_used_count(self, obj):
         return obj.images.count()
+
+    @extend_schema_field(serializers.ListField(child=ImageShortSerializer()))
+    def get_images(self, obj):
+        # Get images with full information for this component version
+        images = obj.images.all()
+        return ImageShortSerializer(images, many=True).data
 
     @extend_schema_field(serializers.ListField(child=ComponentLocationSerializer()))
     def get_locations(self, obj):

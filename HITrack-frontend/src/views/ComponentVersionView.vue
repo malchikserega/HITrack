@@ -207,19 +207,27 @@
                 <p class="text-grey mt-2">No images found</p>
               </div>
               
-              <div v-else class="images-grid">
-                <v-chip
-                  v-for="image in version.images"
-                  :key="typeof image === 'string' ? image : image.uuid"
-                  size="large"
-                  color="info"
-                  variant="outlined"
-                  class="image-chip"
-                  @click="goToImage(typeof image === 'string' ? image : image.uuid)"
-                >
-                  <v-icon size="small" class="mr-2">mdi-docker</v-icon>
-                  {{ typeof image === 'string' ? image : image.name || image.uuid }}
-                </v-chip>
+              <div v-else class="images-list">
+                <v-list>
+                  <v-list-item
+                    v-for="image in version.images"
+                    :key="image.uuid"
+                    @click="goToImage(image.uuid)"
+                    class="image-item"
+                  >
+                    <template v-slot:prepend>
+                      <v-icon color="info">mdi-docker</v-icon>
+                    </template>
+                    
+                    <v-list-item-title class="image-title">
+                      {{ image.name || image.digest?.substring(0, 12) || image.uuid }}
+                    </v-list-item-title>
+                    
+                    <v-list-item-subtitle class="image-subtitle">
+                      {{ image.digest?.substring(0, 20) || 'No digest' }}
+                    </v-list-item-subtitle>
+                  </v-list-item>
+                </v-list>
               </div>
             </v-card-text>
           </v-card>
@@ -500,41 +508,119 @@ onMounted(() => {
 }
 
 .vulnerability-item {
-  border-radius: 8px;
-  margin-bottom: 8px;
-  transition: all 0.2s ease;
+  border-radius: 16px;
+  margin-bottom: 16px;
+  transition: all 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  background: linear-gradient(135deg, #ffffff 0%, #fafbfc 100%);
+  border: 1px solid #e8eaed;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  overflow: hidden;
+  position: relative;
+}
+
+.vulnerability-item::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, #e3f2fd, #bbdefb, #90caf9, #64b5f6);
+  opacity: 0;
+  transition: opacity 0.4s ease;
 }
 
 .vulnerability-item:hover {
-  background: #f5f5f5;
-  transform: translateX(4px);
+  background: linear-gradient(135deg, #ffffff 0%, #f5f9ff 100%);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  border-color: #90caf9;
+}
+
+.vulnerability-item:hover::before {
+  opacity: 0.6;
+}
+
+.vulnerability-item:active {
+  transform: translateY(0);
 }
 
 .vulnerability-title {
   font-weight: 600;
   font-family: 'Courier New', monospace;
+  font-size: 0.95rem;
+  color: #37474f;
+  letter-spacing: 0.3px;
+  margin-bottom: 6px;
 }
 
 .vulnerability-subtitle {
-  color: #666;
+  color: #78909c;
   font-size: 0.875rem;
-  line-height: 1.4;
+  line-height: 1.6;
+  font-weight: 400;
+  opacity: 0.7;
 }
 
-.images-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px;
+.images-list {
+  max-height: 400px;
+  overflow-y: auto;
 }
 
-.image-chip {
+.image-item {
+  border-radius: 12px;
+  margin-bottom: 8px;
+  transition: all 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+  background: linear-gradient(135deg, #ffffff 0%, #fafbfc 100%);
+  border: 1px solid #e8eaed;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  overflow: hidden;
+  position: relative;
   cursor: pointer;
-  transition: all 0.2s ease;
 }
 
-.image-chip:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+.image-item::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, #e3f2fd, #bbdefb, #90caf9, #64b5f6);
+  opacity: 0;
+  transition: opacity 0.4s ease;
+}
+
+.image-item:hover {
+  background: linear-gradient(135deg, #ffffff 0%, #f5f9ff 100%);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  border-color: #90caf9;
+}
+
+.image-item:hover::before {
+  opacity: 0.6;
+}
+
+.image-item:active {
+  transform: translateY(0);
+}
+
+.image-title {
+  font-weight: 600;
+  color: #37474f;
+  font-size: 0.95rem;
+  letter-spacing: 0.3px;
+  margin-bottom: 4px;
+}
+
+.image-subtitle {
+  color: #78909c;
+  font-size: 0.8rem;
+  line-height: 1.4;
+  font-weight: 400;
+  opacity: 0.7;
+  font-family: 'Courier New', monospace;
 }
 
 /* Matrix theme support */
@@ -557,7 +643,51 @@ onMounted(() => {
   border-left-color: #00ff41;
 }
 
+:deep(.v-theme--matrix) .vulnerability-item {
+  background: linear-gradient(135deg, #0a0a0a 0%, #1a1a1a 100%);
+  border-color: #4caf50;
+  box-shadow: 0 1px 3px rgba(76, 175, 80, 0.08);
+}
+
 :deep(.v-theme--matrix) .vulnerability-item:hover {
-  background: #1a1a1a;
+  background: linear-gradient(135deg, #0a0a0a 0%, #1a1a1a 100%);
+  border-color: #66bb6a;
+  box-shadow: 0 3px 8px rgba(76, 175, 80, 0.15);
+}
+
+:deep(.v-theme--matrix) .vulnerability-item::before {
+  background: linear-gradient(90deg, #4caf50, #66bb6a, #81c784, #a5d6a7);
+}
+
+:deep(.v-theme--matrix) .vulnerability-title {
+  color: #81c784;
+}
+
+:deep(.v-theme--matrix) .vulnerability-subtitle {
+  color: #bdbdbd;
+}
+
+:deep(.v-theme--matrix) .image-item {
+  background: linear-gradient(135deg, #0a0a0a 0%, #1a1a1a 100%);
+  border-color: #4caf50;
+  box-shadow: 0 1px 3px rgba(76, 175, 80, 0.08);
+}
+
+:deep(.v-theme--matrix) .image-item:hover {
+  background: linear-gradient(135deg, #0a0a0a 0%, #1a1a1a 100%);
+  border-color: #66bb6a;
+  box-shadow: 0 3px 8px rgba(76, 175, 80, 0.15);
+}
+
+:deep(.v-theme--matrix) .image-item::before {
+  background: linear-gradient(90deg, #4caf50, #66bb6a, #81c784, #a5d6a7);
+}
+
+:deep(.v-theme--matrix) .image-title {
+  color: #81c784;
+}
+
+:deep(.v-theme--matrix) .image-subtitle {
+  color: #bdbdbd;
 }
 </style>

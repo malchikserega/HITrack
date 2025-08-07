@@ -7,7 +7,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ContainerRegistry, ComponentVersionVulnerability, Release, RepositoryTagRelease, VulnerabilityDetails, ComponentLocation
 from .serializers import (
     RepositorySerializer, RepositoryTagSerializer, ImageSerializer, ImageListSerializer,
-    ComponentSerializer, ComponentVersionSerializer, VulnerabilitySerializer, ComponentListSerializer,
+    ComponentSerializer, ComponentVersionSerializer, VulnerabilitySerializer, VulnerabilityShortSerializer, ComponentListSerializer,
     RepositoryListSerializer, RepositoryTagListSerializer, ComponentVersionListSerializer,
     HasACRRegistryResponseSerializer, ListACRRegistriesResponseSerializer,
     StatsResponseSerializer, JobAddRepositoriesRequestSerializer,
@@ -916,7 +916,7 @@ class ComponentVersionViewSet(BaseViewSet):
     def vulnerabilities(self, request, uuid=None):
         version = self.get_object()
         vulnerabilities = version.vulnerabilities.all()
-        serializer = VulnerabilitySerializer(vulnerabilities, many=True)
+        serializer = VulnerabilityShortSerializer(vulnerabilities, many=True)
         return Response(serializer.data)
 
     @action(detail=True, methods=['get'])
