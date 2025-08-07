@@ -809,7 +809,7 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
     Process Grype scan results for an image and update the database with vulnerability information.
     Optimized for bulk operations and safe parallel execution.
     """
-    from .models import Image, Component, ComponentVersion, Vulnerability, ComponentVersionVulnerability, VulnerabilityDetails
+    from .models import Image, Component, ComponentVersion, Vulnerability, ComponentVersionVulnerability, VulnerabilityDetails, ComponentLocation
     from django.db import IntegrityError
     import logging
 
@@ -923,6 +923,7 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
             component_version = artifact.get('version')
             purl = artifact.get('purl')
             cpes = artifact.get('cpes', [])
+            locations = artifact.get('locations', [])
 
             if component_name and component_version:
                 # Get or create component (safe for parallel)
@@ -954,6 +955,36 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
                 if not component_version_obj.images.filter(pk=image.pk).exists():
                     component_version_obj.images.add(image)
                     logger.info(f"Linked component version {component_version} to image {image.name}")
+                
+                # Process component locations
+                for location in locations:
+                    path = location.get('path', '')
+                    layer_id = location.get('layerID', '')
+                    access_path = location.get('accessPath', '')
+                    annotations = location.get('annotations', {})
+                    
+                    # Determine evidence type from annotations
+                    evidence_type = 'unknown'
+                    if annotations:
+                        evidence = annotations.get('evidence', '')
+                        if evidence == 'primary':
+                            evidence_type = 'primary'
+                        elif evidence == 'supporting':
+                            evidence_type = 'supporting'
+                    
+                    # Create or update component location
+                    ComponentLocation.objects.get_or_create(
+                        component_version=component_version_obj,
+                        image=image,
+                        path=path,
+                        defaults={
+                            'layer_id': layer_id,
+                            'access_path': access_path,
+                            'evidence_type': evidence_type,
+                            'annotations': annotations
+                        }
+                    )
+                
                 # Get or create CVV (safe for parallel)
                 cvv, _ = ComponentVersionVulnerability.objects.get_or_create(
                     component_version=component_version_obj,

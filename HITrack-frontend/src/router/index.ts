@@ -97,6 +97,24 @@ const router = createRouter({
       name: 'tasks',
       component: () => import('../views/TaskManagementView.vue'),
       meta: { requiresAuth: true }
+    },
+    {
+      path: '/images/:uuid/component-locations',
+      name: 'component-locations',
+      component: () => import('../views/ComponentLocationsView.vue'),
+      meta: { requiresAuth: true }
+    },
+    {
+      path: '/components/:uuid',
+      name: 'component-detail',
+      component: () => import('../views/ComponentDetailView.vue'),
+      meta: { requiresAuth: true }
+    },
+    {
+      path: '/component-versions/:uuid',
+      name: 'component-version',
+      component: () => import('../views/ComponentVersionView.vue'),
+      meta: { requiresAuth: true }
     }
   ]
 })

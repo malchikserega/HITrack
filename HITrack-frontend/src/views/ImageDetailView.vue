@@ -127,6 +127,30 @@
               </v-card-text>
             </v-card>
 
+            <!-- Component Locations section -->
+            <v-card class="mb-4">
+              <v-card-title class="font-weight-bold d-flex align-center">
+                <v-icon class="mr-2">mdi-map-marker</v-icon>
+                Component Locations
+                <v-spacer></v-spacer>
+                <v-btn
+                  color="primary"
+                  variant="outlined"
+                  size="small"
+                  :to="{ name: 'component-locations', params: { uuid: image.uuid } }"
+                >
+                  <v-icon class="mr-2">mdi-arrow-right</v-icon>
+                  View Locations
+                </v-btn>
+              </v-card-title>
+              <v-card-text>
+                <p class="text-body-2 text-grey">
+                  View detailed information about where each component is located within this image, 
+                  including file paths, Docker layers, and evidence types.
+                </p>
+              </v-card-text>
+            </v-card>
+
             <!-- Tabs for Components and Vulnerabilities -->
             <v-card class="mb-4">
               <v-tabs v-model="activeTab" color="primary" grow>
@@ -170,6 +194,7 @@
                       hover
                       density="comfortable"
                       :no-data-text="componentsSearch ? 'No components found matching your search' : 'No components found'"
+                      @click:row="onComponentRowClick"
                     >
                       <template v-slot:item.name="{ item }">
                         {{ item.component.name }}
@@ -765,6 +790,18 @@ const onComponentsItemsPerPageChange = (val: number) => {
 const onVulnerabilityRowClick = (event: MouseEvent, { item }: { item: Vulnerability }) => {
   if (item && item.uuid) {
     router.push({ name: 'vulnerability-detail', params: { uuid: item.uuid } })
+  }
+}
+
+const onComponentRowClick = (event: MouseEvent, { item }: { item: ComponentVersion }) => {
+  if (item && item.uuid) {
+    // Store current page info for back navigation
+    const currentRoute = router.currentRoute.value
+    const queryString = currentRoute.query ? new URLSearchParams(currentRoute.query as Record<string, string>).toString() : ''
+    const fromPage = `${currentRoute.path}${queryString ? '?' + queryString : ''}`
+    sessionStorage.setItem('fromPage', fromPage)
+    
+    router.push({ name: 'component-version', params: { uuid: item.uuid } })
   }
 }
 

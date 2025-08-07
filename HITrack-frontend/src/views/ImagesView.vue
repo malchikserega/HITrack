@@ -143,6 +143,18 @@
                     </v-tooltip>
                     <v-tooltip location="top">
                       <template #activator="{ props }">
+                        <v-icon
+                          small
+                          class="mr-2"
+                          color="success"
+                          v-bind="props"
+                          @click.stop="onViewComponentLocations(item)"
+                        >mdi-map-marker</v-icon>
+                      </template>
+                      <span>View Component Locations</span>
+                    </v-tooltip>
+                    <v-tooltip location="top">
+                      <template #activator="{ props }">
                         <v-icon small color="red" v-bind="props" @click.stop="onDelete(item)">mdi-delete</v-icon>
                       </template>
                       <span>Delete image</span>
@@ -467,6 +479,11 @@ const onRescanGrype = async (image: Image) => {
     const msg = e?.response?.data?.error || 'Failed to schedule Grype scan'
     notificationService.error(msg)
   }
+}
+
+const onViewComponentLocations = (image: Image) => {
+  if (!image.uuid) return
+  router.push({ name: 'component-locations', params: { uuid: image.uuid } })
 }
 
 const formatDigest = (digest: string) => {

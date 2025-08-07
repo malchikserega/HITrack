@@ -4,7 +4,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.generics import ListAPIView, GenericAPIView
 from django_filters.rest_framework import DjangoFilterBackend
-from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ContainerRegistry, ComponentVersionVulnerability, Release, RepositoryTagRelease, VulnerabilityDetails
+from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ContainerRegistry, ComponentVersionVulnerability, Release, RepositoryTagRelease, VulnerabilityDetails, ComponentLocation
 from .serializers import (
     RepositorySerializer, RepositoryTagSerializer, ImageSerializer, ImageListSerializer,
     ComponentSerializer, ComponentVersionSerializer, VulnerabilitySerializer, ComponentListSerializer,
@@ -14,7 +14,8 @@ from .serializers import (
     JobAddRepositoriesResponseSerializer, ImageDropdownSerializer,
     ReleaseSerializer, RepositoryTagReleaseSerializer, ReleaseAssignmentSerializer,
     VulnerabilityListSerializer, VulnerabilityDetailsSerializer,
-    TaskResultSerializer, TaskResultListSerializer, PeriodicTaskSerializer, TaskStatisticsSerializer
+    TaskResultSerializer, TaskResultListSerializer, PeriodicTaskSerializer, TaskStatisticsSerializer,
+    ComponentLocationSerializer
 )
 from django.db import models
 from .pagination import CustomPageNumberPagination
@@ -768,12 +769,55 @@ class ImageViewSet(BaseViewSet):
         except Exception as e:
             return Response({'error': str(e)}, status=500)
 
+    @action(detail=True, methods=['get'], url_path='component-locations')
+    def component_locations(self, request, uuid=None):
+        """
+        Get detailed location information for all components in an image.
+        """
+        image = self.get_object()
+        
+        # Get all component locations for this image
+        locations = ComponentLocation.objects.filter(
+            image=image
+        ).select_related('component_version', 'component_version__component')
+        
+        # Group by component version
+        component_locations = {}
+        for location in locations:
+            component_version = location.component_version
+            component_key = f"{component_version.component.name}:{component_version.version}"
+            
+            if component_key not in component_locations:
+                component_locations[component_key] = {
+                    'component_name': component_version.component.name,
+                    'component_version': component_version.version,
+                    'component_type': component_version.component.type,
+                    'purl': component_version.purl,
+                    'cpes': component_version.cpes,
+                    'locations': []
+                }
+            
+            component_locations[component_key]['locations'].append({
+                'path': location.path,
+                'layer_id': location.layer_id,
+                'access_path': location.access_path,
+                'evidence_type': location.evidence_type,
+                'annotations': location.annotations
+            })
+        
+        return Response({
+            'image_uuid': str(image.uuid),
+            'image_name': image.name,
+            'component_locations': list(component_locations.values())
+        })
+
 class ComponentViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Component.objects.all()
     filterset_fields = ['name', 'type']
     search_fields = ['name', 'type']
     ordering_fields = ['name', 'type', 'created_at', 'updated_at']
     pagination_class = CustomPageNumberPagination
+    lookup_field = 'uuid'
 
     def get_serializer_class(self):
         if self.action == 'list':
@@ -787,9 +831,69 @@ class ComponentViewSet(viewsets.ReadOnlyModelViewSet):
             'component'
         ).prefetch_related(
             'images',
-            'vulnerabilities'
+            'vulnerabilities',
+            'componentversionvulnerability_set__vulnerability'
+        ).annotate(
+            vulnerabilities_count=Count('vulnerabilities')
         ).all().order_by('-version')
         serializer = ComponentVersionSerializer(versions, many=True)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['get'])
+    def locations(self, request, uuid=None):
+        """
+        Get location information for all versions of this component.
+        """
+        component = self.get_object()
+        
+        # Get all component locations for this component
+        locations = ComponentLocation.objects.filter(
+            component_version__component=component
+        ).select_related('component_version', 'image')
+        
+        # Group by component version and image
+        location_data = []
+        for location in locations:
+            location_data.append({
+                'component_version': {
+                    'uuid': str(location.component_version.uuid),
+                    'version': location.component_version.version,
+                    'purl': location.component_version.purl,
+                    'cpes': location.component_version.cpes
+                },
+                'image': {
+                    'uuid': str(location.image.uuid),
+                    'name': location.image.name
+                },
+                'path': location.path,
+                'layer_id': location.layer_id,
+                'access_path': location.access_path,
+                'evidence_type': location.evidence_type,
+                'annotations': location.annotations
+            })
+        
+        return Response({
+            'component_uuid': str(component.uuid),
+            'component_name': component.name,
+            'component_type': component.type,
+            'locations': location_data
+        })
+
+    @action(detail=True, methods=['get'])
+    def vulnerabilities(self, request, uuid=None):
+        """
+        Get all vulnerabilities for this component across all versions.
+        """
+        component = self.get_object()
+        
+        # Get all vulnerabilities through component versions with optimized queries
+        vulnerabilities = Vulnerability.objects.filter(
+            component_versions__component=component
+        ).select_related('details').prefetch_related(
+            'component_versions__component'
+        ).distinct()
+        
+        serializer = VulnerabilitySerializer(vulnerabilities, many=True)
         return Response(serializer.data)
 
 class ComponentVersionViewSet(BaseViewSet):
@@ -814,6 +918,40 @@ class ComponentVersionViewSet(BaseViewSet):
         vulnerabilities = version.vulnerabilities.all()
         serializer = VulnerabilitySerializer(vulnerabilities, many=True)
         return Response(serializer.data)
+
+    @action(detail=True, methods=['get'])
+    def locations(self, request, uuid=None):
+        """
+        Get location information for this specific component version.
+        """
+        version = self.get_object()
+        
+        # Get all component locations for this version
+        locations = ComponentLocation.objects.filter(
+            component_version=version
+        ).select_related('image')
+        
+        # Format location data
+        location_data = []
+        for location in locations:
+            location_data.append({
+                'image': {
+                    'uuid': str(location.image.uuid),
+                    'name': location.image.name
+                },
+                'path': location.path,
+                'layer_id': location.layer_id,
+                'access_path': location.access_path,
+                'evidence_type': location.evidence_type,
+                'annotations': location.annotations
+            })
+        
+        return Response({
+            'version_uuid': str(version.uuid),
+            'version': version.version,
+            'component_name': version.component.name,
+            'locations': location_data
+        })
 
 class ReleaseViewSet(BaseViewSet):
     """

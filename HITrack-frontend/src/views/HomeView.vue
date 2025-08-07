@@ -52,6 +52,8 @@
                 :value="dashboardData.basic_stats?.images || 0"
                 icon="mdi-docker"
                 color="info"
+                :clickable="true"
+                :clickAction="viewImages"
               />
             </v-col>
             <v-col cols="12" sm="6" md="3">
@@ -60,6 +62,8 @@
                 :value="dashboardData.basic_stats?.repositories || 0"
                 icon="mdi-git"
                 color="primary"
+                :clickable="true"
+                :clickAction="viewRepositories"
               />
             </v-col>
           </v-row>
@@ -110,6 +114,8 @@
                 icon="mdi-information"
                 color="info"
                 :subtitle="`${dashboardData.security_metrics?.details_percentage || 0}% of total`"
+                :clickable="true"
+                :clickAction="viewVulnerabilitiesWithDetails"
               />
             </v-col>
           </v-row>
@@ -375,6 +381,18 @@ const viewExploitVulnerabilities = () => {
 
 const viewRansomwareVulnerabilities = () => {
   router.push('/vulnerabilities?ransomware=true')
+}
+
+const viewImages = () => {
+  router.push('/images')
+}
+
+const viewRepositories = () => {
+  router.push('/repositories')
+}
+
+const viewVulnerabilitiesWithDetails = () => {
+  router.push('/vulnerabilities?has_details=true')
 }
 
 const getStatusColor = (status: string) => {

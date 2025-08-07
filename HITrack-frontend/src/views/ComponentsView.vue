@@ -27,18 +27,30 @@
             class="elevation-1"
             hover
             density="comfortable"
+            item-value="uuid"
           >
+            <template v-slot:item.name="{ item }">
+              <div @click="onRowClick(item)" style="cursor: pointer; width: 100%; height: 100%;">
+                {{ item.name }}
+              </div>
+            </template>
             <template v-slot:item.created_at="{ item }">
-              {{ $formatDate(item.created_at) }}
+              <div @click="onRowClick(item)" style="cursor: pointer; width: 100%; height: 100%;">
+                {{ $formatDate(item.created_at) }}
+              </div>
             </template>
             <template v-slot:item.updated_at="{ item }">
-              {{ $formatDate(item.updated_at) }}
+              <div @click="onRowClick(item)" style="cursor: pointer; width: 100%; height: 100%;">
+                {{ $formatDate(item.updated_at) }}
+              </div>
             </template>
             <template v-slot:item.type="{ item }">
               <v-chip
                 size="small"
                 :color="getTypeColor(item.type)"
                 variant="tonal"
+                @click.stop="onRowClick(item)"
+                style="cursor: pointer"
               >
                 {{ item.type }}
               </v-chip>
@@ -71,6 +83,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import api from '../plugins/axios'
 import { notificationService } from '../plugins/notifications'
 import type { Component, PaginatedResponse } from '../types/interfaces'
@@ -120,7 +133,9 @@ const fetchComponents = async () => {
     const response = await api.get<PaginatedResponse<Component>>('components/', { params })
     components.value = response.data.results
     totalItems.value = response.data.count
+    console.log('Fetched components:', components.value)
   } catch (error) {
+    console.error('Error fetching components:', error)
     notificationService.error('Failed to fetch components')
   } finally {
     loading.value = false
@@ -152,6 +167,21 @@ function debounce(fn: Function, delay: number) {
 }
 
 const debouncedFetchComponents = debounce(fetchComponents, 300)
+
+const router = useRouter()
+
+const onRowClick = (event: any) => {
+  console.log('Row clicked event:', event)
+  // In Vuetify DataTable, the clicked item is passed directly as the first parameter
+  const component = event
+  console.log('Component from event:', component)
+  if (component && component.uuid) {
+    console.log('Navigating to component detail with UUID:', component.uuid)
+    router.push({ name: 'component-detail', params: { uuid: component.uuid } })
+  } else {
+    console.log('Component has no UUID or event is missing')
+  }
+}
 
 watch([
   page,
@@ -207,7 +237,8 @@ onMounted(() => {
 }
 
 :deep(.v-table .v-table__wrapper > table > tbody > tr:hover) {
-  background-color: #f5f5f5;
+  background-color: #e3f2fd;
+  cursor: pointer;
 }
 
 .v-theme--matrix :deep(.v-table .v-table__wrapper > table > thead > tr > th) {

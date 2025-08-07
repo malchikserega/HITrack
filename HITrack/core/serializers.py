@@ -1,12 +1,23 @@
 from rest_framework import serializers
 from rest_framework.validators import UniqueValidator
 from drf_spectacular.utils import extend_schema_field
-from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ComponentVersionVulnerability, Release, RepositoryTagRelease, VulnerabilityDetails
+from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ComponentVersionVulnerability, Release, RepositoryTagRelease, VulnerabilityDetails, ComponentLocation
 # Celery Task Serializers
 from django_celery_results.models import TaskResult
 from django_celery_beat.models import PeriodicTask, IntervalSchedule, CrontabSchedule
 from datetime import datetime
 import json
+
+class ComponentLocationSerializer(serializers.ModelSerializer):
+    """Serializer for component location information"""
+    class Meta:
+        model = ComponentLocation
+        fields = [
+            'uuid', 'path', 'layer_id', 'access_path', 'evidence_type', 
+            'annotations', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['uuid', 'created_at', 'updated_at']
+
 
 class VulnerabilityDetailsSerializer(serializers.ModelSerializer):
     class Meta:
@@ -101,11 +112,13 @@ class ComponentVersionVulnerabilitySerializer(serializers.ModelSerializer):
 class ComponentVersionSerializer(serializers.ModelSerializer):
     component = ComponentListSerializer(read_only=True)
     vulnerabilities = serializers.SerializerMethodField()
+    vulnerabilities_count = serializers.SerializerMethodField()
     used_count = serializers.SerializerMethodField()
+    locations = serializers.SerializerMethodField()
 
     class Meta:
         model = ComponentVersion
-        fields = ['uuid', 'version', 'component', 'images', 'vulnerabilities', 'used_count', 'created_at', 'updated_at']
+        fields = ['uuid', 'version', 'component', 'images', 'vulnerabilities', 'vulnerabilities_count', 'used_count', 'locations', 'created_at', 'updated_at']
         read_only_fields = ['created_at', 'updated_at', 'uuid']
 
     @extend_schema_field(serializers.ListField(child=VulnerabilitySerializer()))
@@ -120,8 +133,18 @@ class ComponentVersionSerializer(serializers.ModelSerializer):
         return vulns
 
     @extend_schema_field(serializers.IntegerField())
+    def get_vulnerabilities_count(self, obj):
+        return obj.vulnerabilities.count()
+
+    @extend_schema_field(serializers.IntegerField())
     def get_used_count(self, obj):
         return obj.images.count()
+
+    @extend_schema_field(serializers.ListField(child=ComponentLocationSerializer()))
+    def get_locations(self, obj):
+        # Get locations for this component version
+        locations = ComponentLocation.objects.filter(component_version=obj).select_related('image')
+        return ComponentLocationSerializer(locations, many=True).data
 
 
 class ComponentSerializer(serializers.ModelSerializer):

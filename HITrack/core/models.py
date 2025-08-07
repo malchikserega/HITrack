@@ -275,3 +275,48 @@ class RepositoryTagRelease(models.Model):
 
     def __str__(self):
         return f"{self.repository_tag} -> {self.release}"
+
+
+class ComponentLocation(models.Model):
+    """
+    Model to store location information for components found in images.
+    This includes file paths, layer information, and access paths from Grype scan results.
+    """
+    uuid = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    component_version = models.ForeignKey(ComponentVersion, on_delete=models.CASCADE, related_name='locations')
+    image = models.ForeignKey(Image, on_delete=models.CASCADE, related_name='component_locations')
+    
+    # Location information from Grype
+    path = models.CharField(max_length=512, help_text='File path where component was found')
+    layer_id = models.CharField(max_length=255, blank=True, null=True, help_text='Docker layer ID')
+    access_path = models.CharField(max_length=512, blank=True, null=True, help_text='Access path to the component')
+    
+    # Evidence information
+    evidence_type = models.CharField(
+        max_length=32,
+        choices=[
+            ('primary', 'Primary Evidence'),
+            ('supporting', 'Supporting Evidence'),
+            ('unknown', 'Unknown')
+        ],
+        default='unknown',
+        help_text='Type of evidence for this location'
+    )
+    
+    # Additional metadata
+    annotations = models.JSONField(default=dict, blank=True, help_text='Additional annotations from Grype')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ['component_version', 'image', 'path']
+        verbose_name = 'Component Location'
+        verbose_name_plural = 'Component Locations'
+        indexes = [
+            models.Index(fields=['path']),
+            models.Index(fields=['layer_id']),
+            models.Index(fields=['evidence_type']),
+        ]
+
+    def __str__(self):
+        return f"{self.component_version} in {self.image.name} at {self.path}"
