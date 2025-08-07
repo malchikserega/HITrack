@@ -500,7 +500,8 @@ const onVulnerabilityClick = (event: any, item: any) => {
   
   // Store current page info for back navigation
   const currentRoute = router.currentRoute.value
-  const fromPage = `${currentRoute.path}${currentRoute.query ? '?' + new URLSearchParams(currentRoute.query).toString() : ''}`
+  const queryString = currentRoute.query ? '?' + new URLSearchParams(currentRoute.query as Record<string, string>).toString() : ''
+  const fromPage = `${currentRoute.path}${queryString}`
   sessionStorage.setItem('fromPage', fromPage)
   
   if (vulnerability && vulnerability.uuid) {
@@ -542,7 +543,8 @@ const showVersionVulnerabilitiesModal = async (version: any) => {
 const goToVersionDetail = (version: any) => {
   // Store current page info for back navigation
   const currentRoute = router.currentRoute.value
-  const fromPage = `${currentRoute.path}${currentRoute.query ? '?' + new URLSearchParams(currentRoute.query).toString() : ''}`
+  const queryString = currentRoute.query ? '?' + new URLSearchParams(currentRoute.query as Record<string, string>).toString() : ''
+  const fromPage = `${currentRoute.path}${queryString}`
   sessionStorage.setItem('fromPage', fromPage)
   
   router.push({ name: 'component-version', params: { uuid: version.uuid } })

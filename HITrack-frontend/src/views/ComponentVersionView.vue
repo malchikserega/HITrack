@@ -280,7 +280,8 @@ const goBack = () => {
 const onVulnerabilityClick = (vulnerability: any) => {
   // Store current page info for back navigation
   const currentRoute = router.currentRoute.value
-  const fromPage = `${currentRoute.path}${currentRoute.query ? '?' + new URLSearchParams(currentRoute.query).toString() : ''}`
+  const queryString = currentRoute.query ? '?' + new URLSearchParams(currentRoute.query as Record<string, string>).toString() : ''
+  const fromPage = `${currentRoute.path}${queryString}`
   sessionStorage.setItem('fromPage', fromPage)
   
   if (vulnerability && vulnerability.uuid) {
