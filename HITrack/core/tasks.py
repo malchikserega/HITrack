@@ -1922,3 +1922,180 @@ def test_failing_task():
     Simple test task that fails
     """
     raise Exception("This is a test failure")
+
+@celery_app.task(name="Update All Components Latest Versions")
+def update_all_components_latest_versions():
+    """
+    Update latest versions for all component versions in the system.
+    This task should be scheduled to run periodically (e.g., weekly).
+    """
+    from .models import ComponentVersion
+    import time
+    import requests
+    import subprocess
+    from packaging.version import parse as parse_version
+    from django.utils import timezone
+    from datetime import timedelta
+
+    logger.info("Starting latest versions update for all components")
+    start_time = time.time()
+
+    try:
+        # Get all component versions that need updating
+        now = timezone.now()
+        # Skip components updated within the last 7 days
+        cutoff_date = now - timedelta(days=7)
+        
+        # Additional restrictions to limit the scope
+        # Only process components that have been used recently (last 30 days)
+        recent_cutoff = now - timedelta(days=30)
+        
+        component_versions = ComponentVersion.objects.filter(
+            purl__isnull=False,
+            # Only process components that have been used recently
+            images__created_at__gte=recent_cutoff
+        ).exclude(
+            latest_version_updated_at__gte=cutoff_date
+        ).distinct()
+        
+        total_count = component_versions.count()
+        logger.info(f"Found {total_count} component versions to process")
+        
+        # Limit total processing to avoid very long running tasks
+        MAX_COMPONENTS = 1000
+        if total_count > MAX_COMPONENTS:
+            logger.warning(f"Limiting processing to {MAX_COMPONENTS} components (found {total_count})")
+            component_versions = component_versions[:MAX_COMPONENTS]
+            total_count = MAX_COMPONENTS
+        
+        # Process in batches to avoid memory issues and improve performance
+        BATCH_SIZE = 50  # Reduced batch size for better memory management
+        updated_count = 0
+        skipped_count = 0
+        error_count = 0
+        
+        for i in range(0, total_count, BATCH_SIZE):
+            batch = component_versions[i:i + BATCH_SIZE]
+            batch_start_time = time.time()
+            current_batch = i//BATCH_SIZE + 1
+            total_batches = (total_count + BATCH_SIZE - 1)//BATCH_SIZE
+            
+            logger.info(f"Processing batch {current_batch}/{total_batches} ({len(batch)} components)")
+            
+            for component_version in batch:
+                try:
+                    if not component_version.purl:
+                        skipped_count += 1
+                        continue
+                    
+                    # Skip if already updated recently (double-check)
+                    if (component_version.latest_version_updated_at and 
+                        (now - component_version.latest_version_updated_at).days < 7):
+                        skipped_count += 1
+                        continue
+                    
+                    logger.debug(f"Processing component version {component_version.component.name}:{component_version.version}")
+                    parts = component_version.purl.split("/")
+                    if len(parts) < 2:
+                        skipped_count += 1
+                        continue
+                    
+                    package_type = parts[0].split(":")[1] if ":" in parts[0] else None
+                    if not package_type:
+                        skipped_count += 1
+                        continue
+                    
+                    package_name = parts[1].lower()
+                    if len(parts) > 2:
+                        package_name = f"{package_name}/{parts[2].lower()}"
+                    if "@" in package_name:
+                        package_name = package_name.split("@")[0]
+                    
+                    logger.debug(f"Processing PURL: {component_version.purl}")
+                    logger.debug(f"Package type: {package_type}, Package name: {package_name}")
+                    
+                    latest_version = None
+                    if package_type == "pypi":
+                        url = f"https://pypi.org/pypi/{package_name}/json"
+                        r = requests.get(url, timeout=5)
+                        if r.ok:
+                            latest_version = r.json()["info"]["version"]
+                    elif package_type == "npm":
+                        url = f"https://registry.npmjs.org/{package_name}"
+                        r = requests.get(url, timeout=5)
+                        if r.ok:
+                            latest_version = r.json()["dist-tags"]["latest"]
+                    elif package_type == "nuget":
+                        url = f"https://api.nuget.org/v3-flatcontainer/{package_name}/index.json"
+                        r = requests.get(url, timeout=5)
+                        if r.ok:
+                            versions = r.json().get("versions", [])
+                            latest_version = versions[-1] if versions else None
+                    elif package_type == "deb":
+                        try:
+                            output = subprocess.check_output(["apt-cache", "policy", package_name], text=True, timeout=5)
+                            for line in output.splitlines():
+                                if "Candidate:" in line:
+                                    latest_version = line.split(":")[1].strip()
+                                    break
+                        except Exception:
+                            continue
+                    elif package_type == "golang":
+                        if package_name == "stdlib":
+                            url = "https://golang.org/dl/?mode=json"
+                            r = requests.get(url, timeout=5)
+                            if r.ok:
+                                versions = r.json()
+                                stable_versions = [v['version'] for v in versions if not v['version'].endswith('beta') and not v['version'].endswith('rc')]
+                                if stable_versions:
+                                    latest_version = max(stable_versions).replace('go', '')
+                        else:
+                            url = f"https://proxy.golang.org/{package_name}/@latest"
+                            r = requests.get(url, timeout=5)
+                            if r.ok:
+                                data = r.json()
+                                latest_version = data.get('Version', '').replace('v', '')
+                    
+                    if latest_version:
+                        component_version.latest_version = latest_version
+                        component_version.latest_version_updated_at = now
+                        component_version.save()
+                        updated_count += 1
+                        logger.info(
+                            f"Updated latest version for {component_version.component.name}:{component_version.version} to {latest_version}"
+                        )
+                    else:
+                        skipped_count += 1
+                        
+                except Exception as e:
+                    error_count += 1
+                    logger.error(
+                        f"Error processing component version {component_version.component.name}:{component_version.version}: {str(e)}"
+                    )
+                    continue
+            
+            # Log batch completion
+            batch_time = time.time() - batch_start_time
+            logger.info(f"Completed batch {current_batch}/{total_batches} in {batch_time:.2f}s")
+        
+        total_time = time.time() - start_time
+        logger.info(f"All components latest versions update completed in {total_time:.2f} seconds")
+        logger.info(f"Updated: {updated_count}, Skipped: {skipped_count}, Errors: {error_count}")
+
+        return {
+            "status": "success",
+            "task_name": "Update All Components Latest Versions",
+            "total_processed": total_count,
+            "updated_count": updated_count,
+            "skipped_count": skipped_count,
+            "error_count": error_count,
+            "processing_time": total_time
+        }
+
+    except Exception as e:
+        logger.error(f"Error updating all components latest versions: {str(e)}")
+        return {
+            "status": "error",
+            "task_name": "Update All Components Latest Versions",
+            "error": str(e)
+        }

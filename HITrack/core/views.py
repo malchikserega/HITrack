@@ -1696,6 +1696,7 @@ class TaskManagementViewSet(BaseViewSet):
     search_fields = ['task_id', 'task_name']
     ordering_fields = ['date_created', 'date_done', 'status']
     ordering = ['-date_created']
+    lookup_field = 'task_id'
     
     def get_serializer_class(self):
         """Use different serializers for list and detail views"""
@@ -1883,16 +1884,9 @@ class TaskManagementViewSet(BaseViewSet):
         
         return Response(data)
     
-    @action(detail=False, methods=['post'])
-    def retry_task(self, request):
+    @action(detail=True, methods=['post'])
+    def retry_task(self, request, task_id=None):
         """Retry a failed task"""
-        task_id = request.data.get('task_id')
-        if not task_id:
-            return Response(
-                {'error': 'task_id is required'}, 
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
         try:
             task = TaskResult.objects.get(task_id=task_id)
             if task.status != 'FAILURE':
@@ -1925,6 +1919,45 @@ class TaskManagementViewSet(BaseViewSet):
             return Response(
                 {'error': 'Task not found'}, 
                 status=status.HTTP_404_NOT_FOUND
+            )
+
+    @action(detail=True, methods=['post'])
+    def stop_task(self, request, task_id=None):
+        """Stop a running task"""
+        try:
+            # Get the task result
+            task_result = TaskResult.objects.get(task_id=task_id)
+            
+            # Check if task is running
+            if task_result.status not in ['STARTED', 'PENDING']:
+                return Response(
+                    {'error': f'Task is in {task_result.status} state and cannot be stopped'}, 
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Revoke the task in Celery
+            from celery import current_app
+            current_app.control.revoke(task_id, terminate=True)
+            
+            # Update the task status in database
+            task_result.status = 'REVOKED'
+            task_result.save()
+            
+            return Response({
+                'message': 'Task stopped successfully',
+                'task_id': task_id,
+                'status': 'REVOKED'
+            })
+            
+        except TaskResult.DoesNotExist:
+            return Response(
+                {'error': 'Task not found'}, 
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to stop task: {str(e)}'}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
 class PeriodicTaskViewSet(viewsets.ReadOnlyModelViewSet):
@@ -2011,6 +2044,23 @@ class TestTaskViewSet(viewsets.ViewSet):
             result = test_failing_task.apply_async(task_name="Test Failing Task")
             return Response({
                 'message': 'Failing test task started',
+                'task_id': result.id
+            })
+        except Exception as e:
+            return Response(
+                {'error': str(e)}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+    @action(detail=False, methods=['post'])
+    def update_all_components_latest_versions(self, request):
+        """Update latest versions for all components in the system"""
+        from .tasks import update_all_components_latest_versions
+        
+        try:
+            result = update_all_components_latest_versions.delay()
+            return Response({
+                'message': 'All components latest versions update started',
                 'task_id': result.id
             })
         except Exception as e:
