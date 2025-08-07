@@ -1773,19 +1773,46 @@ class TaskManagementViewSet(BaseViewSet):
             if task.date_done and task.date_created:
                 duration = (task.date_done - task.date_created).total_seconds()
             
-            # Get proper task name
-            task_name = task.task_name
-            if not task_name:
-                try:
-                    from celery import current_app
-                    task_func = current_app.tasks.get(task.task_id)
-                    if task_func:
-                        task_name = task_func.name
-                except:
-                    pass
-            
-            if not task_name:
-                task_name = f"Task-{task.task_id[:8]}" if task.task_id else 'Unknown'
+                    # Get proper task name
+        task_name = task.task_name
+        if not task_name:
+            try:
+                from celery import current_app
+                task_func = current_app.tasks.get(task.task_id)
+                if task_func:
+                    task_name = task_func.name
+            except:
+                pass
+        
+        if not task_name:
+            # Try to extract from task_id by looking for known patterns
+            if task.task_id:
+                if 'generate_sbom' in task.task_id or 'sbom' in task.task_id:
+                    task_name = "Generate SBOM and Create Components"
+                elif 'scan' in task.task_id and 'grype' in task.task_id:
+                    task_name = "Scan Image with Grype"
+                elif 'vulnerability' in task.task_id and 'update' in task.task_id:
+                    task_name = "Update Vulnerability Details"
+                elif 'process' in task.task_id and 'tag' in task.task_id:
+                    task_name = "Process Single Tag"
+                elif 'repository' in task.task_id and 'scan' in task.task_id:
+                    task_name = "Scan Repository"
+                elif 'parse' in task.task_id and 'sbom' in task.task_id:
+                    task_name = "Parse SBOM and Create Components"
+                elif 'update' in task.task_id and 'component' in task.task_id:
+                    task_name = "Update Components Latest Versions"
+                elif 'process' in task.task_id and 'grype' in task.task_id:
+                    task_name = "Process Grype Scan Results"
+                elif 'cleanup' in task.task_id:
+                    task_name = "Cleanup Old Vulnerability Data"
+                elif 'cisa' in task.task_id or 'kev' in task.task_id:
+                    task_name = "Update CISA KEV Vulnerabilities"
+                elif 'test' in task.task_id:
+                    task_name = "Test Task"
+                else:
+                    task_name = f"Task-{task.task_id[:8]}"
+            else:
+                task_name = 'Unknown'
             
             recent_tasks_data.append({
                 'task_id': task.task_id,
@@ -1960,6 +1987,7 @@ class TestTaskViewSet(viewsets.ViewSet):
         
         try:
             result = test_task.delay()
+        except Exception as e:
             return Response({
                 'message': 'Test task started',
                 'task_id': result.id

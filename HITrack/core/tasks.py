@@ -17,7 +17,7 @@ DOCKER_IMAGE_REGEX = re.compile(r'^[a-zA-Z0-9._/-]+(:[a-zA-Z0-9._-]+)?$')
 def is_safe_image_ref(image_ref: str) -> bool:
     return bool(DOCKER_IMAGE_REGEX.match(image_ref)) and len(image_ref) < 200
 
-@celery_app.task(bind=True, max_retries=1)
+@celery_app.task(bind=True, max_retries=1, name="Generate SBOM and Create Components")
 def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="docker"):
     """
     Generate SBOM data for an image using Syft.
@@ -173,7 +173,7 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
             pass
         self.retry(exc=e, countdown=60 * (2 ** self.request.retries))
 
-@celery_app.task()
+@celery_app.task(name="Periodic Repository Scan")
 def periodic_repository_scan():
     """
     Periodic task that scans all active repositories for new tags.
@@ -257,7 +257,7 @@ def periodic_repository_scan():
         "results": results
     }
 
-@celery_app.task()
+@celery_app.task(name="Scan Repository")
 def scan_repository(repository_name: str, repository_url: str, scan_option: str):
     """
     Scan a repository for tags and determine its type (Helm or Docker).
@@ -335,7 +335,7 @@ def scan_repository(repository_name: str, repository_url: str, scan_option: str)
             repository.save()
         raise
 
-@celery_app.task()
+@celery_app.task(name="Process All Tags")
 def process_all_tags():
     """
     Process all tags from active repositories and create images if they don't exist.
@@ -441,7 +441,7 @@ def process_all_tags():
         "results": results
     }
 
-@celery_app.task()
+@celery_app.task(name="Parse SBOM and Create Components")
 def parse_sbom_and_create_components(image_uuid: str):
     """
     Parse SBOM data from an image and create corresponding components and component versions.
@@ -667,7 +667,7 @@ def parse_sbom_and_create_components(image_uuid: str):
             "error": str(e)
         }
 
-@celery_app.task()
+@celery_app.task(name="Update Components Latest Versions")
 def update_components_latest_versions(image_uuid: str):
     """
     Update latest versions for all component versions in an image.
@@ -792,7 +792,7 @@ def update_components_latest_versions(image_uuid: str):
             "error": str(e)
         }
 
-@celery_app.task()
+@celery_app.task(name="Process Grype Scan Results")
 def process_grype_scan_results(image_uuid: str, scan_results: dict):
     """
     Process Grype scan results for an image and update the database with vulnerability information.
@@ -989,7 +989,7 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
             "error": str(e)
         }
 
-@celery_app.task(bind=True, max_retries=1)
+@celery_app.task(bind=True, max_retries=1, name="Scan Image with Grype")
 def scan_image_with_grype(self, image_uuid: str):
     """
     Scan an image's SBOM with Grype and save the results.
@@ -1089,7 +1089,7 @@ def scan_image_with_grype(self, image_uuid: str):
             pass
         self.retry(exc=e, countdown=60 * (2 ** self.request.retries))
 
-@celery_app.task()
+@celery_app.task(name="Scan Repository Tags")
 def scan_repository_tags(repository_uuid: str):
     """
     Task that scans a single repository for new tags.
@@ -1171,7 +1171,7 @@ def scan_repository_tags(repository_uuid: str):
         except Exception:
             pass
 
-@celery_app.task()
+@celery_app.task(name="Process Single Tag")
 def process_single_tag(tag_uuid: str):
     """
     Process a single repository tag and create an image if it doesn't exist.
@@ -1302,7 +1302,7 @@ def process_single_tag(tag_uuid: str):
             "error": str(e)
         }
 
-@celery_app.task()
+@celery_app.task(name="Delete Old Repository Tags")
 def delete_old_repository_tags(days: int = 1):
     """
     Delete all RepositoryTag objects older than `days` days.
@@ -1312,7 +1312,7 @@ def delete_old_repository_tags(days: int = 1):
     deleted_count, _ = RepositoryTag.objects.filter(created_at__lt=cutoff).delete()
     return f"Deleted {deleted_count} old repository tags older than {days} days"
 
-@celery_app.task()
+@celery_app.task(name="Update Vulnerability Details")
 def update_vulnerability_details(vulnerability_uuid: str):
     """
     Update detailed information for a specific vulnerability.
@@ -1418,7 +1418,7 @@ def update_vulnerability_details(vulnerability_uuid: str):
         }
 
 
-@celery_app.task()
+@celery_app.task(name="Update All Vulnerability Details")
 def update_all_vulnerability_details():
     """
     Update detailed information for all vulnerabilities in the database.
@@ -1495,7 +1495,7 @@ def update_all_vulnerability_details():
         }
 
 
-@celery_app.task()
+@celery_app.task(name="Update Critical Vulnerability Details")
 def update_critical_vulnerability_details():
     """
     Update detailed information for critical and high severity vulnerabilities.
@@ -1579,7 +1579,7 @@ def update_critical_vulnerability_details():
         }
 
 
-@celery_app.task()
+@celery_app.task(name="Cleanup Old Vulnerability Data")
 def cleanup_old_vulnerability_data():
     """
     Clean up old vulnerability data and archive outdated information.
@@ -1618,7 +1618,7 @@ def cleanup_old_vulnerability_data():
         }
 
 
-@celery_app.task()
+@celery_app.task(name="Update Vulnerability Details (Bulk)")
 def update_vulnerability_details_bulk(vulnerability_uuids: List[str], batch_size: int = 50):
     """
     Bulk update vulnerability details for multiple vulnerabilities.
@@ -1740,7 +1740,7 @@ def update_vulnerability_details_bulk(vulnerability_uuids: List[str], batch_size
         }
 
 
-@celery_app.task()
+@celery_app.task(name="Update Critical Vulnerabilities (Bulk)")
 def update_critical_vulnerabilities_bulk():
     """
     Update details for all critical vulnerabilities using bulk processing.
@@ -1778,7 +1778,7 @@ def update_critical_vulnerabilities_bulk():
         }
 
 
-@celery_app.task()
+@celery_app.task(name="Update CISA KEV Vulnerabilities")
 def update_cisa_kev_vulnerabilities():
     """
     Update details for vulnerabilities found in CISA KEV catalog.
@@ -1859,7 +1859,7 @@ def get_vulnerability_statistics() -> Dict:
         logger.error(f"Error getting vulnerability statistics: {str(e)}")
         return {}
 
-@celery_app.task()
+@celery_app.task(name="Test Task")
 def test_task():
     """
     Simple test task for debugging
@@ -1868,7 +1868,7 @@ def test_task():
     time.sleep(2)  # Simulate some work
     return {"status": "success", "message": "Test task completed successfully"}
 
-@celery_app.task()
+@celery_app.task(name="Test Failing Task")
 def test_failing_task():
     """
     Simple test task that fails

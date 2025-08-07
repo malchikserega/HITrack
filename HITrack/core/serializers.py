@@ -677,9 +677,33 @@ class TaskResultSerializer(serializers.ModelSerializer):
             except:
                 pass
         
-        # Fallback to a more descriptive name
+        # Try to extract from task_id by looking for known patterns
         if obj.task_id:
-            return f"Task-{obj.task_id[:8]}"
+            # Check if it's a known task pattern
+            if 'generate_sbom' in obj.task_id or 'sbom' in obj.task_id:
+                return "Generate SBOM and Create Components"
+            elif 'scan' in obj.task_id and 'grype' in obj.task_id:
+                return "Scan Image with Grype"
+            elif 'vulnerability' in obj.task_id and 'update' in obj.task_id:
+                return "Update Vulnerability Details"
+            elif 'process' in obj.task_id and 'tag' in obj.task_id:
+                return "Process Single Tag"
+            elif 'repository' in obj.task_id and 'scan' in obj.task_id:
+                return "Scan Repository"
+            elif 'parse' in obj.task_id and 'sbom' in obj.task_id:
+                return "Parse SBOM and Create Components"
+            elif 'update' in obj.task_id and 'component' in obj.task_id:
+                return "Update Components Latest Versions"
+            elif 'process' in obj.task_id and 'grype' in obj.task_id:
+                return "Process Grype Scan Results"
+            elif 'cleanup' in obj.task_id:
+                return "Cleanup Old Vulnerability Data"
+            elif 'cisa' in obj.task_id or 'kev' in obj.task_id:
+                return "Update CISA KEV Vulnerabilities"
+            elif 'test' in obj.task_id:
+                return "Test Task"
+            else:
+                return f"Task-{obj.task_id[:8]}"
         
         return 'Unknown Task'
     
@@ -754,9 +778,33 @@ class TaskResultListSerializer(serializers.ModelSerializer):
             except:
                 pass
         
-        # Fallback to a more descriptive name
+        # Try to extract from task_id by looking for known patterns
         if obj.task_id:
-            return f"Task-{obj.task_id[:8]}"
+            # Check if it's a known task pattern
+            if 'generate_sbom' in obj.task_id or 'sbom' in obj.task_id:
+                return "Generate SBOM and Create Components"
+            elif 'scan' in obj.task_id and 'grype' in obj.task_id:
+                return "Scan Image with Grype"
+            elif 'vulnerability' in obj.task_id and 'update' in obj.task_id:
+                return "Update Vulnerability Details"
+            elif 'process' in obj.task_id and 'tag' in obj.task_id:
+                return "Process Single Tag"
+            elif 'repository' in obj.task_id and 'scan' in obj.task_id:
+                return "Scan Repository"
+            elif 'parse' in obj.task_id and 'sbom' in obj.task_id:
+                return "Parse SBOM and Create Components"
+            elif 'update' in obj.task_id and 'component' in obj.task_id:
+                return "Update Components Latest Versions"
+            elif 'process' in obj.task_id and 'grype' in obj.task_id:
+                return "Process Grype Scan Results"
+            elif 'cleanup' in obj.task_id:
+                return "Cleanup Old Vulnerability Data"
+            elif 'cisa' in obj.task_id or 'kev' in obj.task_id:
+                return "Update CISA KEV Vulnerabilities"
+            elif 'test' in obj.task_id:
+                return "Test Task"
+            else:
+                return f"Task-{obj.task_id[:8]}"
         
         return 'Unknown Task'
     
