@@ -2239,3 +2239,41 @@ class TestTaskViewSet(viewsets.ViewSet):
                 {'error': str(e)}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
+
+    @action(detail=False, methods=['get'])
+    def check_images_with_sbom(self, request):
+        """Check how many images have SBOM data and their scan status"""
+        from .models import Image
+        from django.db.models import Q, Count
+        
+        try:
+            # Get stats on images with SBOM
+            total_images = Image.objects.count()
+            images_with_sbom = Image.objects.filter(
+                Q(sbom_data__isnull=False) & 
+                ~Q(sbom_data={})
+            ).count()
+            
+            # Count by scan status
+            status_counts = Image.objects.filter(
+                Q(sbom_data__isnull=False) & 
+                ~Q(sbom_data={})
+            ).values('scan_status').annotate(count=Count('id'))
+            
+            status_breakdown = {item['scan_status']: item['count'] for item in status_counts}
+            
+            return Response({
+                'total_images': total_images,
+                'images_with_sbom': images_with_sbom,
+                'status_breakdown': status_breakdown,
+                'ready_for_rescan': Image.objects.filter(
+                    Q(sbom_data__isnull=False) & 
+                    ~Q(sbom_data={}) &
+                    ~Q(scan_status__in=['in_process', 'pending'])
+                ).count()
+            })
+        except Exception as e:
+            return Response(
+                {'error': str(e)}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )

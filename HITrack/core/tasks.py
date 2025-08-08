@@ -1098,6 +1098,7 @@ def scan_image_with_grype(self, image_uuid: str):
 
             # Save Grype results to image
             image.grype_data = grype_results
+            image.scan_status = 'success'  # Mark as successfully scanned
             image.save()
             logger.info(f"Saved Grype results for image {image_uuid}")
 
@@ -1173,7 +1174,7 @@ def rescan_all_images_with_sbom():
 
         for image in images:
             current_image += 1
-            remaining = total_images - current_image + 1
+            remaining = total_images - current_image
             
             logger.info(f"[{current_image}/{total_images}] Processing image {image.uuid} ({image.name})")
             logger.info(f"Remaining images: {remaining}")
@@ -1186,16 +1187,31 @@ def rescan_all_images_with_sbom():
                 # Wait for the task to complete
                 task_result = result.get(timeout=300)  # 5 minutes timeout per image
                 
-                if task_result.get('status') == 'success':
+                if task_result and task_result.get('status') == 'success':
                     processed_count += 1
                     logger.info(f"✅ Successfully processed image {image.name}")
+                elif task_result and task_result.get('status') == 'skipped':
+                    logger.info(f"⏭️ Skipped image {image.name}: {task_result.get('reason', 'Unknown reason')}")
                 else:
                     error_count += 1
-                    logger.error(f"❌ Failed to process image {image.name}: {task_result.get('error', 'Unknown error')}")
+                    error_msg = task_result.get('error', 'Unknown error') if task_result else 'No result returned'
+                    logger.error(f"❌ Failed to process image {image.name}: {error_msg}")
                 
             except Exception as e:
                 error_count += 1
                 logger.error(f"❌ Error processing image {image.uuid} ({image.name}): {str(e)}")
+                logger.error(f"Exception type: {type(e).__name__}")
+                
+                # Try to reset image status if it got stuck
+                try:
+                    image.refresh_from_db()
+                    if image.scan_status == 'in_process':
+                        image.scan_status = 'error'
+                        image.save()
+                        logger.info(f"Reset scan_status for image {image.name} from 'in_process' to 'error'")
+                except Exception as reset_error:
+                    logger.error(f"Failed to reset scan_status for image {image.name}: {str(reset_error)}")
+                
                 continue
 
         total_time = time.time() - start_time
