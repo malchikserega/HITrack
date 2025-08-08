@@ -149,6 +149,9 @@ class ComponentVersionOptimizedSerializer(serializers.ModelSerializer):
         return obj.images.count()
 
 
+
+
+
 class VulnerabilityShortSerializer(serializers.ModelSerializer):
     """Optimized serializer for vulnerabilities in component-versions context"""
     class Meta:
@@ -620,6 +623,36 @@ class ComponentShortSerializer(serializers.ModelSerializer):
         model = Component
         fields = ['uuid', 'name', 'type']
         read_only_fields = ['uuid']
+
+
+class ComponentVersionDetailOptimizedSerializer(serializers.ModelSerializer):
+    """Optimized serializer for component version detail view"""
+    component = ComponentShortSerializer(read_only=True)
+    vulnerabilities_count = serializers.SerializerMethodField()
+    used_count = serializers.SerializerMethodField()
+    locations_count = serializers.SerializerMethodField()
+    images = ImageShortSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = ComponentVersion
+        fields = [
+            'uuid', 'version', 'component', 'images', 
+            'vulnerabilities_count', 'used_count', 'locations_count',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['created_at', 'updated_at', 'uuid']
+
+    @extend_schema_field(serializers.IntegerField())
+    def get_vulnerabilities_count(self, obj):
+        return obj.vulnerabilities.count()
+
+    @extend_schema_field(serializers.IntegerField())
+    def get_used_count(self, obj):
+        return obj.images.count()
+
+    @extend_schema_field(serializers.IntegerField())
+    def get_locations_count(self, obj):
+        return obj.componentlocation_set.count()
 
 
 class ComponentVersionListSerializer(serializers.ModelSerializer):

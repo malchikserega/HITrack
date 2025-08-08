@@ -8,7 +8,7 @@ from .models import Repository, RepositoryTag, Image, Component, ComponentVersio
 from .serializers import (
     RepositorySerializer, RepositoryTagSerializer, ImageSerializer, ImageListSerializer,
     ComponentSerializer, ComponentVersionSerializer, VulnerabilitySerializer, VulnerabilityShortSerializer, ComponentListSerializer,
-    ComponentDetailOptimizedSerializer, ComponentVersionOptimizedSerializer,
+    ComponentDetailOptimizedSerializer, ComponentVersionOptimizedSerializer, ComponentVersionDetailOptimizedSerializer,
     RepositoryListSerializer, RepositoryTagListSerializer, ComponentVersionListSerializer,
     HasACRRegistryResponseSerializer, ListACRRegistriesResponseSerializer,
     StatsResponseSerializer, JobAddRepositoriesRequestSerializer,
@@ -903,11 +903,16 @@ class ComponentVersionViewSet(BaseViewSet):
 
     def get_queryset(self):
         qs = super().get_queryset()
+        if self.action == 'retrieve':
+            # Optimize for detail view - prefetch related data
+            qs = qs.select_related('component').prefetch_related('images')
         return qs.annotate(vulnerabilities_count=Count('vulnerabilities')).order_by('component__name', 'version', 'created_at')
 
     def get_serializer_class(self):
         if self.action == 'list':
             return ComponentVersionListSerializer
+        elif self.action == 'retrieve':
+            return ComponentVersionDetailOptimizedSerializer
         return ComponentVersionSerializer
 
     @action(detail=True, methods=['get'])

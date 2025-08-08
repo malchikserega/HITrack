@@ -57,7 +57,12 @@
                 <div class="stat-label">Vulnerabilities</div>
               </div>
               <div class="stat-card">
-                <div class="stat-value">{{ versionLocations.length }}</div>
+                <div class="stat-value">
+                  <span v-if="locationsLoading">
+                    <v-progress-circular size="16" width="2" indeterminate></v-progress-circular>
+                  </span>
+                  <span v-else>{{ version?.locations_count || versionLocations.length }}</span>
+                </div>
                 <div class="stat-label">Locations</div>
               </div>
             </div>
@@ -74,11 +79,20 @@
               <v-icon class="mr-2" color="primary">mdi-map-marker</v-icon>
               Locations
               <v-spacer></v-spacer>
-              <v-chip size="small" color="primary">{{ versionLocations.length }}</v-chip>
+              <v-chip size="small" color="primary">
+                <span v-if="locationsLoading">
+                  <v-progress-circular size="12" width="2" indeterminate></v-progress-circular>
+                </span>
+                <span v-else>{{ version?.locations_count || versionLocations.length }}</span>
+              </v-chip>
             </v-card-title>
             
             <v-card-text>
-              <div v-if="versionLocations.length === 0" class="empty-state">
+              <div v-if="locationsLoading" class="loading-state">
+                <v-progress-circular indeterminate color="primary" size="32"></v-progress-circular>
+                <p class="text-grey mt-2">Loading locations...</p>
+              </div>
+              <div v-else-if="versionLocations.length === 0" class="empty-state">
                 <v-icon size="48" color="grey">mdi-map-marker-off</v-icon>
                 <p class="text-grey mt-2">No locations found</p>
               </div>
@@ -142,11 +156,20 @@
               <v-icon class="mr-2" color="warning">mdi-shield-alert</v-icon>
               Vulnerabilities
               <v-spacer></v-spacer>
-              <v-chip size="small" color="warning">{{ versionVulnerabilities.length }}</v-chip>
+              <v-chip size="small" color="warning">
+                <span v-if="vulnerabilitiesLoading">
+                  <v-progress-circular size="12" width="2" indeterminate></v-progress-circular>
+                </span>
+                <span v-else>{{ version?.vulnerabilities_count || versionVulnerabilities.length }}</span>
+              </v-chip>
             </v-card-title>
             
             <v-card-text>
-              <div v-if="versionVulnerabilities.length === 0" class="empty-state">
+              <div v-if="vulnerabilitiesLoading" class="loading-state">
+                <v-progress-circular indeterminate color="primary" size="32"></v-progress-circular>
+                <p class="text-grey mt-2">Loading vulnerabilities...</p>
+              </div>
+              <div v-else-if="versionVulnerabilities.length === 0" class="empty-state">
                 <v-icon size="48" color="success">mdi-shield-check</v-icon>
                 <p class="text-grey mt-2">No vulnerabilities found</p>
               </div>
@@ -246,6 +269,8 @@ const route = useRoute()
 const router = useRouter()
 
 const loading = ref(false)
+const locationsLoading = ref(false)
+const vulnerabilitiesLoading = ref(false)
 const error = ref(null)
 const version = ref(null)
 const versionLocations = ref([])
@@ -256,22 +281,45 @@ const loadVersion = async () => {
   error.value = null
   
   try {
+    // Load main version data first - this is now optimized and includes images but not locations/vulnerabilities
     const response = await api.get(`/component-versions/${route.params.uuid}/`)
     version.value = response.data
     
-    // Load locations
-    const locationsResponse = await api.get(`/component-versions/${route.params.uuid}/locations/`)
-    versionLocations.value = locationsResponse.data.locations || []
-    
-    // Load vulnerabilities
-    const vulnerabilitiesResponse = await api.get(`/component-versions/${route.params.uuid}/vulnerabilities/`)
-    versionVulnerabilities.value = vulnerabilitiesResponse.data || []
+    // Start lazy loading locations and vulnerabilities in parallel, but don't block the UI
+    loadLocations()
+    loadVulnerabilities()
     
   } catch (err) {
     console.error('Error loading version:', err)
     error.value = 'Failed to load version details'
   } finally {
     loading.value = false
+  }
+}
+
+const loadLocations = async () => {
+  locationsLoading.value = true
+  try {
+    const locationsResponse = await api.get(`/component-versions/${route.params.uuid}/locations/`)
+    versionLocations.value = locationsResponse.data.locations || []
+  } catch (err) {
+    console.error('Error loading locations:', err)
+    versionLocations.value = []
+  } finally {
+    locationsLoading.value = false
+  }
+}
+
+const loadVulnerabilities = async () => {
+  vulnerabilitiesLoading.value = true
+  try {
+    const vulnerabilitiesResponse = await api.get(`/component-versions/${route.params.uuid}/vulnerabilities/`)
+    versionVulnerabilities.value = vulnerabilitiesResponse.data || []
+  } catch (err) {
+    console.error('Error loading vulnerabilities:', err)
+    versionVulnerabilities.value = []
+  } finally {
+    vulnerabilitiesLoading.value = false
   }
 }
 
@@ -433,7 +481,8 @@ onMounted(() => {
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
 }
 
-.empty-state {
+.empty-state,
+.loading-state {
   display: flex;
   flex-direction: column;
   align-items: center;
