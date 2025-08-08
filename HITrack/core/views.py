@@ -2231,7 +2231,25 @@ class TestTaskViewSet(viewsets.ViewSet):
         try:
             result = rescan_all_images_with_sbom.delay()
             return Response({
-                'message': 'Mass rescan of all images with SBOM started',
+                'message': 'Mass rescan of all images with SBOM started (individual tasks scheduled)',
+                'task_id': result.id,
+                'note': 'Individual scan tasks are scheduled asynchronously. Use monitor_mass_rescan_progress to track progress.'
+            })
+        except Exception as e:
+            return Response(
+                {'error': str(e)}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+    @action(detail=False, methods=['post'])
+    def monitor_mass_rescan_progress(self, request):
+        """Monitor the progress of mass rescan by checking image scan statuses"""
+        from .tasks import monitor_mass_rescan_progress
+        
+        try:
+            result = monitor_mass_rescan_progress.delay()
+            return Response({
+                'message': 'Progress monitoring started',
                 'task_id': result.id
             })
         except Exception as e:

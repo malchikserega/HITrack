@@ -1138,7 +1138,7 @@ def scan_image_with_grype(self, image_uuid: str):
 def rescan_all_images_with_sbom():
     """
     Re-analyze all images that have SBOM data using Grype.
-    This task will process images one by one and wait for each to complete.
+    This task schedules individual scans without waiting for them to complete.
     """
     from .models import Image
     from django.db.models import Q
@@ -1164,71 +1164,47 @@ def rescan_all_images_with_sbom():
                 "status": "success",
                 "task_name": "Rescan All Images with SBOM",
                 "message": "No images with SBOM data found",
-                "images_processed": 0,
+                "images_scheduled": 0,
                 "processing_time": 0
             }
 
-        processed_count = 0
+        scheduled_count = 0
         error_count = 0
-        current_image = 0
+        task_ids = []
 
-        for image in images:
-            current_image += 1
-            remaining = total_images - current_image
-            
-            logger.info(f"[{current_image}/{total_images}] Processing image {image.uuid} ({image.name})")
-            logger.info(f"Remaining images: {remaining}")
+        for idx, image in enumerate(images, 1):
+            logger.info(f"[{idx}/{total_images}] Scheduling scan for image {image.uuid} ({image.name})")
             
             try:
-                # Run Grype scan for this image and wait for completion
-                logger.info(f"Starting Grype scan for image {image.name}")
+                # Schedule Grype scan for this image (non-blocking)
                 result = scan_image_with_grype.apply_async(args=[str(image.uuid)])
-                
-                # Wait for the task to complete
-                task_result = result.get(timeout=300)  # 5 minutes timeout per image
-                
-                if task_result and task_result.get('status') == 'success':
-                    processed_count += 1
-                    logger.info(f"✅ Successfully processed image {image.name}")
-                elif task_result and task_result.get('status') == 'skipped':
-                    logger.info(f"⏭️ Skipped image {image.name}: {task_result.get('reason', 'Unknown reason')}")
-                else:
-                    error_count += 1
-                    error_msg = task_result.get('error', 'Unknown error') if task_result else 'No result returned'
-                    logger.error(f"❌ Failed to process image {image.name}: {error_msg}")
+                task_ids.append(result.id)
+                scheduled_count += 1
+                logger.info(f"✅ Scheduled scan for image {image.name} (task_id: {result.id})")
                 
             except Exception as e:
                 error_count += 1
-                logger.error(f"❌ Error processing image {image.uuid} ({image.name}): {str(e)}")
+                logger.error(f"❌ Error scheduling scan for image {image.uuid} ({image.name}): {str(e)}")
                 logger.error(f"Exception type: {type(e).__name__}")
-                
-                # Try to reset image status if it got stuck
-                try:
-                    image.refresh_from_db()
-                    if image.scan_status == 'in_process':
-                        image.scan_status = 'error'
-                        image.save()
-                        logger.info(f"Reset scan_status for image {image.name} from 'in_process' to 'error'")
-                except Exception as reset_error:
-                    logger.error(f"Failed to reset scan_status for image {image.name}: {str(reset_error)}")
-                
                 continue
 
         total_time = time.time() - start_time
-        logger.info(f"🎉 Mass rescan completed in {total_time:.2f} seconds")
+        logger.info(f"🎉 Mass rescan scheduling completed in {total_time:.2f} seconds")
         logger.info(f"📊 Summary:")
         logger.info(f"   - Total images found: {total_images}")
-        logger.info(f"   - Successfully processed: {processed_count}")
-        logger.info(f"   - Errors: {error_count}")
+        logger.info(f"   - Successfully scheduled: {scheduled_count}")
+        logger.info(f"   - Scheduling errors: {error_count}")
         logger.info(f"   - Processing time: {total_time:.2f} seconds")
+        logger.info(f"   - Task IDs: {task_ids[:5]}{'...' if len(task_ids) > 5 else ''}")
 
         return {
             "status": "success",
             "task_name": "Rescan All Images with SBOM",
             "total_images": total_images,
-            "images_processed": processed_count,
-            "errors": error_count,
-            "processing_time": total_time
+            "images_scheduled": scheduled_count,
+            "scheduling_errors": error_count,
+            "processing_time": total_time,
+            "task_ids": task_ids
         }
 
     except Exception as e:
@@ -1238,6 +1214,70 @@ def rescan_all_images_with_sbom():
             "task_name": "Rescan All Images with SBOM",
             "error": str(e)
         }
+
+
+@celery_app.task(name="Monitor Mass Rescan Progress") 
+def monitor_mass_rescan_progress():
+    """
+    Monitor the progress of mass rescan by checking scan_status of images with SBOM.
+    This can be called periodically to see how many images have been processed.
+    """
+    from .models import Image
+    from django.db.models import Q, Count
+    import time
+
+    logger.info("Checking mass rescan progress...")
+    
+    try:
+        # Get stats on images with SBOM
+        images_with_sbom = Image.objects.filter(
+            Q(sbom_data__isnull=False) & 
+            ~Q(sbom_data={})
+        )
+        
+        total_count = images_with_sbom.count()
+        
+        # Count by scan status
+        status_counts = images_with_sbom.values('scan_status').annotate(count=Count('id'))
+        status_breakdown = {item['scan_status']: item['count'] for item in status_counts}
+        
+        # Calculate progress
+        completed = status_breakdown.get('success', 0)
+        in_progress = status_breakdown.get('in_process', 0) + status_breakdown.get('pending', 0)
+        errors = status_breakdown.get('error', 0)
+        not_started = total_count - completed - in_progress - errors
+        
+        progress_percentage = (completed / total_count * 100) if total_count > 0 else 0
+        
+        logger.info(f"📊 Mass Rescan Progress Report:")
+        logger.info(f"   - Total images with SBOM: {total_count}")
+        logger.info(f"   - Completed: {completed} ({progress_percentage:.1f}%)")
+        logger.info(f"   - In Progress: {in_progress}")
+        logger.info(f"   - Errors: {errors}")
+        logger.info(f"   - Not Started: {not_started}")
+        logger.info(f"   - Status breakdown: {status_breakdown}")
+        
+        return {
+            "status": "success",
+            "task_name": "Monitor Mass Rescan Progress",
+            "total_images": total_count,
+            "completed": completed,
+            "in_progress": in_progress,
+            "errors": errors,
+            "not_started": not_started,
+            "progress_percentage": round(progress_percentage, 1),
+            "status_breakdown": status_breakdown,
+            "timestamp": time.time()
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error monitoring mass rescan progress: {str(e)}")
+        return {
+            "status": "error",
+            "task_name": "Monitor Mass Rescan Progress",
+            "error": str(e)
+        }
+
 
 @celery_app.task(name="Scan Repository Tags")
 def scan_repository_tags(repository_uuid: str):
