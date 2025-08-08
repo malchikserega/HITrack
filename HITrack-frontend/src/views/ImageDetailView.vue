@@ -801,7 +801,12 @@ const onComponentRowClick = (event: MouseEvent, { item }: { item: ComponentVersi
     const fromPage = `${currentRoute.path}${queryString ? '?' + queryString : ''}`
     sessionStorage.setItem('fromPage', fromPage)
     
-    router.push({ name: 'component-version', params: { uuid: item.uuid } })
+    // Pass image UUID to filter locations by this specific image
+    router.push({ 
+      name: 'component-version', 
+      params: { uuid: item.uuid },
+      query: { fromImage: image.value?.uuid }
+    })
   }
 }
 

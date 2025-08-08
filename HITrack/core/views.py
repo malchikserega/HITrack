@@ -831,8 +831,8 @@ class ComponentViewSet(viewsets.ReadOnlyModelViewSet):
     def versions(self, request, uuid=None):
         component = self.get_object()
         versions = component.versions.annotate(
-            vulnerabilities_count=Count('vulnerabilities'),
-            images_count=Count('images')
+            vulnerabilities_count=Count('vulnerabilities', distinct=True),
+            images_count=Count('images', distinct=True)
         ).all().order_by('-version')
         serializer = ComponentVersionOptimizedSerializer(versions, many=True)
         return Response(serializer.data)
@@ -904,14 +904,14 @@ class ComponentVersionViewSet(BaseViewSet):
     def get_queryset(self):
         qs = super().get_queryset()
         if self.action == 'retrieve':
-            # Optimize for detail view - prefetch related data and annotate counts
+            # Optimize for detail view - prefetch related data and annotate counts with distinct
             qs = qs.select_related('component').prefetch_related('images').annotate(
-                vulnerabilities_count=Count('vulnerabilities'),
-                images_count=Count('images'),
-                locations_count=Count('locations')
+                vulnerabilities_count=Count('vulnerabilities', distinct=True),
+                images_count=Count('images', distinct=True),
+                locations_count=Count('locations', distinct=True)
             )
         else:
-            qs = qs.annotate(vulnerabilities_count=Count('vulnerabilities'))
+            qs = qs.annotate(vulnerabilities_count=Count('vulnerabilities', distinct=True))
         return qs.order_by('component__name', 'version', 'created_at')
 
     def get_serializer_class(self):
@@ -932,17 +932,23 @@ class ComponentVersionViewSet(BaseViewSet):
     def locations(self, request, uuid=None):
         """
         Get location information for this specific component version.
+        Supports optional 'image' query parameter to filter by specific image.
         """
         version = self.get_object()
         
         # Get all component locations for this version
-        locations = ComponentLocation.objects.filter(
+        locations_qs = ComponentLocation.objects.filter(
             component_version=version
         ).select_related('image')
         
+        # Filter by image if specified
+        image_uuid = request.query_params.get('image')
+        if image_uuid:
+            locations_qs = locations_qs.filter(image__uuid=image_uuid)
+        
         # Format location data
         location_data = []
-        for location in locations:
+        for location in locations_qs:
             location_data.append({
                 'image': {
                     'uuid': str(location.image.uuid),
@@ -959,6 +965,7 @@ class ComponentVersionViewSet(BaseViewSet):
             'version_uuid': str(version.uuid),
             'version': version.version,
             'component_name': version.component.name,
+            'filtered_by_image': image_uuid,
             'locations': location_data
         })
 

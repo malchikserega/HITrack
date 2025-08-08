@@ -78,6 +78,10 @@
             <v-card-title class="d-flex align-center">
               <v-icon class="mr-2" color="primary">mdi-map-marker</v-icon>
               Locations
+              <v-chip v-if="route.query.fromImage" size="small" color="info" variant="tonal" class="mx-2">
+                <v-icon size="12" class="mr-1">mdi-filter</v-icon>
+                Filtered by Image
+              </v-chip>
               <v-spacer></v-spacer>
               <v-chip size="small" color="primary">
                 <span v-if="locationsLoading">
@@ -94,10 +98,35 @@
               </div>
               <div v-else-if="versionLocations.length === 0" class="empty-state">
                 <v-icon size="48" color="grey">mdi-map-marker-off</v-icon>
-                <p class="text-grey mt-2">No locations found</p>
+                <p class="text-grey mt-2">
+                  <span v-if="route.query.fromImage">No locations found in this image</span>
+                  <span v-else>No locations found</span>
+                </p>
+                <v-btn v-if="route.query.fromImage" 
+                       @click="showAllLocations" 
+                       variant="outlined" 
+                       color="primary" 
+                       size="small" 
+                       class="mt-2">
+                  Show All Locations
+                </v-btn>
               </div>
               
               <div v-else class="locations-list">
+                <!-- Show filter notice and option to see all -->
+                <div v-if="route.query.fromImage" class="filter-notice mb-3">
+                  <v-alert type="info" variant="tonal" density="compact">
+                    <div class="d-flex align-center justify-space-between">
+                      <span>Showing locations from specific image only</span>
+                      <v-btn @click="showAllLocations" 
+                             variant="text" 
+                             size="small" 
+                             color="primary">
+                        Show All
+                      </v-btn>
+                    </div>
+                  </v-alert>
+                </div>
                 <v-expansion-panels variant="accordion">
                   <v-expansion-panel
                     v-for="(location, index) in versionLocations"
@@ -300,7 +329,16 @@ const loadVersion = async () => {
 const loadLocations = async () => {
   locationsLoading.value = true
   try {
-    const locationsResponse = await api.get(`/component-versions/${route.params.uuid}/locations/`)
+    // Check if we're filtering by specific image (came from ImageDetailView)
+    const fromImageUuid = route.query.fromImage
+    let url = `/component-versions/${route.params.uuid}/locations/`
+    
+    // Add image filter if specified
+    if (fromImageUuid) {
+      url += `?image=${fromImageUuid}`
+    }
+    
+    const locationsResponse = await api.get(url)
     versionLocations.value = locationsResponse.data.locations || []
   } catch (err) {
     console.error('Error loading locations:', err)
@@ -321,6 +359,17 @@ const loadVulnerabilities = async () => {
   } finally {
     vulnerabilitiesLoading.value = false
   }
+}
+
+const showAllLocations = () => {
+  // Remove the fromImage query parameter to show all locations
+  router.replace({ 
+    name: 'component-version', 
+    params: route.params,
+    query: { ...route.query, fromImage: undefined }
+  })
+  // Reload locations without image filter
+  loadLocations()
 }
 
 const goBack = () => {
