@@ -904,9 +904,15 @@ class ComponentVersionViewSet(BaseViewSet):
     def get_queryset(self):
         qs = super().get_queryset()
         if self.action == 'retrieve':
-            # Optimize for detail view - prefetch related data
-            qs = qs.select_related('component').prefetch_related('images')
-        return qs.annotate(vulnerabilities_count=Count('vulnerabilities')).order_by('component__name', 'version', 'created_at')
+            # Optimize for detail view - prefetch related data and annotate counts
+            qs = qs.select_related('component').prefetch_related('images').annotate(
+                vulnerabilities_count=Count('vulnerabilities'),
+                images_count=Count('images'),
+                locations_count=Count('locations')
+            )
+        else:
+            qs = qs.annotate(vulnerabilities_count=Count('vulnerabilities'))
+        return qs.order_by('component__name', 'version', 'created_at')
 
     def get_serializer_class(self):
         if self.action == 'list':

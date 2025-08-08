@@ -644,15 +644,24 @@ class ComponentVersionDetailOptimizedSerializer(serializers.ModelSerializer):
 
     @extend_schema_field(serializers.IntegerField())
     def get_vulnerabilities_count(self, obj):
+        # Use annotated field if available, otherwise count
+        if hasattr(obj, 'vulnerabilities_count'):
+            return obj.vulnerabilities_count
         return obj.vulnerabilities.count()
 
     @extend_schema_field(serializers.IntegerField())
     def get_used_count(self, obj):
+        # Use annotated field if available, otherwise count
+        if hasattr(obj, 'images_count'):
+            return obj.images_count
         return obj.images.count()
 
     @extend_schema_field(serializers.IntegerField())
     def get_locations_count(self, obj):
-        return obj.componentlocation_set.count()
+        # Use annotated field if available, otherwise count
+        if hasattr(obj, 'locations_count'):
+            return obj.locations_count
+        return obj.locations.count()
 
 
 class ComponentVersionListSerializer(serializers.ModelSerializer):
