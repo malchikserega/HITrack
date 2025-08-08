@@ -8,6 +8,7 @@ from .models import Repository, RepositoryTag, Image, Component, ComponentVersio
 from .serializers import (
     RepositorySerializer, RepositoryTagSerializer, ImageSerializer, ImageListSerializer,
     ComponentSerializer, ComponentVersionSerializer, VulnerabilitySerializer, VulnerabilityShortSerializer, ComponentListSerializer,
+    ComponentDetailOptimizedSerializer, ComponentVersionOptimizedSerializer,
     RepositoryListSerializer, RepositoryTagListSerializer, ComponentVersionListSerializer,
     HasACRRegistryResponseSerializer, ListACRRegistriesResponseSerializer,
     StatsResponseSerializer, JobAddRepositoriesRequestSerializer,
@@ -822,21 +823,18 @@ class ComponentViewSet(viewsets.ReadOnlyModelViewSet):
     def get_serializer_class(self):
         if self.action == 'list':
             return ComponentListSerializer
+        elif self.action == 'retrieve':
+            return ComponentDetailOptimizedSerializer
         return ComponentSerializer
 
     @action(detail=True, methods=['get'])
     def versions(self, request, uuid=None):
         component = self.get_object()
-        versions = component.versions.select_related(
-            'component'
-        ).prefetch_related(
-            'images',
-            'vulnerabilities',
-            'componentversionvulnerability_set__vulnerability'
-        ).annotate(
-            vulnerabilities_count=Count('vulnerabilities')
+        versions = component.versions.annotate(
+            vulnerabilities_count=Count('vulnerabilities'),
+            images_count=Count('images')
         ).all().order_by('-version')
-        serializer = ComponentVersionSerializer(versions, many=True)
+        serializer = ComponentVersionOptimizedSerializer(versions, many=True)
         return Response(serializer.data)
 
     @action(detail=True, methods=['get'])

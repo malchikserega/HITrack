@@ -103,6 +103,52 @@ class ComponentListSerializer(serializers.ModelSerializer):
         read_only_fields = ['created_at', 'updated_at', 'uuid']
 
 
+class ComponentDetailOptimizedSerializer(serializers.ModelSerializer):
+    """Optimized serializer for component detail view - returns only basic component info"""
+    total_images = serializers.SerializerMethodField()
+    versions_count = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Component
+        fields = ['uuid', 'name', 'type', 'total_images', 'versions_count', 'created_at', 'updated_at']
+        read_only_fields = ['created_at', 'updated_at', 'uuid']
+    
+    @extend_schema_field(serializers.IntegerField())
+    def get_total_images(self, obj):
+        # Get unique images across all versions of this component
+        from .models import Image
+        
+        # Get all images that contain any version of this component
+        # Using correct related name: component_versions
+        images_qs = Image.objects.filter(
+            component_versions__component=obj
+        ).distinct()
+        
+        return images_qs.count()
+    
+    @extend_schema_field(serializers.IntegerField())
+    def get_versions_count(self, obj):
+        return obj.versions.count()
+
+
+class ComponentVersionOptimizedSerializer(serializers.ModelSerializer):
+    """Optimized serializer for component versions list - excludes heavy fields"""
+    vulnerabilities_count = serializers.IntegerField(read_only=True)
+    used_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ComponentVersion
+        fields = ['uuid', 'version', 'vulnerabilities_count', 'used_count', 'created_at', 'updated_at']
+        read_only_fields = ['created_at', 'updated_at', 'uuid']
+
+    @extend_schema_field(serializers.IntegerField())
+    def get_used_count(self, obj):
+        # Use annotated field if available, otherwise count
+        if hasattr(obj, 'images_count'):
+            return obj.images_count
+        return obj.images.count()
+
+
 class VulnerabilityShortSerializer(serializers.ModelSerializer):
     """Optimized serializer for vulnerabilities in component-versions context"""
     class Meta:

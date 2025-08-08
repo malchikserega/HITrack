@@ -35,7 +35,7 @@
               
               <div class="component-stats">
                 <div class="stat-item">
-                  <div class="stat-value">{{ componentVersions.length }}</div>
+                  <div class="stat-value">{{ component?.versions_count || componentVersions.length }}</div>
                   <div class="stat-label">Versions</div>
                 </div>
                 <div class="stat-item">
@@ -415,20 +415,8 @@ const vulnerabilityHeaders = [
 
 
 const totalImages = computed(() => {
-  const uniqueImages = new Set()
-  componentVersions.value.forEach(version => {
-    if (version.images && Array.isArray(version.images)) {
-      version.images.forEach(image => {
-        // Handle both object format (with uuid field) and string format (direct UUID)
-        if (typeof image === 'string') {
-          uniqueImages.add(image)
-        } else if (image && image.uuid) {
-          uniqueImages.add(image.uuid)
-        }
-      })
-    }
-  })
-  return uniqueImages.size
+  // Use the optimized total_images field from component detail endpoint
+  return component.value?.total_images || 0
 })
 
 const getTypeColor = (type: string) => {
