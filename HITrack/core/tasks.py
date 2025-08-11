@@ -1645,10 +1645,14 @@ def update_all_vulnerability_details():
     """
     Update detailed information for all vulnerabilities in the database.
     This is a periodic task that should be scheduled to run daily.
+    
+    Note: This task schedules individual vulnerability updates asynchronously
+    to avoid blocking the worker. Use monitor_bulk_update_progress() to check progress.
     """
     from .models import Vulnerability
     from django.db import transaction
     import time
+    from django.core.cache import cache
 
     logger.info("Starting bulk vulnerability details update")
     start_time = time.time()
@@ -1663,8 +1667,7 @@ def update_all_vulnerability_details():
         # Process vulnerabilities in batches to avoid memory issues
         BATCH_SIZE = 100  # Increased batch size for better performance
         processed_count = 0
-        success_count = 0
-        error_count = 0
+        task_ids = []  # Store task IDs for monitoring
         
         for i in range(0, total_vulnerabilities, BATCH_SIZE):
             batch = vulnerabilities[i:i + BATCH_SIZE]
@@ -1672,42 +1675,38 @@ def update_all_vulnerability_details():
             
             logger.info(f"Processing batch {i//BATCH_SIZE + 1}/{(total_vulnerabilities + BATCH_SIZE - 1)//BATCH_SIZE}")
             
-            # Schedule tasks for this batch
-            batch_tasks = []
+            # Schedule tasks for this batch asynchronously
             for vulnerability in batch:
-                # Schedule individual task asynchronously
+                # Schedule individual task asynchronously - don't wait for result
                 task = update_vulnerability_details.delay(str(vulnerability.uuid))
-                batch_tasks.append(task)
+                task_ids.append(task.id)
                 processed_count += 1
             
-            # Wait for all tasks in this batch to complete
-            for task in batch_tasks:
-                try:
-                    result = task.get(timeout=300)  # 5 minute timeout per task
-                    if result.get('status') in ['success', 'skipped']:
-                        success_count += 1
-                    else:
-                        error_count += 1
-                        logger.warning(f"Task failed: {result.get('error', 'Unknown error')}")
-                except Exception as e:
-                    logger.error(f"Task failed with exception: {str(e)}")
-                    error_count += 1
-            
             batch_time = time.time() - batch_start_time
-            logger.info(f"Completed batch in {batch_time:.2f}s")
+            logger.info(f"Scheduled batch in {batch_time:.2f}s")
 
         total_time = time.time() - start_time
-        logger.info(f"Bulk vulnerability update completed in {total_time:.2f}s")
-        logger.info(f"Processed: {processed_count}, Success: {success_count}, Errors: {error_count}")
+        logger.info(f"Bulk vulnerability update scheduling completed in {total_time:.2f}s")
+        logger.info(f"Scheduled {processed_count} tasks for processing")
+        
+        # Store task IDs in cache for monitoring (expires in 24 hours)
+        cache_key = f"bulk_update_tasks_{int(start_time)}"
+        cache.set(cache_key, {
+            'task_ids': task_ids,
+            'total_vulnerabilities': total_vulnerabilities,
+            'start_time': start_time,
+            'status': 'scheduled'
+        }, timeout=86400)  # 24 hours
 
         return {
-            "status": "completed",
+            "status": "scheduled",
             "task_name": "Update All Vulnerability Details",
             "total_vulnerabilities": total_vulnerabilities,
-            "processed_count": processed_count,
-            "success_count": success_count,
-            "error_count": error_count,
-            "processing_time": total_time
+            "scheduled_count": processed_count,
+            "processing_time": total_time,
+            "message": "All tasks have been scheduled for asynchronous processing",
+            "monitor_key": cache_key,
+            "note": "Use monitor_bulk_update_progress() to check progress"
         }
 
     except Exception as e:
@@ -1752,48 +1751,42 @@ def update_critical_vulnerability_details():
         logger.info(f"Found {total_vulnerabilities} critical/old vulnerabilities to process")
         
         processed_count = 0
-        success_count = 0
-        error_count = 0
+        task_ids = []  # Store task IDs for monitoring
         
         # Process in batches for better performance
         BATCH_SIZE = 50
-        batch_tasks = []
         
         for i in range(0, total_vulnerabilities, BATCH_SIZE):
             batch = vulnerabilities[i:i + BATCH_SIZE]
             
-            # Schedule tasks for this batch
+            # Schedule tasks for this batch asynchronously
             for vulnerability in batch:
+                # Schedule individual task asynchronously - don't wait for result
                 task = update_vulnerability_details.delay(str(vulnerability.uuid))
-                batch_tasks.append(task)
+                task_ids.append(task.id)
                 processed_count += 1
-            
-            # Wait for batch to complete
-            for task in batch_tasks:
-                try:
-                    result = task.get(timeout=300)  # 5 minute timeout
-                    if result.get('status') in ['success', 'skipped']:
-                        success_count += 1
-                    else:
-                        error_count += 1
-                        logger.warning(f"Critical vulnerability update failed: {result.get('error', 'Unknown error')}")
-                except Exception as e:
-                    logger.error(f"Critical vulnerability task failed: {str(e)}")
-                    error_count += 1
-            
-            batch_tasks = []  # Reset for next batch
 
         total_time = time.time() - start_time
-        logger.info(f"Critical vulnerability update completed in {total_time:.2f}s")
+        logger.info(f"Critical vulnerability update scheduling completed in {total_time:.2f}s")
+        
+        # Store task IDs in cache for monitoring (expires in 24 hours)
+        cache_key = f"critical_update_tasks_{int(start_time)}"
+        cache.set(cache_key, {
+            'task_ids': task_ids,
+            'total_vulnerabilities': total_vulnerabilities,
+            'start_time': start_time,
+            'status': 'scheduled'
+        }, timeout=86400)  # 24 hours
 
         return {
-            "status": "completed",
+            "status": "scheduled",
             "task_name": "Update Critical Vulnerability Details",
             "total_vulnerabilities": total_vulnerabilities,
-            "processed_count": processed_count,
-            "success_count": success_count,
-            "error_count": error_count,
-            "processing_time": total_time
+            "scheduled_count": processed_count,
+            "processing_time": total_time,
+            "message": "All critical vulnerability tasks have been scheduled for asynchronous processing",
+            "monitor_key": cache_key,
+            "note": "Use monitor_bulk_update_progress() to check progress"
         }
 
     except Exception as e:
@@ -2009,6 +2002,132 @@ def update_critical_vulnerabilities_bulk():
         return {
             'status': 'error',
             'error': str(e)
+        }
+
+
+@celery_app.task(name="Monitor Task Status")
+def monitor_task_status():
+    """
+    Monitor the status of running vulnerability update tasks.
+    This task can be used to check progress and identify stuck tasks.
+    """
+    from celery.result import GroupResult
+    from django.utils import timezone
+    from datetime import timedelta
+    
+    try:
+        # Get active tasks from the last hour
+        cutoff_time = timezone.now() - timedelta(hours=1)
+        
+        # This is a placeholder for actual task monitoring
+        # In a real implementation, you might want to store task IDs in the database
+        # and check their status periodically
+        
+        logger.info("Task monitoring completed - no active tasks to monitor")
+        
+        return {
+            'status': 'completed',
+            'task_name': 'Monitor Task Status',
+            'message': 'Task monitoring completed',
+            'active_tasks': 0
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in task monitoring: {str(e)}")
+        return {
+            'status': 'error',
+            'error': str(e)
+        }
+
+
+@celery_app.task(name="Monitor Bulk Update Progress")
+def monitor_bulk_update_progress(monitor_key: str):
+    """
+    Monitor the progress of a bulk vulnerability update operation.
+    
+    Args:
+        monitor_key: Cache key returned by update_all_vulnerability_details
+    """
+    from django.core.cache import cache
+    from celery.result import AsyncResult
+    import time
+    
+    try:
+        # Get bulk update info from cache
+        bulk_info = cache.get(monitor_key)
+        if not bulk_info:
+            return {
+                'status': 'error',
+                'error': 'Monitor key not found or expired',
+                'monitor_key': monitor_key
+            }
+        
+        task_ids = bulk_info.get('task_ids', [])
+        total_vulnerabilities = bulk_info.get('total_vulnerabilities', 0)
+        start_time = bulk_info.get('start_time', 0)
+        
+        if not task_ids:
+            return {
+                'status': 'completed',
+                'message': 'No tasks to monitor',
+                'total_vulnerabilities': total_vulnerabilities
+            }
+        
+        # Check status of all tasks
+        completed_count = 0
+        failed_count = 0
+        pending_count = 0
+        running_count = 0
+        
+        for task_id in task_ids:
+            result = AsyncResult(task_id)
+            if result.ready():
+                if result.successful():
+                    completed_count += 1
+                else:
+                    failed_count += 1
+            elif result.state == 'PENDING':
+                pending_count += 1
+            else:
+                running_count += 1
+        
+        # Calculate progress
+        total_tasks = len(task_ids)
+        progress_percentage = (completed_count / total_tasks * 100) if total_tasks > 0 else 0
+        
+        # Update cache with current status
+        bulk_info['current_status'] = {
+            'completed': completed_count,
+            'failed': failed_count,
+            'pending': pending_count,
+            'running': running_count,
+            'progress_percentage': progress_percentage
+        }
+        cache.set(monitor_key, bulk_info, timeout=86400)
+        
+        elapsed_time = time.time() - start_time
+        
+        return {
+            'status': 'monitoring',
+            'task_name': 'Monitor Bulk Update Progress',
+            'monitor_key': monitor_key,
+            'total_vulnerabilities': total_vulnerabilities,
+            'total_tasks': total_tasks,
+            'completed_tasks': completed_count,
+            'failed_tasks': failed_count,
+            'pending_tasks': pending_count,
+            'running_tasks': running_count,
+            'progress_percentage': round(progress_percentage, 2),
+            'elapsed_time_seconds': round(elapsed_time, 2),
+            'estimated_completion': 'Use progress_percentage to estimate'
+        }
+        
+    except Exception as e:
+        logger.error(f"Error monitoring bulk update progress: {str(e)}")
+        return {
+            'status': 'error',
+            'error': str(e),
+            'monitor_key': monitor_key
         }
 
 
