@@ -223,6 +223,13 @@ class VulnerabilityDetails(models.Model):
     last_updated = models.DateTimeField(auto_now=True, help_text='When this record was last updated')
     data_source = models.CharField(max_length=100, default='manual', help_text='Source of this information')
     
+    # EPSS information from FIRST API
+    epss_score = models.FloatField(null=True, blank=True, help_text='EPSS score from FIRST API')
+    epss_percentile = models.FloatField(null=True, blank=True, help_text='EPSS percentile from FIRST API')
+    epss_date = models.DateField(null=True, blank=True, help_text='EPSS assessment date from FIRST API')
+    epss_data_source = models.CharField(max_length=50, blank=True, null=True, help_text='Source of EPSS data (FIRST-EPSS, Grype, etc.)')
+    epss_last_updated = models.DateTimeField(null=True, blank=True, help_text='When EPSS data was last updated')
+    
     class Meta:
         verbose_name = 'Vulnerability Details'
         verbose_name_plural = 'Vulnerability Details'

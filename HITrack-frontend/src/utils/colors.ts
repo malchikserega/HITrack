@@ -80,4 +80,52 @@ export const getProcessingStatusIcon = (status: string): string => {
     case 'error': return 'mdi-alert-circle'
     default: return 'mdi-help-circle'
   }
+}
+
+/**
+ * Get color for EPSS data source
+ */
+export const getEpssSourceColor = (source: string): string => {
+  switch (source) {
+    case 'FIRST-EPSS':
+      return 'primary'
+    case 'Grype':
+      return 'success'
+    case 'manual':
+      return 'warning'
+    default:
+      return 'grey'
+  }
+}
+
+/**
+ * Get icon for EPSS data source
+ */
+export const getEpssSourceIcon = (source: string): string => {
+  switch (source) {
+    case 'FIRST-EPSS':
+      return 'mdi-database'
+    case 'Grype':
+      return 'mdi-magnify-scan'
+    case 'manual':
+      return 'mdi-pencil'
+    default:
+      return 'mdi-information'
+  }
+}
+
+/**
+ * Get display name for EPSS data source
+ */
+export const getEpssSourceDisplay = (source: string): string => {
+  switch (source) {
+    case 'FIRST-EPSS':
+      return 'FIRST API'
+    case 'Grype':
+      return 'Grype Scan'
+    case 'manual':
+      return 'Manual Entry'
+    default:
+      return source
+  }
 } 

@@ -52,6 +52,13 @@ export interface VulnerabilityDetails extends BaseEntity {
   exploit_db_links?: string[]
   last_updated: string
   data_source: string
+  
+  // EPSS information from FIRST API
+  epss_score?: number
+  epss_percentile?: number
+  epss_date?: string
+  epss_data_source?: string
+  epss_last_updated?: string
 }
 
 /**

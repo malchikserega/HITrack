@@ -212,12 +212,26 @@
                   <template #append>
                     <div class="vulnerability-epss">
                       <v-chip
+                        :size="'small'"
                         :color="getEpssColor(vuln.epss)"
-                        size="small"
-                        variant="tonal"
+                        class="mr-2"
                       >
                         EPSS: {{ vuln.epss }}
                       </v-chip>
+                      <!-- EPSS Source Indicator -->
+                      <v-tooltip v-if="vuln.details?.epss_data_source" location="top">
+                        <template v-slot:activator="{ props }">
+                          <v-icon
+                            v-bind="props"
+                            size="16"
+                            :color="getEpssSourceColor(vuln.details.epss_data_source)"
+                            class="epss-source-icon"
+                          >
+                            {{ getEpssSourceIcon(vuln.details.epss_data_source) }}
+                          </v-icon>
+                        </template>
+                        <span>{{ getEpssSourceDisplay(vuln.details.epss_data_source) }}</span>
+                      </v-tooltip>
                     </div>
                   </template>
                 </v-list-item>
@@ -303,6 +317,7 @@ import SeverityDistributionChart from '../components/SeverityDistributionChart.v
 import VulnerabilityTrendChart from '../components/VulnerabilityTrendChart.vue'
 import RecentActivityFeed from '../components/RecentActivityFeed.vue'
 import RecentTasksCard from '../components/RecentTasksCard.vue'
+import { getVulnerabilityTypeColor, getSeverityColor, getEpssColor, getEpssSourceColor, getEpssSourceIcon, getEpssSourceDisplay } from '../utils/colors'
 
 const router = useRouter()
 const theme = useTheme()
@@ -440,28 +455,6 @@ const formatStatusLabel = (status: string) => {
   }
 }
 
-const getSeverityColor = (severity: string) => {
-  switch (severity) {
-    case 'CRITICAL':
-      return 'error'
-    case 'HIGH':
-      return 'warning'
-    case 'MEDIUM':
-      return 'info'
-    case 'LOW':
-      return 'success'
-    default:
-      return 'grey'
-  }
-}
-
-const getEpssColor = (epss: number) => {
-  if (epss >= 0.7) return 'error'
-  if (epss >= 0.4) return 'warning'
-  if (epss >= 0.1) return 'info'
-  return 'success'
-}
-
 const viewVulnerabilityDetail = (vulnerabilityId: string) => {
   router.push(`/vulnerabilities/${vulnerabilityId}`)
 }
@@ -579,6 +572,10 @@ onUnmounted(() => {
 .vulnerability-epss {
   display: flex;
   align-items: center;
+}
+
+.epss-source-icon {
+  margin-left: 4px;
 }
 
 .component-subtitle {

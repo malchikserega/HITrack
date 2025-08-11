@@ -32,7 +32,8 @@ class VulnerabilityDetailsSerializer(serializers.ModelSerializer):
             'cisa_kev_notes', 'cisa_kev_cwes', 
             'exploit_db_available', 'exploit_db_verified', 'exploit_db_count', 
             'exploit_db_verified_count', 'exploit_db_working_count', 'exploit_db_links',
-            'last_updated', 'data_source'
+            'last_updated', 'data_source',
+            'epss_score', 'epss_percentile', 'epss_date', 'epss_data_source', 'epss_last_updated'
         ]
         read_only_fields = ['uuid', 'last_updated']
 

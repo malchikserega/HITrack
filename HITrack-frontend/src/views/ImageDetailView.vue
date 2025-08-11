@@ -319,13 +319,29 @@
                         </v-chip>
                       </template>
                       <template v-slot:item.epss="{ item }">
-                        <v-chip
-                          size="small"
-                          :color="getEpssColor(item.epss)"
-                          variant="tonal"
-                        >
-                          {{ (item.epss * 100).toFixed(1) }}%
-                        </v-chip>
+                        <div class="d-flex align-center">
+                          <v-chip
+                            :size="'small'"
+                            :color="getEpssColor(item.epss)"
+                            class="mr-2"
+                          >
+                            {{ (item.epss * 100).toFixed(1) }}%
+                          </v-chip>
+                          <!-- EPSS Source Indicator -->
+                          <v-tooltip v-if="item.details?.epss_data_source" location="top">
+                            <template v-slot:activator="{ props }">
+                              <v-icon
+                                v-bind="props"
+                                size="16"
+                                :color="getEpssSourceColor(item.details.epss_data_source)"
+                                class="epss-source-icon"
+                              >
+                                {{ getEpssSourceIcon(item.details.epss_data_source) }}
+                              </v-icon>
+                            </template>
+                            <span>{{ getEpssSourceDisplay(item.details.epss_data_source) }}</span>
+                          </v-tooltip>
+                        </div>
                       </template>
                       <template v-slot:item.fixable="{ item }">
                         <v-chip
@@ -380,7 +396,7 @@ import { useRoute, useRouter } from 'vue-router'
 import api from '../plugins/axios'
 import { notificationService } from '../plugins/notifications'
 import { debounce } from '../utils/debounce'
-import { getComponentTypeColor, getVulnerabilityTypeColor, getSeverityColor, getEpssColor } from '../utils/colors'
+import { getComponentTypeColor, getVulnerabilityTypeColor, getSeverityColor, getEpssColor, getEpssSourceColor, getEpssSourceIcon, getEpssSourceDisplay } from '../utils/colors'
 import type { Image, ComponentVersion, PaginatedResponse, Vulnerability } from '../types/interfaces'
 import PieChart from '../components/PieChart.vue'
 import type { DataTableSortItem } from 'vuetify'

@@ -154,13 +154,29 @@
                 </v-chip>
               </template>
               <template v-slot:item.epss="{ item }">
-                <v-chip
-                  size="small"
-                  :color="getEpssColor(item.epss)"
-                  variant="tonal"
-                >
-                  {{ (item.epss * 100).toFixed(1) }}%
-                </v-chip>
+                <div class="d-flex align-center">
+                  <v-chip
+                    :size="'small'"
+                    :color="getEpssColor(item.epss)"
+                    class="mr-2"
+                  >
+                    {{ (item.epss * 100).toFixed(1) }}%
+                  </v-chip>
+                  <!-- EPSS Source Indicator -->
+                  <v-tooltip v-if="item.details?.epss_data_source" location="top">
+                    <template v-slot:activator="{ props }">
+                      <v-icon
+                        v-bind="props"
+                        size="16"
+                        :color="getEpssSourceColor(item.details.epss_data_source)"
+                        class="epss-source-icon"
+                      >
+                        {{ getEpssSourceIcon(item.details.epss_data_source) }}
+                      </v-icon>
+                    </template>
+                    <span>{{ getEpssSourceDisplay(item.details.epss_data_source) }}</span>
+                  </v-tooltip>
+                </div>
               </template>
               <template v-slot:item.cisa_kev="{ item }">
                 <v-chip
@@ -238,7 +254,7 @@ import { useRouter, useRoute } from 'vue-router'
 import api from '../plugins/axios'
 import { notificationService } from '../plugins/notifications'
 import { debounce } from '../utils/debounce'
-import { getVulnerabilityTypeColor, getSeverityColor, getEpssColor } from '../utils/colors'
+import { getVulnerabilityTypeColor, getSeverityColor, getEpssColor, getEpssSourceColor, getEpssSourceIcon, getEpssSourceDisplay } from '../utils/colors'
 import type { Vulnerability, PaginatedResponse } from '../types/interfaces'
 import type { DataTableSortItem } from 'vuetify'
 

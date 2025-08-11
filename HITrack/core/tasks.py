@@ -1573,7 +1573,12 @@ def update_vulnerability_details(vulnerability_uuid: str):
             if cve_details:
                 for field, value in cve_details.items():
                     if value is not None:
-                        setattr(details, field, value)
+                        # Handle EPSS fields specifically
+                        if field.startswith('epss_'):
+                            setattr(details, field, value)
+                        else:
+                            # Handle other CVE fields
+                            setattr(details, field, value)
 
             # Update exploit information if available
             if exploit_info:
@@ -1584,6 +1589,9 @@ def update_vulnerability_details(vulnerability_uuid: str):
             # Update data source with current sources
             data_sources = []
             if cve_details:
+                # Check if EPSS data was collected
+                if cve_details.get('epss_data_source'):
+                    data_sources.append(cve_details['epss_data_source'])
                 data_sources.append('CVE-CIRCL')
             if exploit_info:
                 # Check CISA KEV
@@ -1887,6 +1895,9 @@ def update_vulnerability_details_bulk(vulnerability_uuids: List[str], batch_size
                             # Determine data source
                             data_sources = []
                             if cve_details:
+                                # Check if EPSS data was collected
+                                if cve_details.get('epss_data_source'):
+                                    data_sources.append(cve_details['epss_data_source'])
                                 data_sources.append('CVE-CIRCL')
                             if exploit_info:
                                 # Check CISA KEV
@@ -1907,7 +1918,12 @@ def update_vulnerability_details_bulk(vulnerability_uuids: List[str], batch_size
                             if cve_details:
                                 for field, value in cve_details.items():
                                     if value is not None:
-                                        setattr(details, field, value)
+                                        # Handle EPSS fields specifically
+                                        if field.startswith('epss_'):
+                                            setattr(details, field, value)
+                                        else:
+                                            # Handle other CVE fields
+                                            setattr(details, field, value)
                             
                             # Update exploit information if available
                             if exploit_info:
