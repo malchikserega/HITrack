@@ -1,8 +1,36 @@
 from django.contrib import admin
 from django.contrib import messages
 from django.utils import timezone
+from django.db import models
 from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, VulnerabilityDetails, ContainerRegistry, ComponentVersionVulnerability, Release, RepositoryTagRelease
 from .tasks import update_vulnerability_details
+
+
+class EPSSScoreRangeFilter(admin.SimpleListFilter):
+    title = 'EPSS Score Range'
+    parameter_name = 'epss_score_range'
+    
+    def lookups(self, request, model_admin):
+        return (
+            ('critical', 'Critical (≥0.7)'),
+            ('high', 'High (0.4-0.7)'),
+            ('medium', 'Medium (0.1-0.4)'),
+            ('low', 'Low (<0.1)'),
+            ('none', 'No EPSS Data'),
+        )
+    
+    def queryset(self, request, queryset):
+        if self.value() == 'critical':
+            return queryset.filter(epss_score__gte=0.7)
+        elif self.value() == 'high':
+            return queryset.filter(epss_score__gte=0.4, epss_score__lt=0.7)
+        elif self.value() == 'medium':
+            return queryset.filter(epss_score__gte=0.1, epss_score__lt=0.4)
+        elif self.value() == 'low':
+            return queryset.filter(epss_score__lt=0.1)
+        elif self.value() == 'none':
+            return queryset.filter(epss_score__isnull=True)
+        return queryset
 
 @admin.register(ContainerRegistry)
 class ContainerRegistryAdmin(admin.ModelAdmin):
@@ -77,7 +105,7 @@ class ComponentVersionAdmin(admin.ModelAdmin):
 class VulnerabilityDetailsInline(admin.TabularInline):
     model = VulnerabilityDetails
     extra = 0
-    fields = ('cve_details_score', 'cve_details_severity', 'exploit_available', 'exploit_public', 'data_source', 'last_updated')
+    fields = ('cve_details_score', 'cve_details_severity', 'epss_score', 'epss_percentile', 'epss_data_source', 'exploit_available', 'exploit_public', 'data_source', 'last_updated')
     readonly_fields = ('last_updated',)
     can_delete = False
     max_num = 1
@@ -94,10 +122,20 @@ class VulnerabilityDetailsInline(admin.TabularInline):
 
 @admin.register(Vulnerability)
 class VulnerabilityAdmin(admin.ModelAdmin):
-    list_display = ('vulnerability_id', 'vulnerability_type', 'severity', 'epss', 'has_details', 'exploit_available', 'created_at')
-    search_fields = ('vulnerability_id', 'description')
-    list_filter = ('vulnerability_type', 'severity', 'details__exploit_available', 'details__data_source')
-    readonly_fields = ['uuid', 'created_at', 'updated_at']
+    list_display = ('vulnerability_id', 'vulnerability_type', 'severity', 'epss', 'epss_percentile', 'description', 'has_details', 'exploit_available', 'created_at')
+    search_fields = ('vulnerability_id', 'description', 'details__epss_data_source')
+    list_filter = ('vulnerability_type', 'severity', 'details__exploit_available', 'details__data_source', 'details__epss_data_source')
+    readonly_fields = ['uuid', 'created_at', 'updated_at', 'epss_percentile', 'epss_from_details']
+    
+    def epss_percentile(self, obj):
+        """Display EPSS percentile from VulnerabilityDetails if available."""
+        try:
+            if obj.details and obj.details.epss_percentile is not None:
+                return f"{obj.details.epss_percentile * 100:.1f}%"
+            return "N/A"
+        except VulnerabilityDetails.DoesNotExist:
+            return "N/A"
+    epss_percentile.short_description = 'EPSS %'
     inlines = [VulnerabilityDetailsInline]
     
     def has_details(self, obj):
@@ -115,6 +153,44 @@ class VulnerabilityAdmin(admin.ModelAdmin):
             return False
     exploit_available.boolean = True
     exploit_available.short_description = 'Exploit Available'
+    
+    def epss_from_details(self, obj):
+        """Display EPSS score from VulnerabilityDetails if available."""
+        try:
+            if obj.details and obj.details.epss_score is not None:
+                score = obj.details.epss_score
+                if score >= 0.7:
+                    color = 'red'
+                elif score >= 0.4:
+                    color = 'orange'
+                elif score >= 0.1:
+                    color = 'yellow'
+                else:
+                    color = 'green'
+                return f'<span style="color: {color}; font-weight: bold;">{score:.3f}</span>'
+            return "N/A"
+        except VulnerabilityDetails.DoesNotExist:
+            return "N/A"
+    epss_from_details.short_description = 'EPSS Score (Details)'
+    epss_from_details.allow_tags = True
+    
+
+    
+
+    
+    fieldsets = (
+        ('Basic Information', {
+            'fields': ('vulnerability_id', 'vulnerability_type', 'severity', 'description')
+        }),
+        ('EPSS Information', {
+            'fields': ('epss', 'epss_percentile', 'epss_from_details'),
+            'classes': ('collapse',)
+        }),
+        ('System Fields', {
+            'fields': ('uuid', 'created_at', 'updated_at'),
+            'classes': ('collapse',)
+        }),
+    )
     
     actions = ['update_vulnerability_details_action']
     
@@ -151,10 +227,10 @@ class VulnerabilityAdmin(admin.ModelAdmin):
 
 @admin.register(VulnerabilityDetails)
 class VulnerabilityDetailsAdmin(admin.ModelAdmin):
-    list_display = ('vulnerability', 'cve_details_score', 'cve_details_severity', 'exploit_available', 'exploit_public', 'exploit_db_available', 'cisa_kev_known_exploited', 'get_data_source_display', 'last_updated')
-    search_fields = ('vulnerability__vulnerability_id', 'cve_details_summary')
-    list_filter = ('cve_details_severity', 'exploit_available', 'exploit_public', 'exploit_verified', 'exploit_db_available', 'exploit_db_verified', 'data_source')
-    readonly_fields = ('uuid', 'last_updated', 'get_data_source_links')
+    list_display = ('vulnerability', 'cve_details_score', 'cve_details_severity', 'epss_score_display', 'epss_percentile_display', 'epss_data_source', 'exploit_available', 'exploit_public', 'exploit_db_available', 'cisa_kev_known_exploited', 'get_data_source_display', 'last_updated')
+    search_fields = ('vulnerability__vulnerability_id', 'cve_details_summary', 'epss_data_source')
+    list_filter = ('cve_details_severity', 'exploit_available', 'exploit_public', 'exploit_verified', 'exploit_db_available', 'exploit_db_verified', 'data_source', 'epss_data_source', EPSSScoreRangeFilter)
+    readonly_fields = ('uuid', 'last_updated', 'get_data_source_links', 'epss_score_display', 'epss_percentile_display')
     raw_id_fields = ('vulnerability',)
     
     def get_data_source_display(self, obj):
@@ -194,9 +270,47 @@ class VulnerabilityDetailsAdmin(admin.ModelAdmin):
         return mark_safe(' + '.join(links))
     get_data_source_links.short_description = 'Data Source Links'
     
+    def epss_score_display(self, obj):
+        """Display EPSS score with color coding."""
+        if obj.epss_score is not None:
+            score = obj.epss_score
+            if score >= 0.7:
+                color = 'red'
+            elif score >= 0.4:
+                color = 'orange'
+            elif score >= 0.1:
+                color = 'yellow'
+            else:
+                color = 'green'
+            return f'<span style="color: {color}; font-weight: bold;">{score:.3f}</span>'
+        return "N/A"
+    epss_score_display.short_description = 'EPSS Score'
+    epss_score_display.allow_tags = True
+    
+    def epss_percentile_display(self, obj):
+        """Display EPSS percentile with color coding."""
+        if obj.epss_percentile is not None:
+            percentile = obj.epss_percentile * 100
+            if percentile >= 70:
+                color = 'red'
+            elif percentile >= 40:
+                color = 'orange'
+            elif percentile >= 10:
+                color = 'yellow'
+            else:
+                color = 'green'
+            return f'<span style="color: {color}; font-weight: bold;">{percentile:.1f}%</span>'
+        return "N/A"
+    epss_percentile_display.short_description = 'EPSS %'
+    epss_percentile_display.allow_tags = True
+    
     fieldsets = (
         ('Vulnerability', {
             'fields': ('vulnerability',)
+        }),
+        ('EPSS Information', {
+            'fields': ('epss_score_display', 'epss_percentile_display', 'epss_score', 'epss_percentile', 'epss_date', 'epss_data_source', 'epss_last_updated'),
+            'classes': ('collapse',)
         }),
         ('CVE Details', {
             'fields': ('cve_details_score', 'cve_details_severity', 'cve_details_published_date', 'cve_details_updated_date', 'cve_details_summary', 'cve_details_references'),

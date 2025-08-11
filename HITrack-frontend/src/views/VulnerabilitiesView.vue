@@ -215,8 +215,24 @@
                 </v-chip>
               </template>
               <template v-slot:item.description="{ item }">
-                <div class="text-truncate" style="max-width: 300px;" :title="item.description">
-                  {{ item.description }}
+                <div class="text-truncate" style="max-width: 300px;" :title="getDescriptionWithFallback(item)">
+                  <div class="d-flex align-center">
+                    <span class="text-truncate">{{ getDescriptionWithFallback(item) }}</span>
+                    <!-- Source indicator -->
+                    <v-tooltip v-if="getDescriptionSource(item) !== 'Main Description'" location="top">
+                      <template v-slot:activator="{ props }">
+                        <v-icon
+                          v-bind="props"
+                          size="14"
+                          color="info"
+                          class="ml-1 flex-shrink-0"
+                        >
+                          mdi-information-outline
+                        </v-icon>
+                      </template>
+                      <span>{{ getDescriptionSource(item) }}</span>
+                    </v-tooltip>
+                  </div>
                 </div>
               </template>
             </v-data-table>
@@ -399,6 +415,35 @@ const onItemsPerPageChange = (val: number) => {
   fetchVulnerabilities()
 }
 
+// Helper function to get description with fallback to CVE Details
+const getDescriptionWithFallback = (item: Vulnerability): string => {
+  // First try to get the main description
+  if (item.description && item.description.trim()) {
+    return item.description
+  }
+  
+  // If no main description, try to get from CVE Details
+  if (item.details?.cve_details_summary && item.details.cve_details_summary.trim()) {
+    return item.details.cve_details_summary
+  }
+  
+  // If still no description, return placeholder
+  return 'No description available'
+}
+
+// Helper function to get description source
+const getDescriptionSource = (item: Vulnerability): string => {
+  if (item.description && item.description.trim()) {
+    return 'Main Description'
+  }
+  
+  if (item.details?.cve_details_summary && item.details.cve_details_summary.trim()) {
+    return 'CVE Details'
+  }
+  
+  return 'No Source'
+}
+
 const onFilterChange = () => {
   currentPage.value = 1
   fetchVulnerabilities()
@@ -532,5 +577,16 @@ onMounted(() => {
   background: #011 !important;
   color: #39FF14 !important;
   border: 1px solid #39FF14 !important;
+}
+
+/* Description source indicator styling */
+.text-truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.flex-shrink-0 {
+  flex-shrink: 0;
 }
 </style> 

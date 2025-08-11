@@ -62,12 +62,13 @@ class VulnerabilityListSerializer(serializers.ModelSerializer):
     has_details = serializers.SerializerMethodField()
     exploit_available = serializers.SerializerMethodField()
     cisa_kev = serializers.SerializerMethodField()
+    details = VulnerabilityDetailsSerializer(read_only=True)
 
     class Meta:
         model = Vulnerability
         fields = [
             'uuid', 'vulnerability_id', 'vulnerability_type', 'severity', 'description',
-            'epss', 'has_details', 'exploit_available', 'cisa_kev', 'created_at', 'updated_at'
+            'epss', 'has_details', 'exploit_available', 'cisa_kev', 'details', 'created_at', 'updated_at'
         ]
         read_only_fields = ['created_at', 'updated_at', 'uuid']
 
