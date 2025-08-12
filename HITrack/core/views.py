@@ -1251,6 +1251,11 @@ class VulnerabilityViewSet(BaseViewSet):
         """
         vulnerability = self.get_object()
         
+        # Debug logging
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"Fetching components for vulnerability: {vulnerability.vulnerability_id}")
+        
         # Get component versions that have this vulnerability with proper ordering and annotations
         component_versions = ComponentVersion.objects.filter(
             vulnerabilities=vulnerability
@@ -1259,6 +1264,11 @@ class VulnerabilityViewSet(BaseViewSet):
         ).order_by(
             'component__name', 'version', 'created_at'
         )
+        
+        # Debug logging
+        logger.info(f"Found {component_versions.count()} component versions")
+        for cv in component_versions:
+            logger.info(f"Component: {cv.component.name} {cv.version}")
         
         # Apply pagination
         paginator = self.pagination_class()
