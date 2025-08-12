@@ -12,8 +12,13 @@
 
     <!-- Loading State -->
     <div v-if="loading" class="loading-container">
-      <v-progress-circular indeterminate size="64" color="primary"></v-progress-circular>
-      <p class="mt-4">Loading version details...</p>
+      <div class="main-loading-animation">
+        <v-progress-circular indeterminate size="80" color="primary" width="4"></v-progress-circular>
+        <div class="main-loading-text">
+          <h2 class="text-h4 mb-3">Loading Component Version</h2>
+          <p class="text-grey">Fetching component details...</p>
+        </div>
+      </div>
     </div>
 
     <!-- Error State -->
@@ -76,14 +81,27 @@
         <v-col cols="12" md="6">
           <v-card class="info-card">
             <v-card-title class="d-flex align-center">
-              <v-icon class="mr-2" color="primary">mdi-map-marker</v-icon>
-              Locations
+              <div class="d-flex align-center">
+                <v-icon class="mr-2" color="primary">mdi-map-marker</v-icon>
+                <span class="font-weight-bold">Locations</span>
+                <v-progress-circular 
+                  v-if="locationsLoading" 
+                  indeterminate 
+                  color="primary" 
+                  size="20" 
+                  width="2" 
+                  class="ml-3"
+                ></v-progress-circular>
+              </div>
+              
               <v-chip v-if="route.query.fromImage" size="small" color="info" variant="tonal" class="mx-2">
                 <v-icon size="12" class="mr-1">mdi-filter</v-icon>
                 Filtered by Image
               </v-chip>
+              
               <v-spacer></v-spacer>
-              <v-chip size="small" color="primary">
+              
+              <v-chip size="small" color="primary" variant="elevated">
                 <span v-if="locationsLoading">
                   <v-progress-circular size="12" width="2" indeterminate></v-progress-circular>
                 </span>
@@ -93,8 +111,13 @@
             
             <v-card-text>
               <div v-if="locationsLoading" class="loading-state">
-                <v-progress-circular indeterminate color="primary" size="32"></v-progress-circular>
-                <p class="text-grey mt-2">Loading locations...</p>
+                <div class="loading-animation">
+                  <v-progress-circular indeterminate color="primary" size="48"></v-progress-circular>
+                  <div class="loading-text">
+                    <h4 class="text-h6 mb-2">Loading Locations</h4>
+                    <p class="text-grey">Discovering where this component is used...</p>
+                  </div>
+                </div>
               </div>
               <div v-else-if="versionLocations.length === 0" class="empty-state">
                 <v-icon size="48" color="grey">mdi-map-marker-off</v-icon>
@@ -182,10 +205,22 @@
         <v-col cols="12" md="6">
           <v-card class="info-card">
             <v-card-title class="d-flex align-center">
-              <v-icon class="mr-2" color="warning">mdi-shield-alert</v-icon>
-              Vulnerabilities
+              <div class="d-flex align-center">
+                <v-icon class="mr-2" color="warning">mdi-shield-alert</v-icon>
+                <span class="font-weight-bold">Vulnerabilities</span>
+                <v-progress-circular 
+                  v-if="vulnerabilitiesLoading" 
+                  indeterminate 
+                  color="warning" 
+                  size="20" 
+                  width="2" 
+                  class="ml-3"
+                ></v-progress-circular>
+              </div>
+              
               <v-spacer></v-spacer>
-              <v-chip size="small" color="warning">
+              
+              <v-chip size="small" color="warning" variant="elevated">
                 <span v-if="vulnerabilitiesLoading">
                   <v-progress-circular size="12" width="2" indeterminate></v-progress-circular>
                 </span>
@@ -195,8 +230,13 @@
             
             <v-card-text>
               <div v-if="vulnerabilitiesLoading" class="loading-state">
-                <v-progress-circular indeterminate color="primary" size="32"></v-progress-circular>
-                <p class="text-grey mt-2">Loading vulnerabilities...</p>
+                <div class="loading-animation">
+                  <v-progress-circular indeterminate color="warning" size="48"></v-progress-circular>
+                  <div class="loading-text">
+                    <h4 class="text-h6 mb-2">Loading Vulnerabilities</h4>
+                    <p class="text-grey">Analyzing security issues...</p>
+                  </div>
+                </div>
               </div>
               <div v-else-if="versionVulnerabilities.length === 0" class="empty-state">
                 <v-icon size="48" color="success">mdi-shield-check</v-icon>
@@ -310,13 +350,9 @@ const loadVersion = async () => {
   error.value = null
   
   try {
-    // Load main version data first - this is now optimized and includes images but not locations/vulnerabilities
+    // Load main version data first (lightweight)
     const response = await api.get(`/component-versions/${route.params.uuid}/`)
     version.value = response.data
-    
-    // Start lazy loading locations and vulnerabilities in parallel, but don't block the UI
-    loadLocations()
-    loadVulnerabilities()
     
   } catch (err) {
     console.error('Error loading version:', err)
@@ -324,6 +360,14 @@ const loadVersion = async () => {
   } finally {
     loading.value = false
   }
+}
+
+const loadAllData = async () => {
+  // Load locations and vulnerabilities in parallel
+  await Promise.all([
+    loadLocations(),
+    loadVulnerabilities()
+  ])
 }
 
 const loadLocations = async () => {
@@ -453,8 +497,12 @@ const getEvidenceColor = (evidenceType: string) => {
   return colors[evidenceType?.toLowerCase()] || 'grey'
 }
 
-onMounted(() => {
-  loadVersion()
+onMounted(async () => {
+  // Load version data first (fast)
+  await loadVersion()
+  
+  // Then load additional data in parallel (locations and vulnerabilities)
+  await loadAllData()
 })
 </script>
 
@@ -538,6 +586,48 @@ onMounted(() => {
   justify-content: center;
   padding: 40px 20px;
   text-align: center;
+}
+
+.loading-animation {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 20px;
+  text-align: center;
+}
+
+.loading-text {
+  margin-top: 16px;
+  text-align: center;
+}
+
+.loading-text h4 {
+  color: #1976d2;
+  margin-bottom: 8px;
+}
+
+.loading-text p {
+  color: #666;
+  font-size: 0.9rem;
+}
+
+.main-loading-animation {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+.main-loading-text h2 {
+  color: #1976d2;
+  font-weight: 600;
+}
+
+.main-loading-text p {
+  color: #666;
+  font-size: 1.1rem;
 }
 
 .locations-list,
