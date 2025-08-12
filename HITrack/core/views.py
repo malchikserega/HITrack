@@ -8,7 +8,7 @@ from .models import Repository, RepositoryTag, Image, Component, ComponentVersio
 from .serializers import (
     RepositorySerializer, RepositoryDetailSerializer, RepositoryTagSerializer, ImageSerializer, ImageListSerializer,
     ComponentSerializer, ComponentVersionSerializer, VulnerabilitySerializer, VulnerabilityShortSerializer, ComponentListSerializer,
-    ComponentDetailOptimizedSerializer, ComponentVersionOptimizedSerializer, ComponentVersionDetailOptimizedSerializer,
+    ComponentDetailOptimizedSerializer, ComponentVersionOptimizedSerializer, ComponentVersionDetailOptimizedSerializer, ComponentVersionUltraOptimizedSerializer,
     RepositoryListSerializer, RepositoryTagListSerializer, ComponentVersionListSerializer,
     HasACRRegistryResponseSerializer, ListACRRegistriesResponseSerializer,
     StatsResponseSerializer, JobAddRepositoriesRequestSerializer,
@@ -906,8 +906,8 @@ class ComponentVersionViewSet(BaseViewSet):
     def get_queryset(self):
         qs = super().get_queryset()
         if self.action == 'retrieve':
-            # Optimize for detail view - prefetch related data and annotate counts with distinct
-            qs = qs.select_related('component').prefetch_related('images').annotate(
+            # Ultra-optimized for detail view - only essential data, no heavy prefetch
+            qs = qs.select_related('component').annotate(
                 vulnerabilities_count=Count('vulnerabilities', distinct=True),
                 images_count=Count('images', distinct=True),
                 locations_count=Count('locations', distinct=True)
@@ -920,15 +920,40 @@ class ComponentVersionViewSet(BaseViewSet):
         if self.action == 'list':
             return ComponentVersionListSerializer
         elif self.action == 'retrieve':
-            return ComponentVersionDetailOptimizedSerializer
+            return ComponentVersionUltraOptimizedSerializer
         return ComponentVersionSerializer
 
     @action(detail=True, methods=['get'])
-    def vulnerabilities(self, request, uuid=None):
+    def images(self, request, uuid=None):
+        """Get images for this component version - lightweight endpoint"""
         version = self.get_object()
-        vulnerabilities = version.vulnerabilities.all()
-        serializer = VulnerabilityShortSerializer(vulnerabilities, many=True)
-        return Response(serializer.data)
+        images = version.images.all().values('uuid', 'name', 'digest')[:50]  # Limit to 50 images
+        
+        return Response({
+            'version_uuid': str(version.uuid),
+            'images': list(images),
+            'total_count': version.images.count()
+        })
+
+    @action(detail=True, methods=['get'])
+    def vulnerabilities(self, request, uuid=None):
+        """Get vulnerabilities for this component version with pagination"""
+        version = self.get_object()
+        vulnerabilities_qs = version.vulnerabilities.all()
+        
+        # Add pagination
+        page = self.paginate_queryset(vulnerabilities_qs)
+        if page is not None:
+            serializer = VulnerabilityShortSerializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+        
+        # Fallback for non-paginated response (limit to 100)
+        vulnerabilities_qs = vulnerabilities_qs[:100]
+        serializer = VulnerabilityShortSerializer(vulnerabilities_qs, many=True)
+        return Response({
+            'results': serializer.data,
+            'total_count': version.vulnerabilities.count()
+        })
 
     @action(detail=True, methods=['get'])
     def locations(self, request, uuid=None):
@@ -938,7 +963,7 @@ class ComponentVersionViewSet(BaseViewSet):
         """
         version = self.get_object()
         
-        # Get all component locations for this version
+        # Get all component locations for this version with pagination
         locations_qs = ComponentLocation.objects.filter(
             component_version=version
         ).select_related('image')
@@ -948,7 +973,34 @@ class ComponentVersionViewSet(BaseViewSet):
         if image_uuid:
             locations_qs = locations_qs.filter(image__uuid=image_uuid)
         
-        # Format location data
+        # Add pagination
+        page = self.paginate_queryset(locations_qs)
+        if page is not None:
+            # Format location data for paginated response
+            location_data = []
+            for location in page:
+                location_data.append({
+                    'image': {
+                        'uuid': str(location.image.uuid),
+                        'name': location.image.name
+                    },
+                    'path': location.path,
+                    'layer_id': location.layer_id,
+                    'access_path': location.access_path,
+                    'evidence_type': location.evidence_type,
+                    'annotations': location.annotations
+                })
+            
+            return self.get_paginated_response({
+                'version_uuid': str(version.uuid),
+                'version': version.version,
+                'component_name': version.component.name,
+                'filtered_by_image': image_uuid,
+                'locations': location_data
+            })
+        
+        # Fallback for non-paginated response (limit to 100)
+        locations_qs = locations_qs[:100]
         location_data = []
         for location in locations_qs:
             location_data.append({
@@ -968,7 +1020,8 @@ class ComponentVersionViewSet(BaseViewSet):
             'version': version.version,
             'component_name': version.component.name,
             'filtered_by_image': image_uuid,
-            'locations': location_data
+            'locations': location_data,
+            'total_count': locations_qs.count()
         })
 
 class ReleaseViewSet(BaseViewSet):
