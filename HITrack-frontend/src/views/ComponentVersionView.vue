@@ -510,34 +510,21 @@ const loadVulnerabilities = async () => {
   vulnerabilitiesLoading.value = true
   try {
     const vulnerabilitiesResponse = await api.get(`/component-versions/${route.params.uuid}/vulnerabilities/`)
-    console.log('Vulnerabilities API response:', vulnerabilitiesResponse.data)
-    console.log('Results type:', typeof vulnerabilitiesResponse.data.results)
-    console.log('Results is array:', Array.isArray(vulnerabilitiesResponse.data.results))
-    if (vulnerabilitiesResponse.data.results && Array.isArray(vulnerabilitiesResponse.data.results)) {
-      console.log('Results array length:', vulnerabilitiesResponse.data.results.length)
-      console.log('First result:', vulnerabilitiesResponse.data.results[0])
-    }
     
     // Handle new API response format with pagination
     if (vulnerabilitiesResponse.data.results && Array.isArray(vulnerabilitiesResponse.data.results)) {
       // Paginated response with direct array
       versionVulnerabilities.value = vulnerabilitiesResponse.data.results
-      console.log('Using paginated results array:', versionVulnerabilities.value)
     } else if (vulnerabilitiesResponse.data.results && vulnerabilitiesResponse.data.results.vulnerabilities) {
       // New format: results.vulnerabilities contains the array
       versionVulnerabilities.value = vulnerabilitiesResponse.data.results.vulnerabilities
-      console.log('Using new format results.vulnerabilities:', versionVulnerabilities.value)
     } else if (vulnerabilitiesResponse.data.total_count !== undefined) {
       // Non-paginated response with total_count
       versionVulnerabilities.value = vulnerabilitiesResponse.data.results || []
-      console.log('Using total_count format:', versionVulnerabilities.value)
     } else {
       // Fallback to old format
       versionVulnerabilities.value = vulnerabilitiesResponse.data || []
-      console.log('Using fallback format:', versionVulnerabilities.value)
     }
-    
-    console.log('Final versionVulnerabilities:', versionVulnerabilities.value)
   } catch (err) {
     console.error('Error loading vulnerabilities:', err)
     versionVulnerabilities.value = []
@@ -549,24 +536,18 @@ const loadVulnerabilities = async () => {
 const loadImages = async () => {
   try {
     const imagesResponse = await api.get(`/component-versions/${route.params.uuid}/images/`)
-    console.log('Images API response:', imagesResponse.data)
     
     // Handle images API response
     if (imagesResponse.data.images && Array.isArray(imagesResponse.data.images)) {
       // Images array in response
       versionImages.value = imagesResponse.data.images
-      console.log('Using images array:', versionImages.value)
     } else if (imagesResponse.data.results && Array.isArray(imagesResponse.data.results)) {
       // Paginated response
       versionImages.value = imagesResponse.data.results
-      console.log('Using paginated results:', versionImages.value)
     } else {
       // Fallback
       versionImages.value = []
-      console.log('No images found, using empty array')
     }
-    
-    console.log('Final versionImages:', versionImages.value)
   } catch (err) {
     console.error('Error loading images:', err)
     versionImages.value = []
