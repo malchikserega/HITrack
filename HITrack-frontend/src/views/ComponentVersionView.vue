@@ -152,6 +152,9 @@
               </div>
               
               <div v-else class="locations-list">
+
+
+                
                 <!-- Show filter notice and option to see all -->
                 <div v-if="route.query.fromImage" class="filter-notice mb-3">
                   <v-alert type="info" variant="tonal" density="compact">
@@ -166,52 +169,61 @@
                     </div>
                   </v-alert>
                 </div>
-                <v-expansion-panels variant="accordion">
-                  <v-expansion-panel
-                    v-for="(location, index) in versionLocations"
-                    :key="index"
-                    class="location-panel"
-                  >
-                    <v-expansion-panel-title>
-                      <div class="location-header">
+                <!-- Expandable location display -->
+                <div v-if="versionLocations.length > 0">
+                  <div class="location-item mb-3" v-for="(loc, index) in versionLocations" :key="`loc-${index}`">
+                    <v-card class="location-card" v-if="loc && loc.path">
+                      <v-card-title 
+                        class="d-flex align-center py-3 cursor-pointer" 
+                        @click="toggleLocation(index)"
+                      >
                         <v-icon size="small" class="mr-2">mdi-file</v-icon>
-                        <span class="location-path">{{ location.path }}</span>
+                        <span class="location-path">{{ loc.path }}</span>
                         <v-chip
                           size="small"
-                          :color="getEvidenceColor(location.evidence_type)"
+                          :color="getEvidenceColor(loc.evidence_type || 'unknown')"
                           variant="tonal"
-                          class="ml-auto evidence-chip"
+                          class="ml-auto mr-2"
                         >
-                          {{ location.evidence_type }}
+                          {{ loc.evidence_type || 'UNKNOWN' }}
                         </v-chip>
-                      </div>
-                    </v-expansion-panel-title>
-                    
-                    <v-expansion-panel-text>
-                      <div class="location-details">
-                        <div class="detail-row">
-                          <span class="detail-label">Image:</span>
-                          <span class="detail-value">{{ location.image?.name || 'Unknown' }}</span>
+                        <v-icon 
+                          :icon="expandedLocations[index] ? 'mdi-chevron-up' : 'mdi-chevron-down'"
+                          size="small"
+                          class="expand-icon"
+                        ></v-icon>
+                      </v-card-title>
+                      
+                      <v-card-text class="pt-0" v-show="expandedLocations[index]">
+                        <div class="location-details">
+                          <div class="detail-row">
+                            <span class="detail-label">Image:</span>
+                            <span class="detail-value">{{ loc.image?.name || 'Unknown' }}</span>
+                          </div>
+                          
+                          <div class="detail-row" v-if="loc.layer_id">
+                            <span class="detail-label">Layer ID:</span>
+                            <span class="detail-value font-mono text-caption">{{ loc.layer_id }}</span>
+                          </div>
+                          
+                          <div class="detail-row" v-if="loc.access_path">
+                            <span class="detail-label">Access Path:</span>
+                            <span class="detail-value font-mono text-caption">{{ loc.access_path }}</span>
+                          </div>
+                          
+                          <div class="detail-row" v-if="loc.annotations && Object.keys(loc.annotations).length">
+                            <span class="detail-label">Annotations:</span>
+                            <pre class="detail-value text-caption">{{ JSON.stringify(loc.annotations, null, 2) }}</pre>
+                          </div>
                         </div>
-                        
-                        <div class="detail-row" v-if="location.layer_id">
-                          <span class="detail-label">Layer ID:</span>
-                          <span class="detail-value font-mono text-caption">{{ location.layer_id }}</span>
-                        </div>
-                        
-                        <div class="detail-row" v-if="location.access_path">
-                          <span class="detail-label">Access Path:</span>
-                          <span class="detail-value font-mono text-caption">{{ location.access_path }}</span>
-                        </div>
-                        
-                        <div class="detail-row" v-if="location.annotations && Object.keys(location.annotations).length">
-                          <span class="detail-label">Annotations:</span>
-                          <pre class="detail-value text-caption">{{ JSON.stringify(location.annotations, null, 2) }}</pre>
-                        </div>
-                      </div>
-                    </v-expansion-panel-text>
-                  </v-expansion-panel>
-                </v-expansion-panels>
+                      </v-card-text>
+                    </v-card>
+                  </div>
+                </div>
+                <div v-else class="text-center py-4">
+                  <v-icon size="48" color="grey">mdi-map-marker-off</v-icon>
+                  <p class="text-grey mt-2">No locations found</p>
+                </div>
               </div>
             </v-card-text>
           </v-card>
@@ -276,38 +288,40 @@
               </div>
               
               <div v-else class="vulnerabilities-list">
-                <v-list>
-                  <v-list-item
-                    v-for="vulnerability in versionVulnerabilities"
-                    :key="vulnerability.uuid"
-                    @click="onVulnerabilityClick(vulnerability)"
-                    class="vulnerability-item"
-                  >
-                    <template v-slot:prepend>
-                      <v-icon :color="getSeverityColor(vulnerability.severity)">
-                        mdi-shield-alert
-                      </v-icon>
-                    </template>
-                    
-                    <v-list-item-title class="vulnerability-title">
-                      {{ vulnerability.vulnerability_id }}
-                    </v-list-item-title>
-                    
-                    <v-list-item-subtitle class="vulnerability-subtitle">
-                      {{ vulnerability.description?.substring(0, 100) }}{{ vulnerability.description?.length > 100 ? '...' : '' }}
-                    </v-list-item-subtitle>
-                    
-                    <template v-slot:append>
-                      <v-chip
-                        size="small"
-                        :color="getSeverityColor(vulnerability.severity)"
-                        variant="tonal"
-                      >
-                        {{ vulnerability.severity }}
-                      </v-chip>
-                    </template>
-                  </v-list-item>
-                </v-list>
+
+
+                
+                <!-- Simple vulnerability display without v-for -->
+                <div v-if="versionVulnerabilities.length > 0">
+                  <div class="vulnerability-item mb-3" v-for="(vuln, index) in versionVulnerabilities" :key="`vuln-${index}`">
+                    <v-card class="vulnerability-card" v-if="vuln && (vuln.uuid || vuln.vulnerability_id)" @click="onVulnerabilityClick(vuln)">
+                      <v-card-title class="d-flex align-center py-3">
+                        <v-icon :color="getSeverityColor(vuln.severity || 'unknown')" class="mr-2">
+                          mdi-shield-alert
+                        </v-icon>
+                        <span class="vulnerability-title">{{ vuln.vulnerability_id || 'Unknown' }}</span>
+                        <v-chip
+                          size="small"
+                          :color="getSeverityColor(vuln.severity || 'unknown')"
+                          variant="tonal"
+                          class="ml-auto"
+                        >
+                          {{ vuln.severity || 'UNKNOWN' }}
+                        </v-chip>
+                      </v-card-title>
+                      
+                      <v-card-text class="pt-0">
+                        <p class="vulnerability-subtitle">
+                          {{ vuln.description?.substring(0, 100) || 'No description available' }}{{ vuln.description?.length > 100 ? '...' : '' }}
+                        </p>
+                      </v-card-text>
+                    </v-card>
+                  </div>
+                </div>
+                <div v-else class="text-center py-4">
+                  <v-icon size="48" color="success">mdi-shield-check</v-icon>
+                  <p class="text-grey mt-2">No vulnerabilities found</p>
+                </div>
               </div>
             </v-card-text>
           </v-card>
@@ -322,19 +336,21 @@
               <v-icon class="mr-2" color="info">mdi-docker</v-icon>
               Used In Images
               <v-spacer></v-spacer>
-              <v-chip size="small" color="info">{{ version.images?.length || 0 }}</v-chip>
+                              <v-chip size="small" color="info">{{ versionImages.length || 0 }}</v-chip>
             </v-card-title>
             
             <v-card-text>
-              <div v-if="!version.images || version.images.length === 0" class="empty-state">
+              <div v-if="!versionImages || versionImages.length === 0" class="empty-state">
                 <v-icon size="48" color="grey">mdi-docker</v-icon>
                 <p class="text-grey mt-2">No images found</p>
               </div>
               
               <div v-else class="images-list">
-                <v-list>
+
+                
+                <v-list v-if="versionImages && versionImages.length > 0">
                   <v-list-item
-                    v-for="image in version.images"
+                    v-for="image in versionImages"
                     :key="image.uuid"
                     @click="goToImage(image.uuid)"
                     class="image-item"
@@ -350,8 +366,17 @@
                     <v-list-item-subtitle class="image-subtitle">
                       {{ image.digest?.substring(0, 20) || 'No digest' }}
                     </v-list-item-subtitle>
+                    
+                    <template v-slot:append>
+                      <v-icon color="primary">mdi-chevron-right</v-icon>
+                    </template>
                   </v-list-item>
                 </v-list>
+                
+                <div v-if="!versionImages || versionImages.length === 0" class="empty-state">
+                  <v-icon size="48" color="grey">mdi-docker</v-icon>
+                  <p class="text-grey mt-2">No images found</p>
+                </div>
               </div>
             </v-card-text>
           </v-card>
@@ -362,7 +387,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import api from '@/plugins/axios'
 
@@ -374,8 +399,33 @@ const locationsLoading = ref(false)
 const vulnerabilitiesLoading = ref(false)
 const error = ref(null)
 const version = ref(null)
-const versionLocations = ref([])
-const versionVulnerabilities = ref([])
+const versionLocations = ref<Location[]>([])
+const versionVulnerabilities = ref<Vulnerability[]>([])
+const versionImages = ref<any[]>([])
+const expandedLocations = ref<{ [key: number]: boolean }>({})
+
+// Computed properties to help Vue recognize the data
+const locationsList = computed(() => versionLocations.value)
+const vulnerabilitiesList = computed(() => versionVulnerabilities.value)
+const imagesList = computed(() => versionImages.value)
+
+// Type definitions for template variables
+interface Vulnerability {
+  uuid?: string
+  vulnerability_id?: string
+  severity?: string
+  description?: string
+}
+
+interface Location {
+  uuid?: string
+  path?: string
+  evidence_type?: string
+  image?: any
+  layer_id?: string
+  access_path?: string
+  annotations?: any
+}
 
 const loadVersion = async () => {
   loading.value = true
@@ -395,10 +445,11 @@ const loadVersion = async () => {
 }
 
 const loadAllData = async () => {
-  // Load locations and vulnerabilities in parallel
+  // Load locations, vulnerabilities, and images in parallel
   await Promise.all([
     loadLocations(),
-    loadVulnerabilities()
+    loadVulnerabilities(),
+    loadImages()
   ])
 }
 
@@ -415,7 +466,61 @@ const loadLocations = async () => {
     }
     
     const locationsResponse = await api.get(url)
-    versionLocations.value = locationsResponse.data.locations || []
+    
+    // Handle new API response format with pagination
+    if (locationsResponse.data.results && locationsResponse.data.results.locations) {
+      // Backend format: results.locations contains the array
+      versionLocations.value = locationsResponse.data.results.locations
+      console.log('Using backend format results.locations:', versionLocations.value)
+    } else if (locationsResponse.data.results && Array.isArray(locationsResponse.data.results)) {
+      // Paginated response with direct array
+      versionLocations.value = locationsResponse.data.results
+      console.log('Using paginated results array:', versionLocations.value)
+    } else if (locationsResponse.data.locations) {
+      // Non-paginated response with locations array
+      versionLocations.value = locationsResponse.data.locations
+      console.log('Using locations array:', versionLocations.value)
+    } else if (locationsResponse.data.results && typeof locationsResponse.data.results === 'object') {
+      // Results is an object, try to extract locations from it
+      if (Array.isArray(locationsResponse.data.results)) {
+        versionLocations.value = locationsResponse.data.results
+        console.log('Using results as array:', versionLocations.value)
+      } else {
+        // Try to find any array property in results
+        const resultKeys = Object.keys(locationsResponse.data.results)
+        for (const key of resultKeys) {
+          if (Array.isArray(locationsResponse.data.results[key])) {
+            versionLocations.value = locationsResponse.data.results[key]
+            console.log(`Using results.${key} as array:`, versionLocations.value)
+            break
+          }
+        }
+        if (versionLocations.value.length === 0) {
+          console.log('No array found in results, using fallback')
+          versionLocations.value = locationsResponse.data || []
+        }
+      }
+    } else {
+      // Fallback to old format
+      versionLocations.value = locationsResponse.data || []
+      console.log('Using fallback format:', versionLocations.value)
+    }
+    
+    console.log('Final versionLocations:', versionLocations.value)
+    console.log('versionLocations length:', versionLocations.value.length)
+    console.log('versionLocations type:', typeof versionLocations.value)
+    console.log('First location item:', versionLocations.value[0])
+    
+    // Debug: Check if the data has the expected structure
+    if (versionLocations.value.length > 0) {
+      const firstItem = versionLocations.value[0]
+      console.log('First location structure:', {
+        hasPath: !!firstItem.path,
+        hasImage: !!firstItem.image,
+        hasEvidenceType: !!firstItem.evidence_type,
+        keys: Object.keys(firstItem)
+      })
+    }
   } catch (err) {
     console.error('Error loading locations:', err)
     versionLocations.value = []
@@ -428,12 +533,66 @@ const loadVulnerabilities = async () => {
   vulnerabilitiesLoading.value = true
   try {
     const vulnerabilitiesResponse = await api.get(`/component-versions/${route.params.uuid}/vulnerabilities/`)
-    versionVulnerabilities.value = vulnerabilitiesResponse.data || []
+    console.log('Vulnerabilities API response:', vulnerabilitiesResponse.data)
+    console.log('Results type:', typeof vulnerabilitiesResponse.data.results)
+    console.log('Results is array:', Array.isArray(vulnerabilitiesResponse.data.results))
+    if (vulnerabilitiesResponse.data.results && Array.isArray(vulnerabilitiesResponse.data.results)) {
+      console.log('Results array length:', vulnerabilitiesResponse.data.results.length)
+      console.log('First result:', vulnerabilitiesResponse.data.results[0])
+    }
+    
+    // Handle new API response format with pagination
+    if (vulnerabilitiesResponse.data.results && Array.isArray(vulnerabilitiesResponse.data.results)) {
+      // Paginated response with direct array
+      versionVulnerabilities.value = vulnerabilitiesResponse.data.results
+      console.log('Using paginated results array:', versionVulnerabilities.value)
+    } else if (vulnerabilitiesResponse.data.results && vulnerabilitiesResponse.data.results.vulnerabilities) {
+      // New format: results.vulnerabilities contains the array
+      versionVulnerabilities.value = vulnerabilitiesResponse.data.results.vulnerabilities
+      console.log('Using new format results.vulnerabilities:', versionVulnerabilities.value)
+    } else if (vulnerabilitiesResponse.data.total_count !== undefined) {
+      // Non-paginated response with total_count
+      versionVulnerabilities.value = vulnerabilitiesResponse.data.results || []
+      console.log('Using total_count format:', versionVulnerabilities.value)
+    } else {
+      // Fallback to old format
+      versionVulnerabilities.value = vulnerabilitiesResponse.data || []
+      console.log('Using fallback format:', versionVulnerabilities.value)
+    }
+    
+    console.log('Final versionVulnerabilities:', versionVulnerabilities.value)
   } catch (err) {
     console.error('Error loading vulnerabilities:', err)
     versionVulnerabilities.value = []
   } finally {
     vulnerabilitiesLoading.value = false
+  }
+}
+
+const loadImages = async () => {
+  try {
+    const imagesResponse = await api.get(`/component-versions/${route.params.uuid}/images/`)
+    console.log('Images API response:', imagesResponse.data)
+    
+    // Handle images API response
+    if (imagesResponse.data.images && Array.isArray(imagesResponse.data.images)) {
+      // Images array in response
+      versionImages.value = imagesResponse.data.images
+      console.log('Using images array:', versionImages.value)
+    } else if (imagesResponse.data.results && Array.isArray(imagesResponse.data.results)) {
+      // Paginated response
+      versionImages.value = imagesResponse.data.results
+      console.log('Using paginated results:', versionImages.value)
+    } else {
+      // Fallback
+      versionImages.value = []
+      console.log('No images found, using empty array')
+    }
+    
+    console.log('Final versionImages:', versionImages.value)
+  } catch (err) {
+    console.error('Error loading images:', err)
+    versionImages.value = []
   }
 }
 
@@ -529,6 +688,10 @@ const getEvidenceColor = (evidenceType: string) => {
   return colors[evidenceType?.toLowerCase()] || 'grey'
 }
 
+const toggleLocation = (index: number) => {
+  expandedLocations.value[index] = !expandedLocations.value[index]
+}
+
 onMounted(async () => {
   // Load version data first (fast) - UI will show immediately
   await loadVersion()
@@ -618,6 +781,22 @@ onMounted(async () => {
   justify-content: center;
   padding: 40px 20px;
   text-align: center;
+}
+
+.cursor-pointer {
+  cursor: pointer;
+}
+
+.expand-icon {
+  transition: transform 0.2s ease;
+}
+
+.location-card {
+  transition: all 0.2s ease;
+}
+
+.location-card:hover {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
 }
 
 .loading-animation {

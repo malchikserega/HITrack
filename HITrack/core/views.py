@@ -973,6 +973,9 @@ class ComponentVersionViewSet(BaseViewSet):
         if image_uuid:
             locations_qs = locations_qs.filter(image__uuid=image_uuid)
         
+        # Order the queryset to avoid pagination warnings
+        locations_qs = locations_qs.order_by('path', 'created_at')
+        
         # Add pagination
         page = self.paginate_queryset(locations_qs)
         if page is not None:
