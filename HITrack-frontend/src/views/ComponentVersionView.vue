@@ -219,6 +219,21 @@
                       </v-card-text>
                     </v-card>
                   </div>
+                  
+                  <!-- Load More Button -->
+                  <div v-if="locationsHasMore" class="text-center mt-4">
+                    <v-btn
+                      @click="loadMoreLocations"
+                      :loading="locationsLoadingMore"
+                      :disabled="locationsLoadingMore"
+                      variant="outlined"
+                      color="primary"
+                      class="load-more-btn"
+                    >
+                      <v-icon v-if="!locationsLoadingMore" class="mr-2">mdi-arrow-down</v-icon>
+                      {{ locationsLoadingMore ? 'Loading...' : 'Load More Locations' }}
+                    </v-btn>
+                  </div>
                 </div>
                 <div v-else class="text-center py-4">
                   <v-icon size="48" color="grey">mdi-map-marker-off</v-icon>
@@ -402,9 +417,12 @@ const version = ref(null)
 const versionLocations = ref<Location[]>([])
 const versionVulnerabilities = ref<Vulnerability[]>([])
 const versionImages = ref<any[]>([])
-const expandedLocations = ref<{ [key: number]: boolean }>({})
-
-// Computed properties to help Vue recognize the data
+  const expandedLocations = ref<{ [key: number]: boolean }>({})
+  const locationsNextPage = ref<string | null>(null)
+  const locationsHasMore = ref(false)
+  const locationsLoadingMore = ref(false)
+  
+  // Computed properties to help Vue recognize the data
 const locationsList = computed(() => versionLocations.value)
 const vulnerabilitiesList = computed(() => versionVulnerabilities.value)
 const imagesList = computed(() => versionImages.value)
@@ -453,8 +471,13 @@ const loadAllData = async () => {
   ])
 }
 
-const loadLocations = async () => {
-  locationsLoading.value = true
+const loadLocations = async (isLoadMore = false) => {
+  if (isLoadMore) {
+    locationsLoadingMore.value = true
+  } else {
+    locationsLoading.value = true
+  }
+  
   try {
     // Check if we're filtering by specific image (came from ImageDetailView)
     const fromImageUuid = route.query.fromImage
@@ -465,44 +488,75 @@ const loadLocations = async () => {
       url += `?image=${fromImageUuid}`
     }
     
+    // Add page parameter for load more
+    if (isLoadMore && locationsNextPage.value) {
+      url = locationsNextPage.value
+    }
+    
     const locationsResponse = await api.get(url)
     
+    // Handle pagination metadata
+    if (locationsResponse.data.next) {
+      locationsNextPage.value = locationsResponse.data.next
+      locationsHasMore.value = true
+    } else {
+      locationsNextPage.value = null
+      locationsHasMore.value = false
+    }
+    
     // Handle new API response format with pagination
+    let newLocations = []
     if (locationsResponse.data.results && locationsResponse.data.results.locations) {
       // Backend format: results.locations contains the array
-      versionLocations.value = locationsResponse.data.results.locations
+      newLocations = locationsResponse.data.results.locations
     } else if (locationsResponse.data.results && Array.isArray(locationsResponse.data.results)) {
       // Paginated response with direct array
-      versionLocations.value = locationsResponse.data.results
+      newLocations = locationsResponse.data.results
     } else if (locationsResponse.data.locations) {
       // Non-paginated response with locations array
-      versionLocations.value = locationsResponse.data.locations
+      newLocations = locationsResponse.data.locations
     } else if (locationsResponse.data.results && typeof locationsResponse.data.results === 'object') {
       // Results is an object, try to extract locations from it
       if (Array.isArray(locationsResponse.data.results)) {
-        versionLocations.value = locationsResponse.data.results
+        newLocations = locationsResponse.data.results
       } else {
         // Try to find any array property in results
         const resultKeys = Object.keys(locationsResponse.data.results)
         for (const key of resultKeys) {
           if (Array.isArray(locationsResponse.data.results[key])) {
-            versionLocations.value = locationsResponse.data.results[key]
+            newLocations = locationsResponse.data.results[key]
             break
           }
         }
-        if (versionLocations.value.length === 0) {
-          versionLocations.value = locationsResponse.data || []
+        if (newLocations.length === 0) {
+          newLocations = locationsResponse.data || []
         }
       }
     } else {
       // Fallback to old format
-      versionLocations.value = locationsResponse.data || []
+      newLocations = locationsResponse.data || []
     }
+    
+    // Append or replace locations based on whether it's load more
+    if (isLoadMore) {
+      versionLocations.value = [...versionLocations.value, ...newLocations]
+    } else {
+      versionLocations.value = newLocations
+      // Reset expanded states for new locations
+      expandedLocations.value = {}
+    }
+    
   } catch (err) {
     console.error('Error loading locations:', err)
-    versionLocations.value = []
+    if (!isLoadMore) {
+      versionLocations.value = []
+    }
   } finally {
-    locationsLoading.value = false
+    if (isLoadMore) {
+      locationsLoadingMore.value = false
+    } else {
+      locationsLoading.value = false
+    }
   }
 }
 
@@ -650,6 +704,12 @@ const toggleLocation = (index: number) => {
   expandedLocations.value[index] = !expandedLocations.value[index]
 }
 
+const loadMoreLocations = async () => {
+  if (locationsHasMore.value && !locationsLoadingMore.value) {
+    await loadLocations(true)
+  }
+}
+
 onMounted(async () => {
   // Load version data first (fast) - UI will show immediately
   await loadVersion()
@@ -755,6 +815,16 @@ onMounted(async () => {
 
 .location-card:hover {
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.load-more-btn {
+  min-width: 200px;
+  transition: all 0.2s ease;
+}
+
+.load-more-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
 }
 
 .loading-animation {
