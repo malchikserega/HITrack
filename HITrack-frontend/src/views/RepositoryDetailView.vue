@@ -26,14 +26,48 @@
           <v-progress-circular indeterminate color="primary" size="48"></v-progress-circular>
           <span class="text-body-1 mt-3">Loading charts...</span>
         </div>
-        <Bar v-else :data="barChartData" :options="barChartOptions" />
+        <div v-else class="chart-container">
+          <!-- Chart Header with consistent height -->
+          <div class="chart-header">
+            <h3 class="text-h6 font-weight-bold chart-title">Components vs Vulnerabilities</h3>
+            <div class="chart-spacer"></div>
+          </div>
+          
+
+          
+          <div class="chart-wrapper">
+            <Bar :data="barChartData" :options="barChartOptions" />
+          </div>
+        </div>
       </v-col>
       <v-col cols="12" md="6">
         <div v-if="chartsLoading" class="d-flex flex-column align-center justify-center pa-8">
           <v-progress-circular indeterminate color="primary" size="48"></v-progress-circular>
           <span class="text-body-1 mt-3">Loading charts...</span>
         </div>
-        <Bar v-else :data="comboChartData as any" :options="comboChartOptions" />
+        <div v-else class="chart-container">
+          <!-- Chart Header with Filter -->
+          <div class="chart-header">
+            <h3 class="text-h6 font-weight-bold chart-title">Vulnerability Trend Analysis</h3>
+            <v-btn
+              :color="showOnlyVulnerableVersions ? 'primary' : 'grey'"
+              :variant="showOnlyVulnerableVersions ? 'elevated' : 'outlined'"
+              size="small"
+              prepend-icon="mdi-filter-variant"
+              @click="showOnlyVulnerableVersions = !showOnlyVulnerableVersions"
+              :disabled="chartsLoading"
+              class="chart-filter-btn"
+            >
+              {{ showOnlyVulnerableVersions ? 'Show All' : 'Vulnerable Only' }}
+            </v-btn>
+          </div>
+          
+
+          
+          <div class="chart-wrapper">
+            <Bar :data="comboChartData as any" :options="comboChartOptions" />
+          </div>
+        </div>
       </v-col>
     </v-row>
     <v-row>
@@ -328,6 +362,7 @@ const tagsSortBy = ref<SortItem[]>([{ key: 'updated_at', order: 'desc' }])
 const tagsPageCount = computed(() => Math.ceil(tagsTotal.value / tagsPerPage.value) || 1)
 
 const tagsForCharts = ref<any[]>([])
+const showOnlyVulnerableVersions = ref(false)
 
 // Add new tag functionality
 const showAddTagDialog = ref(false)
@@ -452,9 +487,20 @@ const fetchTagsForCharts = async () => {
   }
 }
 
-const tagLabels = computed(() => tagsForCharts.value.map((tag: any) => tag.tag))
-const findingsData = computed(() => tagsForCharts.value.map((tag: any) => tag.findings))
-const uniqueComponentsData = computed(() => tagsForCharts.value.map((tag: any) => tag.components))
+// Filter data based on vulnerability filter
+const filteredChartData = computed(() => {
+  if (!showOnlyVulnerableVersions.value) {
+    return tagsForCharts.value
+  }
+  
+  return tagsForCharts.value.filter((tag: any) => 
+    tag.findings && tag.findings > 0 && tag.components && tag.components > 0
+  )
+})
+
+const tagLabels = computed(() => filteredChartData.value.map((tag: any) => tag.tag))
+const findingsData = computed(() => filteredChartData.value.map((tag: any) => tag.findings))
+const uniqueComponentsData = computed(() => filteredChartData.value.map((tag: any) => tag.components))
 
 const barChartData = computed(() => ({
   labels: tagLabels.value,
@@ -475,6 +521,7 @@ const barChartData = computed(() => ({
 }))
 const barChartOptions = {
   responsive: true,
+  maintainAspectRatio: false,
   plugins: {
     legend: { display: true },
     title: { display: false },
@@ -483,6 +530,14 @@ const barChartOptions = {
   scales: {
     x: { stacked: false, grid: { display: false } },
     y: { stacked: false, beginAtZero: true, grid: { color: '#eee' } }
+  },
+  layout: {
+    padding: {
+      top: 0,
+      bottom: 0,
+      left: 0,
+      right: 0
+    }
   }
 }
 
@@ -536,6 +591,7 @@ const comboChartData = computed(() => ({
 }))
 const comboChartOptions = {
   responsive: true,
+  maintainAspectRatio: false,
   plugins: {
     legend: { display: true },
     title: { display: false },
@@ -544,6 +600,14 @@ const comboChartOptions = {
   scales: {
     x: { grid: { display: false } },
     y: { beginAtZero: true, grid: { color: '#eee' } }
+  },
+  layout: {
+    padding: {
+      top: 0,
+      bottom: 0,
+      left: 0,
+      right: 0
+    }
   }
 }
 
@@ -711,5 +775,50 @@ onMounted(async () => {
   color: #39FF14 !important;
   background: rgba(57, 255, 20, 0.1) !important;
   border: 1px solid #39FF14 !important;
+}
+
+/* Chart filter button styles */
+.chart-filter-btn {
+  transition: all 0.2s ease;
+}
+
+.chart-filter-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+}
+
+/* Chart header alignment */
+.chart-header {
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.chart-title {
+  margin-bottom: 0;
+  line-height: 1.2;
+}
+
+.chart-spacer {
+  width: 120px;
+  flex-shrink: 0;
+}
+
+/* Chart container alignment */
+.chart-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+
+
+.chart-wrapper {
+  flex: 1;
+  min-height: 300px;
+  display: flex;
+  align-items: flex-start;
 }
 </style> 
