@@ -471,55 +471,32 @@ const loadLocations = async () => {
     if (locationsResponse.data.results && locationsResponse.data.results.locations) {
       // Backend format: results.locations contains the array
       versionLocations.value = locationsResponse.data.results.locations
-      console.log('Using backend format results.locations:', versionLocations.value)
     } else if (locationsResponse.data.results && Array.isArray(locationsResponse.data.results)) {
       // Paginated response with direct array
       versionLocations.value = locationsResponse.data.results
-      console.log('Using paginated results array:', versionLocations.value)
     } else if (locationsResponse.data.locations) {
       // Non-paginated response with locations array
       versionLocations.value = locationsResponse.data.locations
-      console.log('Using locations array:', versionLocations.value)
     } else if (locationsResponse.data.results && typeof locationsResponse.data.results === 'object') {
       // Results is an object, try to extract locations from it
       if (Array.isArray(locationsResponse.data.results)) {
         versionLocations.value = locationsResponse.data.results
-        console.log('Using results as array:', versionLocations.value)
       } else {
         // Try to find any array property in results
         const resultKeys = Object.keys(locationsResponse.data.results)
         for (const key of resultKeys) {
           if (Array.isArray(locationsResponse.data.results[key])) {
             versionLocations.value = locationsResponse.data.results[key]
-            console.log(`Using results.${key} as array:`, versionLocations.value)
             break
           }
         }
         if (versionLocations.value.length === 0) {
-          console.log('No array found in results, using fallback')
           versionLocations.value = locationsResponse.data || []
         }
       }
     } else {
       // Fallback to old format
       versionLocations.value = locationsResponse.data || []
-      console.log('Using fallback format:', versionLocations.value)
-    }
-    
-    console.log('Final versionLocations:', versionLocations.value)
-    console.log('versionLocations length:', versionLocations.value.length)
-    console.log('versionLocations type:', typeof versionLocations.value)
-    console.log('First location item:', versionLocations.value[0])
-    
-    // Debug: Check if the data has the expected structure
-    if (versionLocations.value.length > 0) {
-      const firstItem = versionLocations.value[0]
-      console.log('First location structure:', {
-        hasPath: !!firstItem.path,
-        hasImage: !!firstItem.image,
-        hasEvidenceType: !!firstItem.evidence_type,
-        keys: Object.keys(firstItem)
-      })
     }
   } catch (err) {
     console.error('Error loading locations:', err)
