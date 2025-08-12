@@ -9,8 +9,23 @@ from typing import List, Dict
 from django.db import transaction
 import time
 
+# Performance and logging configuration
+# Set DEBUG_LOGGING=true environment variable to enable debug logging
+# Set DEBUG_LOGGING=false or unset to disable debug logging for production
+#
+# Performance optimizations implemented:
+# - Database queries optimized with select_related and prefetch_related
+# - Bulk operations for better performance
+# - Conditional debug logging to reduce I/O overhead
+# - Task retry mechanisms with exponential backoff
+# - Performance monitoring task for system health checks
+
 # Configure logging
 logger = logging.getLogger(__name__)
+
+# Remove debug logging in production
+import os
+DEBUG_LOGGING = os.getenv('DEBUG_LOGGING', 'False').lower() == 'true'
 
 DOCKER_IMAGE_REGEX = re.compile(r'^[a-zA-Z0-9._/-]+(:[a-zA-Z0-9._-]+)?$')
 
@@ -34,8 +49,10 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
     
     try:
         # Get image with prefetched related data
-        image = Image.objects.prefetch_related(
-            'repository_tags__repository__container_registry'
+        image = Image.objects.select_related().prefetch_related(
+            'repository_tags__repository__container_registry',
+            'component_versions__component',
+            'component_versions__vulnerabilities'
         ).get(uuid=image_uuid)
         
         # Check if already in process
@@ -164,14 +181,27 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
             "error": f"Image with UUID {image_uuid} not found"
         }
     except Exception as e:
-        logger.error(f"Error generating SBOM for image {image_uuid}: {str(e)}")
+        error_msg = f"Error generating SBOM for image {image_uuid}: {str(e)}"
+        logger.error(error_msg)
+        
+        # Try to update image status to error
         try:
             image = Image.objects.get(uuid=image_uuid)
             image.scan_status = 'error'
             image.save()
-        except Exception:
-            pass
-        self.retry(exc=e, countdown=60 * (2 ** self.request.retries))
+        except Exception as save_error:
+            logger.error(f"Failed to update image status: {str(save_error)}")
+        
+        # Retry with exponential backoff
+        if self.request.retries < self.max_retries:
+            self.retry(exc=e, countdown=60 * (2 ** self.request.retries))
+        else:
+            logger.error(f"Max retries exceeded for image {image_uuid}")
+            return {
+                "status": "error",
+                "error": error_msg,
+                "max_retries_exceeded": True
+            }
 
 @celery_app.task(name="Periodic Repository Scan")
 def periodic_repository_scan():
@@ -185,7 +215,7 @@ def periodic_repository_scan():
 
     logger.info("Starting periodic repository scan")
     results = []
-    active_repositories = Repository.objects.filter(status=True)
+    active_repositories = Repository.objects.filter(status=True).select_related('container_registry')
     logger.info(f"Found {active_repositories.count()} active repositories")
 
     for repository in active_repositories:
@@ -355,13 +385,13 @@ def process_all_tags():
     logger.info("Starting processing of all tags from active repositories")
 
     results = []
-    active_repositories = Repository.objects.filter(status=True)
+    active_repositories = Repository.objects.filter(status=True).select_related('container_registry')
     logger.info(f"Found {active_repositories.count()} active repositories")
 
     for repository in active_repositories:
         try:
             logger.info(f"Processing repository: {repository.name}")
-            repository_tags = RepositoryTag.objects.filter(repository=repository)
+            repository_tags = RepositoryTag.objects.filter(repository=repository).select_related('repository')
             logger.info(f"Found {repository_tags.count()} tags for repository {repository.name}")
 
             # Get registry token if available
@@ -467,7 +497,10 @@ def parse_sbom_and_create_components(image_uuid: str):
 
     try:
         # Get image with prefetched related data
-        image = Image.objects.select_related().get(uuid=image_uuid)
+        image = Image.objects.select_related().prefetch_related(
+            'component_versions__component',
+            'component_versions__vulnerabilities'
+        ).get(uuid=image_uuid)
         logger.info(f"Found image: {image.name} (digest: {image.digest})")
         
         if not image.sbom_data:
@@ -710,9 +743,9 @@ def update_components_latest_versions(image_uuid: str):
                     )
                     continue
                 if not component_version.purl:
-                    logger.debug(f"No PURL found for component version {component_version.component.name}:{component_version.version}")
+                    logger.info(f"No PURL found for component version {component_version.component.name}:{component_version.version}")
                     continue
-                logger.debug(f"Processing component version {component_version.component.name}:{component_version.version}")
+                logger.info(f"Processing component version {component_version.component.name}:{component_version.version}")
                 parts = component_version.purl.split("/")
                 if len(parts) < 2:
                     continue
@@ -724,8 +757,9 @@ def update_components_latest_versions(image_uuid: str):
                     package_name = f"{package_name}/{parts[2].lower()}"
                 if "@" in package_name:
                     package_name = package_name.split("@")[0]
-                logger.debug(f"Processing PURL: {component_version.purl}")
-                logger.debug(f"Package type: {package_type}, Package name: {package_name}")
+                if DEBUG_LOGGING:
+                    logger.debug(f"Processing PURL: {component_version.purl}")
+                    logger.debug(f"Package type: {package_type}, Package name: {package_name}")
                 latest_version = None
                 if package_type == "pypi":
                     url = f"https://pypi.org/pypi/{package_name}/json"
@@ -837,20 +871,27 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
             if vuln_id:
                 vuln_ids.add(vuln_id)
 
-        # Bulk create Components
+        # Bulk create Components with optimized query
         existing_components = {c.name: c for c in Component.objects.filter(name__in=component_names)}
         new_components = [Component(name=name) for name in component_names if name not in existing_components]
-        Component.objects.bulk_create(new_components, ignore_conflicts=True)
-        # Refresh cache
-        existing_components = {c.name: c for c in Component.objects.filter(name__in=component_names)}
+        if new_components:
+            Component.objects.bulk_create(new_components, ignore_conflicts=True)
+            # Refresh cache only if new components were created
+            existing_components.update({c.name: c for c in Component.objects.filter(
+                name__in=[nc.name for nc in new_components]
+            )})
 
-        # Bulk create Vulnerabilities
+        # Bulk create Vulnerabilities with optimized query
         existing_vulns = {v.vulnerability_id: v for v in Vulnerability.objects.filter(vulnerability_id__in=vuln_ids)}
         new_vulns = [Vulnerability(vulnerability_id=vid) for vid in vuln_ids if vid not in existing_vulns]
-        Vulnerability.objects.bulk_create(new_vulns, ignore_conflicts=True)
-        existing_vulns = {v.vulnerability_id: v for v in Vulnerability.objects.filter(vulnerability_id__in=vuln_ids)}
+        if new_vulns:
+            Vulnerability.objects.bulk_create(new_vulns, ignore_conflicts=True)
+            # Refresh cache only if new vulnerabilities were created
+            existing_vulns.update({v.vulnerability_id: v for v in Vulnerability.objects.filter(
+                vulnerability_id__in=[nv.vulnerability_id for nv in new_vulns]
+            )})
 
-        # Bulk create ComponentVersions
+        # Bulk create ComponentVersions with optimized query
         existing_versions = {(cv.component.name, cv.version): cv for cv in ComponentVersion.objects.filter(
             component__name__in=component_names,
             version__in=[v for _, v in component_versions_set]
@@ -859,11 +900,13 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
             ComponentVersion(component=existing_components[name], version=version)
             for (name, version) in component_versions_set if (name, version) not in existing_versions
         ]
-        ComponentVersion.objects.bulk_create(new_versions, ignore_conflicts=True)
-        existing_versions = {(cv.component.name, cv.version): cv for cv in ComponentVersion.objects.filter(
-            component__name__in=component_names,
-            version__in=[v for _, v in component_versions_set]
-        ).select_related('component')}
+        if new_versions:
+            ComponentVersion.objects.bulk_create(new_versions, ignore_conflicts=True)
+            # Refresh cache only if new versions were created
+            existing_versions.update({(cv.component.name, cv.version): cv for cv in ComponentVersion.objects.filter(
+                component__name__in=[nv.component.name for nv in new_versions],
+                version__in=[nv.version for nv in new_versions]
+            ).select_related('component')})
 
         # Process each match
         for match in matches:
@@ -1020,16 +1063,21 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
             "error": f"Image with UUID {image_uuid} not found"
         }
     except Exception as e:
-        logger.error(f"Error processing Grype scan results for image {image_uuid}: {str(e)}")
+        error_msg = f"Error processing Grype scan results for image {image_uuid}: {str(e)}"
+        logger.error(error_msg)
+        
+        # Try to update image status to error
         try:
             image = Image.objects.get(uuid=image_uuid)
             image.scan_status = 'error'
             image.save()
-        except Exception:
-            pass
+        except Exception as save_error:
+            logger.error(f"Failed to update image status: {str(save_error)}")
+        
         return {
             "status": "error",
-            "error": str(e)
+            "error": error_msg,
+            "error_type": type(e).__name__
         }
 
 @celery_app.task(bind=True, max_retries=1, name="Scan Image with Grype")
@@ -1125,14 +1173,27 @@ def scan_image_with_grype(self, image_uuid: str):
             "error": f"Image with UUID {image_uuid} not found"
         }
     except Exception as e:
-        logger.error(f"Error scanning image {image_uuid} with Grype: {str(e)}")
+        error_msg = f"Error scanning image {image_uuid} with Grype: {str(e)}"
+        logger.error(error_msg)
+        
+        # Try to update image status to error
         try:
             image = Image.objects.get(uuid=image_uuid)
             image.scan_status = 'error'
             image.save()
-        except Exception:
-            pass
-        self.retry(exc=e, countdown=60 * (2 ** self.request.retries))
+        except Exception as save_error:
+            logger.error(f"Failed to update image status: {str(save_error)}")
+        
+        # Retry with exponential backoff
+        if self.request.retries < self.max_retries:
+            self.retry(exc=e, countdown=60 * (2 ** self.request.retries))
+        else:
+            logger.error(f"Max retries exceeded for image {image_uuid}")
+            return {
+                "status": "error",
+                "error": error_msg,
+                "max_retries_exceeded": True
+            }
 
 @celery_app.task(name="Rescan All Images with SBOM")
 def rescan_all_images_with_sbom():
@@ -1291,7 +1352,7 @@ def scan_repository_tags(repository_uuid: str):
     logger.info(f"Starting repository tags scan for repository {repository_uuid}")
     
     try:
-        repository = Repository.objects.get(uuid=repository_uuid)
+        repository = Repository.objects.select_related('container_registry').get(uuid=repository_uuid)
         
         # Update status to in_process
         repository.scan_status = 'in_process'
@@ -2235,6 +2296,81 @@ def test_failing_task():
     """
     raise Exception("This is a test failure")
 
+@celery_app.task(name="Performance Monitor")
+def performance_monitor():
+    """
+    Monitor system performance and database query efficiency.
+    This task can be scheduled to run periodically.
+    """
+    from django.db import connection
+    from django.db.models import Count
+    from .models import Image, Component, Vulnerability, Repository
+    import time
+    
+    start_time = time.time()
+    
+    try:
+        # Get database statistics
+        stats = {
+            'total_images': Image.objects.count(),
+            'total_components': Component.objects.count(),
+            'total_vulnerabilities': Vulnerability.objects.count(),
+            'total_repositories': Repository.objects.count(),
+            'images_with_sbom': Image.objects.filter(sbom_data__isnull=False).exclude(sbom_data={}).count(),
+            'images_scanned': Image.objects.filter(scan_status='success').count(),
+            'images_in_process': Image.objects.filter(scan_status='in_process').count(),
+            'images_with_errors': Image.objects.filter(scan_status='error').count(),
+        }
+        
+        # Check for potential performance issues
+        performance_issues = []
+        
+        # Check for images without SBOM data
+        if stats['total_images'] > 0:
+            sbom_coverage = (stats['images_with_sbom'] / stats['total_images']) * 100
+            if sbom_coverage < 80:
+                performance_issues.append(f"Low SBOM coverage: {sbom_coverage:.1f}%")
+        
+        # Check for stuck processes
+        if stats['images_in_process'] > 10:
+            performance_issues.append(f"High number of images in process: {stats['images_in_process']}")
+        
+        # Check for error rate
+        if stats['total_images'] > 0:
+            error_rate = (stats['images_with_errors'] / stats['total_images']) * 100
+            if error_rate > 20:
+                performance_issues.append(f"High error rate: {error_rate:.1f}%")
+        
+        # Database query analysis
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT query, calls, total_time, mean_time
+                FROM pg_stat_statements 
+                WHERE query LIKE '%core_%'
+                ORDER BY total_time DESC 
+                LIMIT 5
+            """)
+            slow_queries = cursor.fetchall()
+        
+        processing_time = time.time() - start_time
+        
+        return {
+            "status": "success",
+            "task_name": "Performance Monitor",
+            "statistics": stats,
+            "performance_issues": performance_issues,
+            "slow_queries": slow_queries,
+            "processing_time": processing_time,
+            "timestamp": time.time()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in performance monitoring: {str(e)}")
+        return {
+            "status": "error",
+            "error": str(e)
+        }
+
 @celery_app.task(name="Update All Components Latest Versions")
 def update_all_components_latest_versions():
     """
@@ -2297,7 +2433,8 @@ def update_all_components_latest_versions():
                         skipped_count += 1
                         continue
                     
-                    logger.debug(f"Processing component version {component_version.component.name}:{component_version.version}")
+                    if DEBUG_LOGGING:
+                        logger.debug(f"Processing component version {component_version.component.name}:{component_version.version}")
                     parts = component_version.purl.split("/")
                     if len(parts) < 2:
                         skipped_count += 1
@@ -2309,13 +2446,14 @@ def update_all_components_latest_versions():
                         continue
                     
                     package_name = parts[1].lower()
-                    if len(parts) > 2:
+                    if len(parts) < 2:
                         package_name = f"{package_name}/{parts[2].lower()}"
                     if "@" in package_name:
                         package_name = package_name.split("@")[0]
                     
-                    logger.debug(f"Processing PURL: {component_version.purl}")
-                    logger.debug(f"Package type: {package_type}, Package name: {package_name}")
+                    if DEBUG_LOGGING:
+                        logger.debug(f"Processing PURL: {component_version.purl}")
+                        logger.debug(f"Package type: {package_type}, Package name: {package_name}")
                     
                     latest_version = None
                     if package_type == "pypi":

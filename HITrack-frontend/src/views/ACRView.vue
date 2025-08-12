@@ -248,7 +248,7 @@ const loadRepositories = async (reset: boolean = false) => {
     }
     lastRepo.value = response.data.pagination.next_page
     hasMore.value = !!lastRepo.value
-    console.log('After loadRepositories:', { hasMore: hasMore.value, isLoadingMore: isLoadingMore.value, lastRepo: lastRepo.value })
+    // Repositories loaded successfully
   } catch (error) {
     notificationService.error('Failed to fetch repositories')
   } finally {
@@ -278,7 +278,6 @@ onMounted(() => {
   const observer = new IntersectionObserver(
     (entries) => {
       if (entries[0].isIntersecting && hasMore.value && !isLoadingMore.value) {
-        console.log('Observer triggered - loading more repositories')
         loadMore()
       }
     },
@@ -291,14 +290,12 @@ onMounted(() => {
   // Watch for changes in the observer target
   watch(observerTarget, (newTarget) => {
     if (newTarget) {
-      console.log('Observer target mounted, starting observation')
       observer.observe(newTarget)
     }
   })
 
   return () => {
     if (observerTarget.value) {
-      console.log('Cleaning up observer')
       observer.unobserve(observerTarget.value)
     }
   }
@@ -321,7 +318,7 @@ const submitJob = async () => {
       repositories: jobData,
       registry_uuid: selectedRegistry.value
     })
-    console.log('Job created:', response.data)
+    // Job created successfully
     
     const newRepos = response.data.results.filter((r: any) => r.created)
     const existingRepos = response.data.results.filter((r: any) => !r.created)

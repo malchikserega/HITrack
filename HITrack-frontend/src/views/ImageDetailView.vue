@@ -643,12 +643,7 @@ const componentHeaders = [
 ] as const
 
 const fetchComponents = async () => {
-  if (!image.value) {
-    console.log('fetchComponents: image.value is not set');
-    return;
-  }
-  if (!image.value.uuid) {
-    console.log('fetchComponents: image.value.uuid is not set');
+  if (!image.value || !image.value.uuid) {
     return;
   }
   componentsLoading.value = true
@@ -708,7 +703,6 @@ const vulnerabilityHeaders = [
 
 const fetchVulnerabilities = async () => {
   if (!image.value || !image.value.uuid) {
-    console.log('fetchVulnerabilities: image.value or image.value.uuid is not set');
     return;
   }
   vulnerabilitiesLoading.value = true

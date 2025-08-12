@@ -133,7 +133,7 @@ const fetchComponents = async () => {
     const response = await api.get<PaginatedResponse<Component>>('components/', { params })
     components.value = response.data.results
     totalItems.value = response.data.count
-    console.log('Fetched components:', components.value)
+    // Components fetched successfully
   } catch (error) {
     console.error('Error fetching components:', error)
     notificationService.error('Failed to fetch components')
@@ -171,15 +171,10 @@ const debouncedFetchComponents = debounce(fetchComponents, 300)
 const router = useRouter()
 
 const onRowClick = (event: any) => {
-  console.log('Row clicked event:', event)
   // In Vuetify DataTable, the clicked item is passed directly as the first parameter
   const component = event
-  console.log('Component from event:', component)
   if (component && component.uuid) {
-    console.log('Navigating to component detail with UUID:', component.uuid)
     router.push({ name: 'component-detail', params: { uuid: component.uuid } })
-  } else {
-    console.log('Component has no UUID or event is missing')
   }
 }
 

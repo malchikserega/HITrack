@@ -868,7 +868,7 @@ const checkRepositories = async () => {
       }))
     })
 
-    console.log('Backend response:', response.data)
+    // Backend response received
 
     // Update the data with results from backend
     parsedData.value = parsedData.value.map((item, index) => {
@@ -893,7 +893,6 @@ const checkRepositories = async () => {
 }
 
 const addTagToRepository = async (item: any) => {
-  console.log('Adding tag for item:', item)
   
   if (!item.name || !item.app_version) {
     notificationService.error('Missing repository name or version')
@@ -915,10 +914,7 @@ const addTagToRepository = async (item: any) => {
       description: `Auto-created from Helm release: ${item.name}`
     }
     
-    console.log('Sending POST request:', {
-      url: `/repositories/${item.repository_uuid}/create_tag/`,
-      data: postData
-    })
+    // Sending POST request to create tag
     
     const response = await api.post(`/repositories/${item.repository_uuid}/create_tag/`, postData)
 
@@ -943,17 +939,11 @@ const addTagToRepository = async (item: any) => {
 }
 
 const showReleaseCreationStep = () => {
-  console.log('All parsed data:', parsedData.value)
-  
   // Get all found tags for release creation (including newly added ones)
   selectedTagsForRelease.value = parsedData.value.filter(item => 
     item.repository_status === 'Found' && 
     (item.tag_status === 'Found' || item.tag_uuid)
   )
-  
-  console.log('Selected tags for release:', selectedTagsForRelease.value)
-  console.log('Tags with UUIDs:', selectedTagsForRelease.value.filter(item => item.tag_uuid))
-  console.log('Tags without UUIDs:', selectedTagsForRelease.value.filter(item => !item.tag_uuid))
   
   // Set default release name based on current date
   const now = new Date()
@@ -983,16 +973,10 @@ const createReleaseWithTags = async () => {
   creatingRelease.value = true
 
   try {
-    console.log('Selected tags for release:', selectedTagsForRelease.value)
-    
     // Get UUIDs directly from the parsed data (already available from check_helm_releases)
     const tagUuids = selectedTagsForRelease.value
       .filter(item => item.tag_uuid)
       .map(item => item.tag_uuid)
-
-    console.log('Using tag UUIDs from check results:', tagUuids)
-    console.log('Selected tags with UUIDs:', selectedTagsForRelease.value.filter(item => item.tag_uuid))
-    console.log('Selected tags without UUIDs:', selectedTagsForRelease.value.filter(item => !item.tag_uuid))
 
     if (tagUuids.length === 0) {
       notificationService.error('No valid tags found for release')
@@ -1006,7 +990,7 @@ const createReleaseWithTags = async () => {
       tag_uuids: tagUuids
     })
 
-    console.log('Release creation response:', releaseResponse.data)
+    // Release created successfully
 
     notificationService.success(
       `Release "${releaseName.value}" created with ${releaseResponse.data.tags_linked} tags`

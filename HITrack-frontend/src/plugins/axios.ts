@@ -32,7 +32,7 @@ api.interceptors.request.use(
     if (authStore.token) {
       config.headers.Authorization = `Bearer ${authStore.token}`
     }
-    console.log('AXIOS REQUEST:', config.url, config);
+    // Request intercepted
     return config
   },
   (error: AxiosError) => {

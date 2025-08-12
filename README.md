@@ -97,6 +97,30 @@ HITrack follows a modern microservices architecture with the following component
    - Admin: http://localhost:1337/admin/
    - API Documentation: http://localhost:1337/api/schema/
 
+## ⚙️ Configuration
+
+### Logging Configuration
+
+HITrack provides configurable logging levels for production and development environments:
+
+**Environment Variables:**
+```bash
+# Enable debug logging (development)
+DEBUG_LOGGING=true
+
+# Disable debug logging (production)
+DEBUG_LOGGING=false
+
+# Set log level
+LOG_LEVEL=INFO
+```
+
+**Performance Optimization:**
+- Debug logging is disabled by default in production
+- Database queries are optimized with select_related and prefetch_related
+- Bulk operations are used for better performance
+- Task retry mechanisms with exponential backoff
+
 
 ### Docker Configuration
 

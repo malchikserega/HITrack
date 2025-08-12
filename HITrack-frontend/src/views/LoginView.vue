@@ -114,18 +114,13 @@ const handleLogin = async () => {
   error.value = ''
 
   try {
-    console.log('Attempting login...')
     const { success, error: loginError } = await authStore.login(username.value, password.value)
-    console.log('Login response:', { success, loginError })
     
     if (success) {
-      console.log('Login successful')
       notificationService.success('Successfully logged in')
       // Use replace instead of push to prevent returning to login page
       router.replace({ name: 'home' })
-      console.log('Redirect completed')
     } else {
-      console.log('Login failed:', loginError)
       error.value = loginError || 'Invalid username or password'
       notificationService.error(loginError || 'Invalid username or password')
     }
