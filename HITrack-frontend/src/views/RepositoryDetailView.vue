@@ -5,23 +5,43 @@
         <v-btn variant="text" @click="goBack" class="mb-2">
           <v-icon left>mdi-arrow-left</v-icon>Back
         </v-btn>
-        <h1 class="text-h4 font-weight-black mb-2">Repository: {{ repository?.name }}</h1>
-        <v-chip class="mr-2">Type: {{ repository?.repository_type }}</v-chip>
-        <v-chip class="mr-2">Tags: {{ repository?.tag_count }}</v-chip>
-        <v-chip class="mr-2">URL: {{ repository?.url }}</v-chip>
+        
+        <!-- Repository Info with Loading -->
+        <div v-if="repositoryLoading" class="d-flex align-center mb-4">
+          <v-progress-circular indeterminate color="primary" size="24" class="mr-3"></v-progress-circular>
+          <span class="text-body-1">Loading repository information...</span>
+        </div>
+        
+        <div v-else>
+          <h1 class="text-h4 font-weight-black mb-2">Repository: {{ repository?.name }}</h1>
+          <v-chip class="mr-2">Type: {{ repository?.repository_type }}</v-chip>
+          <v-chip class="mr-2">Tags: {{ repository?.tag_count }}</v-chip>
+          <v-chip class="mr-2">URL: {{ repository?.url }}</v-chip>
+        </div>
       </v-col>
     </v-row>
     <v-row>
       <v-col cols="12" md="6">
-        <Bar :data="barChartData" :options="barChartOptions" />
+        <div v-if="chartsLoading" class="d-flex flex-column align-center justify-center pa-8">
+          <v-progress-circular indeterminate color="primary" size="48"></v-progress-circular>
+          <span class="text-body-1 mt-3">Loading charts...</span>
+        </div>
+        <Bar v-else :data="barChartData" :options="barChartOptions" />
       </v-col>
       <v-col cols="12" md="6">
-        <Bar :data="comboChartData as any" :options="comboChartOptions" />
+        <div v-if="chartsLoading" class="d-flex flex-column align-center justify-center pa-8">
+          <v-progress-circular indeterminate color="primary" size="48"></v-progress-circular>
+          <span class="text-body-1 mt-3">Loading charts...</span>
+        </div>
+        <Bar v-else :data="comboChartData as any" :options="comboChartOptions" />
       </v-col>
     </v-row>
     <v-row>
       <v-col cols="12">
-        <h2 class="text-h6 font-weight-bold mb-2">Tags</h2>
+        <div class="d-flex align-center mb-2">
+          <h2 class="text-h6 font-weight-bold mb-0">Tags</h2>
+          <v-progress-circular v-if="tagsLoading" indeterminate color="primary" size="20" class="ml-3"></v-progress-circular>
+        </div>
         <div class="d-flex align-center mb-2">
           <v-text-field
             v-model="tagSearch"
@@ -285,6 +305,9 @@ const route = useRoute()
 const router = useRouter()
 const repository = ref<any>(null)
 const loading = ref(true)
+const repositoryLoading = ref(true)
+const tagsLoading = ref(true)
+const chartsLoading = ref(true)
 
 const headers = [
   { title: 'Tag', key: 'tag', sortable: true },
@@ -296,7 +319,6 @@ const headers = [
 ]
 
 const tags = ref<any[]>([])
-const tagsLoading = ref(false)
 const tagSearch = ref('')
 const tagsPage = ref(1)
 const tagsPerPage = ref(10)
@@ -419,11 +441,14 @@ const confirmDelete = async () => {
 }
 
 const fetchTagsForCharts = async () => {
+  chartsLoading.value = true
   try {
     const resp = await api.get(`repositories/${route.params.uuid}/tags-graph/`)
     tagsForCharts.value = resp.data
   } catch (e) {
     tagsForCharts.value = []
+  } finally {
+    chartsLoading.value = false
   }
 }
 
@@ -551,11 +576,12 @@ watch([tagSearch, tagsSortBy], () => {
 watch([tagsPage, tagsPerPage], fetchTags)
 
 const fetchRepository = async () => {
-  loading.value = true
+  repositoryLoading.value = true
   try {
     const resp = await api.get(`repositories/${route.params.uuid}/`)
     repository.value = resp.data
   } finally {
+    repositoryLoading.value = false
     loading.value = false
   }
 }
@@ -651,10 +677,15 @@ const onTagRowClick = (event: any, { item }: any) => {
   router.push({ name: 'tag-images', params: { uuid: item.uuid } })
 }
 
-onMounted(() => {
-  fetchRepository()
-  fetchTags()
-  fetchTagsForCharts()
+onMounted(async () => {
+  // Load repository data first (lightweight)
+  await fetchRepository()
+  
+  // Load tags and charts in parallel (heavier operations)
+  await Promise.all([
+    fetchTags(),
+    fetchTagsForCharts()
+  ])
 })
 </script>
 

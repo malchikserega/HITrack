@@ -6,7 +6,7 @@ from rest_framework.generics import ListAPIView, GenericAPIView
 from django_filters.rest_framework import DjangoFilterBackend
 from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ContainerRegistry, ComponentVersionVulnerability, Release, RepositoryTagRelease, VulnerabilityDetails, ComponentLocation
 from .serializers import (
-    RepositorySerializer, RepositoryTagSerializer, ImageSerializer, ImageListSerializer,
+    RepositorySerializer, RepositoryDetailSerializer, RepositoryTagSerializer, ImageSerializer, ImageListSerializer,
     ComponentSerializer, ComponentVersionSerializer, VulnerabilitySerializer, VulnerabilityShortSerializer, ComponentListSerializer,
     ComponentDetailOptimizedSerializer, ComponentVersionOptimizedSerializer, ComponentVersionDetailOptimizedSerializer,
     RepositoryListSerializer, RepositoryTagListSerializer, ComponentVersionListSerializer,
@@ -50,6 +50,8 @@ class RepositoryViewSet(BaseViewSet):
     def get_serializer_class(self):
         if self.action == 'list':
             return RepositoryListSerializer
+        elif self.action == 'retrieve':
+            return RepositoryDetailSerializer
         return RepositorySerializer
 
     @action(detail=True, methods=['get'])

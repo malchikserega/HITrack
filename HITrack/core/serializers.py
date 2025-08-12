@@ -607,6 +607,25 @@ class RepositorySerializer(serializers.ModelSerializer):
         return obj.tags.count()
 
 
+class RepositoryDetailSerializer(serializers.ModelSerializer):
+    """Optimized serializer for repository detail view - excludes heavy fields"""
+    tag_count = serializers.SerializerMethodField()
+    scan_status = serializers.CharField(read_only=True)
+    last_scanned = serializers.DateTimeField(read_only=True)
+
+    class Meta:
+        model = Repository
+        fields = [
+            'uuid', 'name', 'url', 'repository_type', 'tag_count', 
+            'scan_status', 'last_scanned', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['created_at', 'updated_at', 'uuid']
+
+    @extend_schema_field(serializers.IntegerField())
+    def get_tag_count(self, obj):
+        return obj.tags.count()
+
+
 class RepositoryListSerializer(serializers.ModelSerializer):
     tag_count = serializers.SerializerMethodField()
 
