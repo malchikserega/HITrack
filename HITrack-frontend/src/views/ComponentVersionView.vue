@@ -92,6 +92,14 @@
                   width="2" 
                   class="ml-3"
                 ></v-progress-circular>
+                <v-progress-circular 
+                  v-else-if="!locationsLoading && versionLocations.length === 0 && !version" 
+                  indeterminate 
+                  color="grey" 
+                  size="16" 
+                  width="2" 
+                  class="ml-3"
+                ></v-progress-circular>
               </div>
               
               <v-chip v-if="route.query.fromImage" size="small" color="info" variant="tonal" class="mx-2">
@@ -116,6 +124,14 @@
                   <div class="loading-text">
                     <h4 class="text-h6 mb-2">Loading Locations</h4>
                     <p class="text-grey">Discovering where this component is used...</p>
+                  </div>
+                </div>
+              </div>
+              <div v-else-if="!locationsLoading && versionLocations.length === 0 && !version" class="initializing-state">
+                <div class="initializing-animation">
+                  <v-progress-circular indeterminate color="grey" size="32"></v-progress-circular>
+                  <div class="initializing-text">
+                    <p class="text-grey">Initializing locations...</p>
                   </div>
                 </div>
               </div>
@@ -216,6 +232,14 @@
                   width="2" 
                   class="ml-3"
                 ></v-progress-circular>
+                <v-progress-circular 
+                  v-else-if="!vulnerabilitiesLoading && versionVulnerabilities.length === 0 && !version" 
+                  indeterminate 
+                  color="grey" 
+                  size="16" 
+                  width="2" 
+                  class="ml-3"
+                ></v-progress-circular>
               </div>
               
               <v-spacer></v-spacer>
@@ -235,6 +259,14 @@
                   <div class="loading-text">
                     <h4 class="text-h6 mb-2">Loading Vulnerabilities</h4>
                     <p class="text-grey">Analyzing security issues...</p>
+                  </div>
+                </div>
+              </div>
+              <div v-else-if="!vulnerabilitiesLoading && versionVulnerabilities.length === 0 && !version" class="initializing-state">
+                <div class="initializing-animation">
+                  <v-progress-circular indeterminate color="grey" size="32"></v-progress-circular>
+                  <div class="initializing-text">
+                    <p class="text-grey">Initializing vulnerabilities...</p>
                   </div>
                 </div>
               </div>
@@ -498,11 +530,11 @@ const getEvidenceColor = (evidenceType: string) => {
 }
 
 onMounted(async () => {
-  // Load version data first (fast)
+  // Load version data first (fast) - UI will show immediately
   await loadVersion()
   
-  // Then load additional data in parallel (locations and vulnerabilities)
-  await loadAllData()
+  // Start loading additional data in background (non-blocking)
+  loadAllData()
 })
 </script>
 
@@ -628,6 +660,30 @@ onMounted(async () => {
 .main-loading-text p {
   color: #666;
   font-size: 1.1rem;
+}
+
+.initializing-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 20px;
+  text-align: center;
+}
+
+.initializing-animation {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  text-align: center;
+}
+
+.initializing-text p {
+  color: #999;
+  font-size: 0.9rem;
+  margin-top: 12px;
 }
 
 .locations-list,
