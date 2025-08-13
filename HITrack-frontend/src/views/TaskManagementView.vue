@@ -295,14 +295,14 @@
             </v-col>
 
             <!-- Result Summary -->
-            <v-col cols="12" v-if="selectedTask.result_summary || selectedTask.result">
+            <v-col cols="12" v-if="selectedTask.result_summary">
               <v-card class="mb-4" elevation="1" style="border-radius: 8px;">
                 <v-card-title class="text-h6 pa-4 pb-2">
                   <v-icon class="mr-2" color="success">mdi-chart-box</v-icon>
                   Result Summary
                 </v-card-title>
                 <v-card-text class="pa-0">
-                  <TaskResultDisplay :result="selectedTask.result_summary || selectedTask.result" />
+                  <TaskResultDisplay :result="selectedTask.result_summary" />
                 </v-card-text>
               </v-card>
             </v-col>
