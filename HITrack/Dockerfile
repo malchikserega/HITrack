@@ -6,7 +6,7 @@ RUN apt install gcc -y
 RUN apt install build-essential -y
 RUN mkdir -p /opt/src
 RUN apt install python3-cffi libcairo2 libpango-1.0-0 libgdk-pixbuf-xlib-2.0-0 libffi-dev shared-mime-info -y
-RUN apt install curl lsb-release -y
+RUN apt install curl lsb-release gnupg -y
 
 RUN curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
 RUN curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
