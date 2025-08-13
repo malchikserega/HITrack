@@ -319,7 +319,8 @@ import {
   LinearScale,
   PointElement,
   LineElement,
-  LineController
+  LineController,
+  Filler
 } from 'chart.js'
 import type { ChartData } from 'chart.js'
 
@@ -332,7 +333,8 @@ ChartJS.register(
   LinearScale,
   PointElement,
   LineElement,
-  LineController
+  LineController,
+  Filler
 )
 
 const route = useRoute()

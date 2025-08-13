@@ -6,6 +6,8 @@
           <h1 class="text-h4">Task Management</h1>
         </div>
         
+
+        
         <!-- Action Cards Section -->
         <v-card class="mb-6" elevation="2" style="border-radius: 12px;">
           <v-card-title class="d-flex align-center pa-4">
@@ -100,85 +102,7 @@
       </v-col>
     </v-row>
 
-    <!-- Statistics Cards -->
-    <v-row>
-      <v-col cols="12" md="3">
-        <MetricCard
-          title="Total Tasks"
-          :value="statistics.total_tasks"
-          icon="mdi-clipboard-list"
-          color="primary"
-        />
-      </v-col>
-      <v-col cols="12" md="3">
-        <MetricCard
-          title="Successful"
-          :value="statistics.successful_tasks"
-          icon="mdi-check-circle"
-          color="success"
-          :subtitle="statistics.total_tasks > 0 ? `${Math.round((statistics.successful_tasks / statistics.total_tasks) * 100)}% of total` : undefined"
-        />
-      </v-col>
-      <v-col cols="12" md="3">
-        <MetricCard
-          title="Failed"
-          :value="statistics.failed_tasks"
-          icon="mdi-alert-circle"
-          color="error"
-          :subtitle="statistics.total_tasks > 0 ? `${Math.round((statistics.failed_tasks / statistics.total_tasks) * 100)}% of total` : undefined"
-        />
-      </v-col>
-      <v-col cols="12" md="3">
-        <MetricCard
-          title="Running"
-          :value="statistics.running_tasks"
-          icon="mdi-sync"
-          color="warning"
-          :subtitle="statistics.total_tasks > 0 ? `${Math.round((statistics.running_tasks / statistics.total_tasks) * 100)}% of total` : undefined"
-        />
-      </v-col>
-    </v-row>
 
-    <!-- Additional Task Metrics -->
-    <v-row class="mt-4">
-      <v-col cols="12" md="3">
-        <MetricCard
-          title="Average Duration"
-          :value="Math.round(statistics.average_duration || 0)"
-          icon="mdi-clock-outline"
-          color="info"
-          subtitle="seconds"
-        />
-      </v-col>
-      <v-col cols="12" md="3">
-        <MetricCard
-          title="Pending Tasks"
-          :value="statistics.pending_tasks"
-          icon="mdi-clock"
-          color="warning"
-          :subtitle="statistics.total_tasks > 0 ? `${Math.round((statistics.pending_tasks / statistics.total_tasks) * 100)}% of total` : undefined"
-        />
-      </v-col>
-      <v-col cols="12" md="3">
-        <MetricCard
-          title="Recent Tasks"
-          :value="statistics.recent_tasks?.length || 0"
-          icon="mdi-history"
-          color="primary"
-          subtitle="last 24h"
-        />
-      </v-col>
-      <v-col cols="12" md="3">
-        <MetricCard
-          title="Success Rate"
-          :value="statistics.total_tasks > 0 ? Math.round((statistics.successful_tasks / statistics.total_tasks) * 100) : 0"
-          icon="mdi-chart-line"
-          color="success"
-          format="percentage"
-          subtitle="overall"
-        />
-      </v-col>
-    </v-row>
 
     <!-- Task List -->
     <v-row>
@@ -249,22 +173,7 @@
                 </div>
               </template>
               
-              <template v-slot:item.result_summary="{ item }">
-                <div v-if="item.result_summary" class="text-caption">
-                  <div v-if="typeof item.result_summary === 'object'">
-                    <div v-if="item.result_summary.message" class="mb-1">
-                      {{ item.result_summary.message }}
-                    </div>
-                    <div v-if="item.result_summary.status" class="text--secondary">
-                      Status: {{ item.result_summary.status }}
-                    </div>
-                  </div>
-                  <div v-else>
-                    {{ item.result_summary }}
-                  </div>
-                </div>
-                <span v-else class="text-caption text--disabled">No result</span>
-              </template>
+
               
               <template v-slot:item.created="{ item }">
                 <div class="text-center">
@@ -276,7 +185,7 @@
                 <div class="d-flex justify-center">
                   <v-btn
                     icon
-                    small
+                    x-small
                     @click="viewTaskDetails(item)"
                     class="mr-1 action-icon-btn"
                     color="primary"
@@ -286,7 +195,7 @@
                   <v-btn
                     v-if="item.status === 'error'"
                     icon
-                    small
+                    x-small
                     color="warning"
                     @click="retryTask(item)"
                     class="action-icon-btn mr-1"
@@ -296,7 +205,7 @@
                   <v-btn
                     v-if="item.status === 'in_process' || item.status === 'pending'"
                     icon
-                    small
+                    x-small
                     color="error"
                     @click="stopTask(item)"
                     class="action-icon-btn"
@@ -313,49 +222,118 @@
     </v-row>
 
     <!-- Task Details Dialog -->
-    <v-dialog v-model="taskDetailsDialog" max-width="800px">
+    <v-dialog v-model="taskDetailsDialog" max-width="1200px" persistent>
       <v-card>
-        <v-card-title>
-          Task Details
+        <v-card-title class="d-flex align-center pa-4">
+          <v-icon class="mr-3" color="primary" size="24">mdi-information</v-icon>
+          <span class="text-h5">Task Details</span>
           <v-spacer></v-spacer>
-          <v-btn icon @click="taskDetailsDialog = false">
+          <v-btn icon @click="taskDetailsDialog = false" color="grey">
             <v-icon>mdi-close</v-icon>
           </v-btn>
         </v-card-title>
-        <v-card-text>
+        
+        <v-divider></v-divider>
+        
+        <v-card-text class="pa-6">
           <v-row v-if="selectedTask">
-            <v-col cols="6">
-              <strong>Task ID:</strong> {{ selectedTask.task_id }}
+            <!-- Basic Task Information -->
+            <v-col cols="12">
+              <v-card class="mb-4" elevation="1" style="border-radius: 8px;">
+                <v-card-title class="text-h6 pa-4 pb-2">
+                  <v-icon class="mr-2" color="primary">mdi-play-circle</v-icon>
+                  Basic Information
+                </v-card-title>
+                <v-card-text class="pa-4 pt-0">
+                  <v-row>
+                    <v-col cols="12" md="6">
+                      <div class="info-item">
+                        <span class="info-label">Task ID:</span>
+                        <span class="info-value task-id">{{ selectedTask.task_id }}</span>
+                      </div>
+                    </v-col>
+                    <v-col cols="12" md="6">
+                      <div class="info-item">
+                        <span class="info-label">Status:</span>
+                        <v-chip
+                          :color="getStatusColor(selectedTask.status)"
+                          text-color="white"
+                          size="small"
+                          class="ml-2"
+                        >
+                          {{ selectedTask.status }}
+                        </v-chip>
+                      </div>
+                    </v-col>
+                    <v-col cols="12" md="6">
+                      <div class="info-item">
+                        <span class="info-label">Created:</span>
+                        <span class="info-value">{{ formatDate(selectedTask.created) }}</span>
+                      </div>
+                    </v-col>
+                    <v-col cols="12" md="6">
+                      <div class="info-item">
+                        <span class="info-label">Updated:</span>
+                        <span class="info-value">{{ selectedTask.updated ? formatDate(selectedTask.updated) : '-' }}</span>
+                      </div>
+                    </v-col>
+                    <v-col cols="12" md="6" v-if="selectedTask.duration">
+                      <div class="info-item">
+                        <span class="info-label">Duration:</span>
+                        <span class="info-value duration">{{ formatDuration(selectedTask.duration) }}</span>
+                      </div>
+                    </v-col>
+                    <v-col cols="12" md="6" v-if="selectedTask.task_name">
+                      <div class="info-item">
+                        <span class="info-label">Task Name:</span>
+                        <span class="info-value">{{ selectedTask.task_name }}</span>
+                      </div>
+                    </v-col>
+                  </v-row>
+                </v-card-text>
+              </v-card>
             </v-col>
-            <v-col cols="6">
-              <strong>Status:</strong>
-              <v-chip
-                :color="getStatusColor(selectedTask.status)"
-                text-color="white"
-                small
-              >
-                {{ selectedTask.status }}
-              </v-chip>
+
+            <!-- Result Summary -->
+            <v-col cols="12" v-if="selectedTask.result_summary || selectedTask.result">
+              <v-card class="mb-4" elevation="1" style="border-radius: 8px;">
+                <v-card-title class="text-h6 pa-4 pb-2">
+                  <v-icon class="mr-2" color="success">mdi-chart-box</v-icon>
+                  Result Summary
+                </v-card-title>
+                <v-card-text class="pa-0">
+                  <TaskResultDisplay :result="selectedTask.result_summary || selectedTask.result" />
+                </v-card-text>
+              </v-card>
             </v-col>
-                         <v-col cols="6">
-               <strong>Created:</strong> {{ formatDate(selectedTask.created) }}
-             </v-col>
-             <v-col cols="6">
-               <strong>Updated:</strong> {{ selectedTask.updated ? formatDate(selectedTask.updated) : '-' }}
-             </v-col>
-            <v-col cols="6" v-if="selectedTask.duration">
-              <strong>Duration:</strong> {{ formatDuration(selectedTask.duration) }}
-            </v-col>
-            <v-col cols="12" v-if="selectedTask.result_summary">
-              <strong>Result Summary:</strong>
-              <pre>{{ JSON.stringify(selectedTask.result_summary, null, 2) }}</pre>
-            </v-col>
+
+            <!-- Error Details -->
             <v-col cols="12" v-if="selectedTask.traceback">
-              <strong>Traceback:</strong>
-              <pre class="error-text">{{ selectedTask.traceback }}</pre>
+              <v-card class="mb-4" elevation="1" style="border-radius: 8px;">
+                <v-card-title class="text-h6 pa-4 pb-2">
+                  <v-icon class="mr-2" color="error">mdi-alert-circle</v-icon>
+                  Error Details
+                </v-card-title>
+                <v-card-text class="pa-4">
+                  <pre class="error-text">{{ selectedTask.traceback }}</pre>
+                </v-card-text>
+              </v-card>
             </v-col>
           </v-row>
         </v-card-text>
+        
+        <v-divider></v-divider>
+        
+        <v-card-actions class="pa-4">
+          <v-spacer></v-spacer>
+          <v-btn
+            color="primary"
+            @click="taskDetailsDialog = false"
+            prepend-icon="mdi-close"
+          >
+            Close
+          </v-btn>
+        </v-card-actions>
       </v-card>
     </v-dialog>
 
@@ -394,7 +372,7 @@
               <template v-slot:item.actions="{ item }">
                 <v-btn
                   icon
-                  small
+                  x-small
                   @click="runPeriodicTaskNow(item)"
                 >
                   <v-icon>mdi-play</v-icon>
@@ -414,7 +392,6 @@ import { useRouter } from 'vue-router'
 import api from '@/plugins/axios'
 import type { TaskResult, TaskStatistics, PeriodicTask } from '@/types/interfaces'
 import { formatDate, formatDuration } from '@/utils/dateUtils'
-import MetricCard from '@/components/MetricCard.vue'
 import { notificationService } from '@/plugins/notifications'
 
 export default defineComponent({
@@ -442,6 +419,7 @@ export default defineComponent({
     const search = ref('')
     const taskDetailsDialog = ref(false)
     const selectedTask = ref<TaskResult | null>(null)
+    
     const options = ref({
       page: 1,
       itemsPerPage: 10,
@@ -454,7 +432,6 @@ export default defineComponent({
       { text: 'Task ID', value: 'task_id' },
       { text: 'Task Name', value: 'task_name' },
       { text: 'Status', value: 'status' },
-      { text: 'Result', value: 'result_summary' },
       { text: 'Duration', value: 'duration' },
       { text: 'Created', value: 'created' },
       { text: 'Actions', value: 'actions', sortable: false }
@@ -651,6 +628,8 @@ export default defineComponent({
       return 'mdi-help-circle'
     }
 
+
+
     const togglePeriodicTask = async (task: PeriodicTask) => {
       try {
         await api.post(`/periodic-tasks/${task.id}/toggle/`)
@@ -684,7 +663,11 @@ export default defineComponent({
       loadPeriodicTasks()
     })
 
-            return {
+
+
+    
+
+    return {
           loading,
           periodicLoading,
           testTaskLoading,
@@ -742,9 +725,9 @@ export default defineComponent({
 
 /* Center align specific columns */
 .v-data-table td:nth-child(3), /* Status */
-.v-data-table td:nth-child(5), /* Duration */
-.v-data-table td:nth-child(6), /* Created */
-.v-data-table td:nth-child(7) { /* Actions */
+.v-data-table td:nth-child(4), /* Duration */
+.v-data-table td:nth-child(5), /* Created */
+.v-data-table td:nth-child(6) { /* Actions */
   text-align: center !important;
 }
 
@@ -767,12 +750,7 @@ export default defineComponent({
   white-space: nowrap;
 }
 
-/* Result summary column styling */
-.v-data-table td:nth-child(4) { /* Result */
-  max-width: 200px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
+
 
 /* Button group styling */
 .gap-2 > * {
@@ -1051,4 +1029,75 @@ export default defineComponent({
   color: #ccc !important;
   margin-bottom: 16px !important;
 }
+
+/* Task Details Dialog Styling */
+.info-item {
+  display: flex;
+  align-items: center;
+  padding: 12px 0;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.info-item:last-child {
+  border-bottom: none;
+}
+
+.info-label {
+  font-weight: 600;
+  color: #555;
+  min-width: 120px;
+  margin-right: 16px;
+}
+
+.info-value {
+  color: #333;
+  font-weight: 500;
+}
+
+.info-value.task-id {
+  font-family: 'Courier New', monospace;
+  font-size: 0.9em;
+  background: #f5f5f5;
+  padding: 4px 8px;
+  border-radius: 4px;
+  color: #666;
+}
+
+.info-value.duration {
+  font-weight: 600;
+  color: #2196f3;
+}
+
+.error-text {
+  background: #fff5f5;
+  border: 1px solid #fed7d7;
+  border-radius: 6px;
+  padding: 16px;
+  font-family: 'Courier New', monospace;
+  font-size: 0.85em;
+  color: #c53030;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+/* Dialog improvements */
+.v-dialog .v-card {
+  border-radius: 12px;
+}
+
+
+
+.v-dialog .v-card-title {
+  background: linear-gradient(135deg, #f8f9fa, #e9ecef);
+  border-radius: 12px 12px 0 0;
+}
+
+.v-dialog .v-card-actions {
+  background: #f8f9fa;
+  border-radius: 0 0 12px 12px;
+}
+
+
 </style> 

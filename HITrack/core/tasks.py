@@ -58,7 +58,15 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
         # Check if already in process
         if image.scan_status == 'in_process':
             logger.warning(f"Image {image_uuid} is already being scanned")
-            return {"status": "skipped", "reason": "already in process"}
+            return {
+                "status": "skipped", 
+                "task_name": "Generate SBOM and Create Components",
+                "image_uuid": str(image_uuid),
+                "reason": "already in process",
+                "message": f"Image {image_uuid} is already being processed",
+                "current_status": image.scan_status,
+                "timestamp": timezone.now().isoformat()
+            }
 
         # Update status to in_process
         image.scan_status = 'in_process'
@@ -158,9 +166,16 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
 
             return {
                 "status": "success",
+                "task_name": "Generate SBOM and Create Components",
                 "image_uuid": str(image_uuid),
                 "image_name": image_ref,
-                "digest": image.digest
+                "digest": image.digest,
+                "art_type": art_type,
+                "sbom_generated": True,
+                "sbom_parsing_scheduled": True,
+                "message": f"SBOM successfully generated for image {image_ref}",
+                "next_steps": ["SBOM parsing scheduled", "Grype scan will be triggered after parsing"],
+                "timestamp": timezone.now().isoformat()
             }
 
         finally:
@@ -178,7 +193,13 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
         logger.error(f"Image with UUID {image_uuid} not found")
         return {
             "status": "error",
-            "error": f"Image with UUID {image_uuid} not found"
+            "task_name": "Generate SBOM and Create Components",
+            "image_uuid": str(image_uuid),
+            "error": f"Image with UUID {image_uuid} not found",
+            "error_type": "ImageNotFound",
+            "message": "Specified image does not exist in database",
+            "suggestion": "Verify image UUID and ensure image exists before processing",
+            "timestamp": timezone.now().isoformat()
         }
     except Exception as e:
         error_msg = f"Error generating SBOM for image {image_uuid}: {str(e)}"
@@ -199,8 +220,14 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
             logger.error(f"Max retries exceeded for image {image_uuid}")
             return {
                 "status": "error",
+                "task_name": "Generate SBOM and Create Components",
+                "image_uuid": str(image_uuid),
                 "error": error_msg,
-                "max_retries_exceeded": True
+                "error_type": "MaxRetriesExceeded",
+                "max_retries_exceeded": True,
+                "message": f"Failed to generate SBOM after {self.max_retries} attempts",
+                "suggestion": "Check image accessibility, registry credentials, and system resources",
+                "timestamp": timezone.now().isoformat()
             }
 
 @celery_app.task(name="Periodic Repository Scan")
@@ -281,10 +308,25 @@ def periodic_repository_scan():
                 "error": str(e)
             })
 
+    # Calculate summary statistics
+    total_repositories = len(results)
+    successful_repositories = len([r for r in results if r['status'] == 'success'])
+    failed_repositories = len([r for r in results if r['status'] == 'error'])
+    total_new_tags = sum([r.get('new_tags', 0) for r in results if r['status'] == 'success'])
+    
     return {
         "status": "completed",
+        "task_name": "Periodic Repository Scan",
         "timestamp": datetime.now().isoformat(),
-        "results": results
+        "summary": {
+            "total_repositories_processed": total_repositories,
+            "successful_repositories": successful_repositories,
+            "failed_repositories": failed_repositories,
+            "total_new_tags_discovered": total_new_tags,
+            "success_rate": f"{(successful_repositories / total_repositories * 100):.1f}%" if total_repositories > 0 else "0%"
+        },
+        "results": results,
+        "message": f"Periodic scan completed: {successful_repositories}/{total_repositories} repositories processed successfully, {total_new_tags} new tags discovered"
     }
 
 @celery_app.task(name="Scan Repository")
@@ -360,10 +402,22 @@ def scan_repository(repository_name: str, repository_url: str, scan_option: str)
         
         return {
             "status": "success",
-            "message": f"Successfully scanned repository {repository_name}",
             "task_name": "Scan Repository",
             "repository_name": repository_name,
-            "tags_processed": len(tags_to_scan)
+            "repository_url": repository_url,
+            "scan_option": scan_option,
+            "repository_type": repository.repository_type,
+            "repository_created": created,
+            "tags_processed": len(tags_to_scan),
+            "total_tags_available": len(all_tags),
+            "registry_provider": registry.provider,
+            "last_scanned": repository.last_scanned.isoformat() if repository.last_scanned else None,
+            "message": f"Successfully scanned repository {repository_name}",
+            "details": {
+                "tags_scanned": tags_to_scan,
+                "repository_status": repository.status,
+                "scan_timestamp": datetime.now().isoformat()
+            }
         }
 
     except Exception as e:
@@ -474,10 +528,24 @@ def process_all_tags():
                 "error": str(e)
             })
 
+    # Calculate summary statistics
+    total_repositories = len(results)
+    successful_repositories = len([r for r in results if r['status'] == 'success'])
+    failed_repositories = len([r for r in results if r['status'] == 'error'])
+    total_tags_processed = sum([r.get('tags_processed', 0) for r in results if r['status'] == 'success'])
+    
     return {
         "status": "completed",
         "task_name": "Process All Tags",
-        "results": results
+        "summary": {
+            "total_repositories_processed": total_repositories,
+            "successful_repositories": successful_repositories,
+            "failed_repositories": failed_repositories,
+            "total_tags_processed": total_tags_processed,
+            "success_rate": f"{(successful_repositories / total_repositories * 100):.1f}%" if total_repositories > 0 else "0%"
+        },
+        "results": results,
+        "message": f"Tag processing completed: {successful_repositories}/{total_repositories} repositories processed successfully, {total_tags_processed} tags processed"
     }
 
 @celery_app.task(name="Parse SBOM and Create Components")
@@ -507,14 +575,26 @@ def parse_sbom_and_create_components(image_uuid: str):
             logger.warning(f"No SBOM data found for image {image_uuid}")
             return {
                 "status": "error",
-                "error": "No SBOM data found"
+                "task_name": "Parse SBOM and Create Components",
+                "image_uuid": str(image_uuid),
+                "error": "No SBOM data found",
+                "error_type": "MissingSBOMData",
+                "message": "Image does not have SBOM data for parsing",
+                "suggestion": "Ensure SBOM generation task completed successfully before parsing",
+                "timestamp": timezone.now().isoformat()
             }
 
         if image.scan_status != 'success':
             logger.warning(f"Image {image_uuid} scan status is not success: {image.scan_status}")
             return {
                 "status": "error",
-                "error": f"Image scan status is {image.scan_status}"
+                "task_name": "Parse SBOM and Create Components",
+                "image_uuid": str(image_uuid),
+                "error": f"Image scan status is {image.scan_status}",
+                "error_type": "InvalidScanStatus",
+                "message": f"Image scan status '{image.scan_status}' is not valid for SBOM parsing",
+                "suggestion": "Wait for SBOM generation to complete or check image scan status",
+                "timestamp": timezone.now().isoformat()
             }
 
         # Process artifacts in batches
@@ -691,23 +771,46 @@ def parse_sbom_and_create_components(image_uuid: str):
             "status": "success",
             "task_name": "Parse SBOM and Create Components",
             "image_uuid": str(image_uuid),
-            "components_created": components_created,
-            "components_updated": components_updated,
-            "versions_created": versions_created,
-            "processing_time": total_time
+            "image_name": image.name,
+            "image_digest": image.digest,
+            "summary": {
+                "total_artifacts_processed": total_artifacts,
+                "components_created": components_created,
+                "components_updated": components_updated,
+                "versions_created": versions_created,
+                "total_batches_processed": (total_artifacts + BATCH_SIZE - 1) // BATCH_SIZE
+            },
+            "processing_time": total_time,
+            "processing_time_formatted": f"{total_time:.2f} seconds",
+            "grype_scan_scheduled": True,
+            "message": f"SBOM parsing completed successfully for image {image.name}",
+            "next_steps": ["Grype vulnerability scan scheduled"],
+            "timestamp": timezone.now().isoformat()
         }
 
     except Image.DoesNotExist:
         logger.error(f"Image with UUID {image_uuid} not found")
         return {
             "status": "error",
-            "error": f"Image with UUID {image_uuid} not found"
+            "task_name": "Parse SBOM and Create Components",
+            "image_uuid": str(image_uuid),
+            "error": f"Image with UUID {image_uuid} not found",
+            "error_type": "ImageNotFound",
+            "message": "Specified image does not exist in database",
+            "suggestion": "Verify image UUID and ensure image exists before parsing",
+            "timestamp": timezone.now().isoformat()
         }
     except Exception as e:
         logger.error(f"Error parsing SBOM for image {image_uuid}: {str(e)}")
         return {
             "status": "error",
-            "error": str(e)
+            "task_name": "Parse SBOM and Create Components",
+            "image_uuid": str(image_uuid),
+            "error": str(e),
+            "error_type": type(e).__name__,
+            "message": f"Unexpected error occurred during SBOM parsing: {str(e)}",
+            "suggestion": "Check system resources, database connectivity, and SBOM data integrity",
+            "timestamp": timezone.now().isoformat()
         }
 
 @celery_app.task(name="Update Components Latest Versions")
@@ -821,20 +924,41 @@ def update_components_latest_versions(image_uuid: str):
             "status": "success",
             "task_name": "Update Components Latest Versions",
             "image_uuid": str(image_uuid),
-            "component_versions_updated": updated_count,
-            "processing_time": total_time
+            "image_name": image.name,
+            "summary": {
+                "total_component_versions_processed": component_versions.count(),
+                "component_versions_updated": updated_count,
+                "component_versions_skipped": component_versions.count() - updated_count,
+                "update_rate": f"{(updated_count / component_versions.count() * 100):.1f}%" if component_versions.count() > 0 else "0%"
+            },
+            "processing_time": total_time,
+            "processing_time_formatted": f"{total_time:.2f} seconds",
+            "message": f"Latest versions updated for {updated_count} component versions in image {image.name}",
+            "timestamp": timezone.now().isoformat()
         }
     except Image.DoesNotExist:
         logger.error(f"Image with UUID {image_uuid} not found")
         return {
             "status": "error",
-            "error": f"Image with UUID {image_uuid} not found"
+            "task_name": "Update Components Latest Versions",
+            "image_uuid": str(image_uuid),
+            "error": f"Image with UUID {image_uuid} not found",
+            "error_type": "ImageNotFound",
+            "message": "Specified image does not exist in database",
+            "suggestion": "Verify image UUID and ensure image exists before updating component versions",
+            "timestamp": timezone.now().isoformat()
         }
     except Exception as e:
         logger.error(f"Error updating latest versions for image {image_uuid}: {str(e)}")
         return {
             "status": "error",
-            "error": str(e)
+            "task_name": "Update Components Latest Versions",
+            "image_uuid": str(image_uuid),
+            "error": str(e),
+            "error_type": type(e).__name__,
+            "message": f"Unexpected error occurred during latest versions update: {str(e)}",
+            "suggestion": "Check network connectivity, external API availability, and system resources",
+            "timestamp": timezone.now().isoformat()
         }
 
 @celery_app.task(name="Process Grype Scan Results")
@@ -1049,11 +1173,29 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
         image.scan_status = 'success'
         image.save()
         logger.info(f"Successfully processed Grype scan results for image {image_uuid}")
+        # Calculate summary statistics
+        total_matches = len(matches)
+        unique_vulnerabilities = len(set(match.get('vulnerability', {}).get('id', '') for match in matches))
+        unique_components = len(set(match.get('artifact', {}).get('name', '') for match in matches))
+        
         return {
             "status": "success",
             "task_name": "Process Grype Scan Results",
             "image_uuid": str(image_uuid),
-            "vulnerabilities_processed": len(matches)
+            "image_name": image.name,
+            "summary": {
+                "total_matches_processed": total_matches,
+                "unique_vulnerabilities_found": unique_vulnerabilities,
+                "unique_components_affected": unique_components,
+                "scan_status_updated": True
+            },
+            "message": f"Grype scan results processed successfully for image {image.name}",
+            "details": {
+                "vulnerabilities_processed": total_matches,
+                "image_scan_status": "success",
+                "processing_timestamp": timezone.now().isoformat()
+            },
+            "timestamp": timezone.now().isoformat()
         }
 
     except Image.DoesNotExist:
@@ -1411,11 +1553,39 @@ def scan_repository_tags(repository_uuid: str):
         repository.save()
         logger.info(f"Successfully completed repository tags scan for {repository.name}")
         
+        # Calculate summary statistics
+        existing_tags_before = RepositoryTag.objects.filter(repository=repository).count()
+        new_tags_created = RepositoryTag.objects.filter(repository=repository, tag__in=all_tags).count()
+        tags_skipped = len(all_tags) - new_tags_created
+        
         return {
             "status": "success",
             "task_name": "Scan Repository Tags",
+            "repository_uuid": str(repository_uuid),
             "repository_name": repository.name,
-            "tags_processed": len(all_tags)
+            "repository_url": repository.url,
+            "repository_type": repository.repository_type,
+            "summary": {
+                "total_tags_found": len(all_tags),
+                "new_tags_created": new_tags_created,
+                "existing_tags_before": existing_tags_before,
+                "tags_skipped": tags_skipped,
+                "scan_status_updated": True,
+                "last_scanned_updated": True
+            },
+            "registry_info": {
+                "provider": registry.provider,
+                "api_url": registry.api_url,
+                "registry_name": registry.name
+            },
+            "scan_details": {
+                "scan_timestamp": datetime.now().isoformat(),
+                "scan_duration": "completed",
+                "repository_type_determined": repository.repository_type not in ('none', 'Unknown')
+            },
+            "message": f"Repository {repository.name} tags scan completed successfully",
+            "next_steps": ["Tags are ready for image processing", "Repository scan status updated"],
+            "timestamp": timezone.now().isoformat()
         }
 
     except Repository.DoesNotExist:
@@ -1423,7 +1593,12 @@ def scan_repository_tags(repository_uuid: str):
         return {
             "status": "error",
             "task_name": "Scan Repository Tags",
-            "error": f"Repository with UUID {repository_uuid} not found"
+            "repository_uuid": str(repository_uuid),
+            "error": f"Repository with UUID {repository_uuid} not found",
+            "error_type": "RepositoryNotFound",
+            "message": "Specified repository does not exist in database",
+            "suggestion": "Verify repository UUID and ensure repository exists before scanning",
+            "timestamp": timezone.now().isoformat()
         }
     except Exception as e:
         logger.error(f"Error scanning repository {repository_uuid}: {str(e)}")
@@ -1436,7 +1611,16 @@ def scan_repository_tags(repository_uuid: str):
         return {
             "status": "error",
             "task_name": "Scan Repository Tags",
-            "error": str(e)
+            "repository_uuid": str(repository_uuid),
+            "error": str(e),
+            "error_type": type(e).__name__,
+            "message": f"Unexpected error occurred during repository tags scan: {str(e)}",
+            "suggestion": "Check registry connectivity, authentication credentials, and system resources",
+            "details": {
+                "scan_status_updated": "error",
+                "error_occurred_at": timezone.now().isoformat()
+            },
+            "timestamp": timezone.now().isoformat()
         }
 
 @celery_app.task(name="Process Single Tag")
@@ -1543,20 +1727,54 @@ def process_single_tag(tag_uuid: str):
                 started += 1
         logger.info(f"Triggered SBOM scan for {started} images for tag {tag.tag}")
 
+        # Calculate summary statistics
+        total_images_linked = images.count()
+        images_pending_before = images.filter(scan_status='pending').count()
+        images_in_process_before = images.filter(scan_status='in_process').count()
+        
         return {
             "status": "success",
             "task_name": "Process Single Tag",
             "tag_uuid": str(tag_uuid),
             "repository": tag.repository.name,
+            "repository_uuid": str(tag.repository.uuid),
             "tag": tag.tag,
-            "images_scanned": started
+            "tag_digest": tag.digest,
+            "repository_type": repository.repository_type,
+            "summary": {
+                "total_images_linked": total_images_linked,
+                "images_scanned": started,
+                "images_pending_before": images_pending_before,
+                "images_in_process_before": images_in_process_before,
+                "sbom_scans_triggered": started,
+                "tag_processing_status": "success"
+            },
+            "processing_details": {
+                "repository_type": repository.repository_type,
+                "registry_provider": repository.container_registry.provider if repository.container_registry else None,
+                "manifest_processed": repository.repository_type != 'docker',
+                "chart_digest_extracted": repository.repository_type == 'helm' and chart_digest is not None
+            },
+            "sbom_scanning": {
+                "scans_triggered": started,
+                "art_type_used": repository.repository_type if repository.repository_type != 'none' else 'docker',
+                "next_steps": ["SBOM generation in progress", "Component analysis will follow"]
+            },
+            "message": f"Tag {tag.tag} from repository {repository.name} processed successfully",
+            "timestamp": timezone.now().isoformat()
         }
 
     except RepositoryTag.DoesNotExist:
         logger.error(f"Tag with UUID {tag_uuid} not found")
         return {
             "status": "error",
-            "error": f"Tag with UUID {tag_uuid} not found"
+            "task_name": "Process Single Tag",
+            "tag_uuid": str(tag_uuid),
+            "error": f"Tag with UUID {tag_uuid} not found",
+            "error_type": "TagNotFound",
+            "message": "Specified repository tag does not exist in database",
+            "suggestion": "Verify tag UUID and ensure tag exists before processing",
+            "timestamp": timezone.now().isoformat()
         }
     except Exception as e:
         logger.error(f"Error processing tag {tag_uuid}: {str(e)}")
@@ -1568,7 +1786,17 @@ def process_single_tag(tag_uuid: str):
             pass
         return {
             "status": "error",
-            "error": str(e)
+            "task_name": "Process Single Tag",
+            "tag_uuid": str(tag_uuid),
+            "error": str(e),
+            "error_type": type(e).__name__,
+            "message": f"Unexpected error occurred during tag processing: {str(e)}",
+            "suggestion": "Check registry connectivity, authentication credentials, and system resources",
+            "details": {
+                "processing_status_updated": "error",
+                "error_occurred_at": timezone.now().isoformat()
+            },
+            "timestamp": timezone.now().isoformat()
         }
 
 @celery_app.task(name="Delete Old Repository Tags")
@@ -1579,11 +1807,32 @@ def delete_old_repository_tags(days: int = 1):
     from .models import RepositoryTag
     cutoff = timezone.now() - timedelta(days=days)
     deleted_count, _ = RepositoryTag.objects.filter(created_at__lt=cutoff).delete()
+    # Calculate cleanup statistics
+    cutoff_date_formatted = cutoff.strftime("%Y-%m-%d")
+    space_saved_estimate = deleted_count * 0.1  # Rough estimate: 0.1 KB per tag record
+    
     return {
         "status": "success",
         "task_name": "Delete Old Repository Tags",
-        "deleted_count": deleted_count,
-        "message": f"Deleted {deleted_count} old repository tags older than {days} days"
+        "summary": {
+            "deleted_count": deleted_count,
+            "cutoff_days": days,
+            "cutoff_date": cutoff_date_formatted,
+            "space_saved_kb": round(space_saved_estimate, 2),
+            "cleanup_type": "old_repository_tags"
+        },
+        "message": f"Cleanup completed: {deleted_count} old repository tags removed",
+        "details": {
+            "cutoff_criteria": f"Tags older than {days} days",
+            "cutoff_timestamp": cutoff.isoformat(),
+            "cleanup_timestamp": timezone.now().isoformat()
+        },
+        "maintenance": {
+            "frequency": "daily",
+            "next_recommended_run": (timezone.now() + timedelta(days=1)).isoformat(),
+            "note": "This task helps maintain database performance by removing outdated tag records"
+        },
+        "timestamp": timezone.now().isoformat()
     }
 
 @celery_app.task(name="Update Vulnerability Details")
@@ -1611,8 +1860,17 @@ def update_vulnerability_details(vulnerability_uuid: str):
                 logger.info(f"Skipping {vulnerability.vulnerability_id} - updated recently")
                 return {
                     "status": "skipped",
+                    "task_name": "Update Vulnerability Details",
+                    "vulnerability_id": vulnerability.vulnerability_id,
+                    "vulnerability_uuid": str(vulnerability_uuid),
                     "reason": "updated recently",
-                    "vulnerability_id": vulnerability.vulnerability_id
+                    "message": f"Vulnerability {vulnerability.vulnerability_id} was updated recently (within 24 hours)",
+                    "details": {
+                        "last_updated": existing_details.last_updated.isoformat() if existing_details.last_updated else None,
+                        "hours_since_update": (timezone.now() - existing_details.last_updated).total_seconds() / 3600 if existing_details.last_updated else None
+                    },
+                    "suggestion": "Skip update as data is still fresh",
+                    "timestamp": timezone.now().isoformat()
                 }
         except VulnerabilityDetails.DoesNotExist:
             pass  # No existing details, will create new ones
@@ -1677,14 +1935,37 @@ def update_vulnerability_details(vulnerability_uuid: str):
         processing_time = time.time() - start_time
         logger.info(f"Updated vulnerability details for {vulnerability.vulnerability_id} in {processing_time:.2f}s")
 
+        # Calculate summary statistics
+        data_sources_count = len(data_sources) if data_sources else 0
+        fields_updated = 0
+        if cve_details:
+            fields_updated += len([v for v in cve_details.values() if v is not None])
+        if exploit_info:
+            fields_updated += len([v for v in exploit_info.values() if v is not None])
+        
         return {
             "status": "success",
             "task_name": "Update Vulnerability Details",
             "vulnerability_id": vulnerability.vulnerability_id,
-            "created": created,
+            "vulnerability_uuid": str(vulnerability_uuid),
+            "vulnerability_severity": vulnerability.severity,
+            "summary": {
+                "details_created": created,
+                "data_sources_used": data_sources_count,
+                "fields_updated": fields_updated,
+                "cve_details_available": cve_details is not None,
+                "exploit_info_available": exploit_info is not None
+            },
+            "data_sources": data_sources if data_sources else [],
             "processing_time": processing_time,
-            "has_cve_details": cve_details is not None,
-            "has_exploit_info": exploit_info is not None
+            "processing_time_formatted": f"{processing_time:.2f} seconds",
+            "message": f"Vulnerability {vulnerability.vulnerability_id} details updated successfully",
+            "details": {
+                "cve_details_fields": list(cve_details.keys()) if cve_details else [],
+                "exploit_info_fields": list(exploit_info.keys()) if exploit_info else [],
+                "last_updated": details.last_updated.isoformat() if details.last_updated else None
+            },
+            "timestamp": timezone.now().isoformat()
         }
 
     except Vulnerability.DoesNotExist:
@@ -1759,15 +2040,32 @@ def update_all_vulnerability_details():
             'status': 'scheduled'
         }, timeout=86400)  # 24 hours
 
+        # Calculate summary statistics
+        total_batches = (total_vulnerabilities + BATCH_SIZE - 1) // BATCH_SIZE
+        estimated_completion_time = total_vulnerabilities * 2  # Rough estimate: 2 seconds per vulnerability
+        
         return {
             "status": "scheduled",
             "task_name": "Update All Vulnerability Details",
-            "total_vulnerabilities": total_vulnerabilities,
-            "scheduled_count": processed_count,
+            "summary": {
+                "total_vulnerabilities": total_vulnerabilities,
+                "scheduled_count": processed_count,
+                "total_batches": total_batches,
+                "batch_size": BATCH_SIZE,
+                "estimated_completion_time_seconds": estimated_completion_time,
+                "estimated_completion_time_formatted": f"{estimated_completion_time // 3600}h {(estimated_completion_time % 3600) // 60}m"
+            },
             "processing_time": total_time,
-            "message": "All tasks have been scheduled for asynchronous processing",
+            "processing_time_formatted": f"{total_time:.2f} seconds",
+            "message": f"Bulk update scheduled: {processed_count} vulnerability tasks queued for processing",
             "monitor_key": cache_key,
-            "note": "Use monitor_bulk_update_progress() to check progress"
+            "monitoring": {
+                "cache_expires_in": "24 hours",
+                "progress_function": "monitor_bulk_update_progress()",
+                "note": "Use monitor_bulk_update_progress() to check progress"
+            },
+            "next_steps": ["Monitor progress using monitor_bulk_update_progress()", "Individual tasks will update vulnerability details"],
+            "timestamp": timezone.now().isoformat()
         }
 
     except Exception as e:
@@ -1830,6 +2128,12 @@ def update_critical_vulnerability_details():
         total_time = time.time() - start_time
         logger.info(f"Critical vulnerability update scheduling completed in {total_time:.2f}s")
         
+        # Calculate summary statistics
+        critical_count = critical_vulns.count()
+        old_count = old_vulns.count()
+        total_batches = (total_vulnerabilities + BATCH_SIZE - 1) // BATCH_SIZE
+        estimated_completion_time = total_vulnerabilities * 1.5  # Critical vulns are usually faster to process
+        
         # Store task IDs in cache for monitoring (expires in 24 hours)
         cache_key = f"critical_update_tasks_{int(start_time)}"
         cache.set(cache_key, {
@@ -1842,12 +2146,28 @@ def update_critical_vulnerability_details():
         return {
             "status": "scheduled",
             "task_name": "Update Critical Vulnerability Details",
-            "total_vulnerabilities": total_vulnerabilities,
-            "scheduled_count": processed_count,
+            "summary": {
+                "total_vulnerabilities": total_vulnerabilities,
+                "critical_severity_count": critical_count,
+                "old_vulnerabilities_count": old_count,
+                "scheduled_count": processed_count,
+                "total_batches": total_batches,
+                "batch_size": BATCH_SIZE,
+                "estimated_completion_time_seconds": estimated_completion_time,
+                "estimated_completion_time_formatted": f"{estimated_completion_time // 3600}h {(estimated_completion_time % 3600) // 60}m"
+            },
             "processing_time": total_time,
-            "message": "All critical vulnerability tasks have been scheduled for asynchronous processing",
+            "processing_time_formatted": f"{total_time:.2f} seconds",
+            "message": f"Critical vulnerability update scheduled: {processed_count} tasks queued for processing",
             "monitor_key": cache_key,
-            "note": "Use monitor_bulk_update_progress() to check progress"
+            "monitoring": {
+                "cache_expires_in": "24 hours",
+                "progress_function": "monitor_bulk_update_progress()",
+                "note": "Use monitor_bulk_update_progress() to check progress"
+            },
+            "priority": "high",
+            "next_steps": ["Monitor progress using monitor_bulk_update_progress()", "Critical vulnerabilities will be updated first"],
+            "timestamp": timezone.now().isoformat()
         }
 
     except Exception as e:
@@ -1884,10 +2204,33 @@ def cleanup_old_vulnerability_data():
         
         logger.info(f"Deleted {deleted_count} old vulnerability detail records")
         
+        # Calculate cleanup statistics
+        cutoff_date_formatted = cutoff_date.strftime("%Y-%m-%d")
+        days_threshold = 30
+        space_saved_estimate = deleted_count * 0.5  # Rough estimate: 0.5 KB per record
+        
         return {
             "status": "completed",
             "task_name": "Cleanup Old Vulnerability Data",
-            "deleted_records": deleted_count
+            "summary": {
+                "deleted_records": deleted_count,
+                "cutoff_date": cutoff_date_formatted,
+                "days_threshold": days_threshold,
+                "space_saved_kb": round(space_saved_estimate, 2),
+                "cleanup_type": "old_vulnerability_details"
+            },
+            "message": f"Cleanup completed: {deleted_count} old vulnerability detail records removed",
+            "details": {
+                "cutoff_criteria": f"Records older than {days_threshold} days",
+                "cutoff_timestamp": cutoff_date.isoformat(),
+                "cleanup_timestamp": timezone.now().isoformat()
+            },
+            "maintenance": {
+                "frequency": "weekly",
+                "next_recommended_run": (timezone.now() + timedelta(days=7)).isoformat(),
+                "note": "This task helps maintain database performance by removing outdated data"
+            },
+            "timestamp": timezone.now().isoformat()
         }
 
     except Exception as e:
@@ -2008,13 +2351,32 @@ def update_vulnerability_details_bulk(vulnerability_uuids: List[str], batch_size
         
         processing_time = time.time() - start_time
         
+        # Calculate summary statistics
+        success_rate = (success_count / total_count * 100) if total_count > 0 else 0
+        error_rate = (error_count / total_count * 100) if total_count > 0 else 0
+        total_batches = (total_count + batch_size - 1) // batch_size
+        
         result = {
             'status': 'completed',
-            'total_vulnerabilities': total_count,
-            'processed_count': processed_count,
-            'success_count': success_count,
-            'error_count': error_count,
-            'processing_time': processing_time
+            'task_name': 'Update Vulnerability Details (Bulk)',
+            'summary': {
+                'total_vulnerabilities': total_count,
+                'processed_count': processed_count,
+                'success_count': success_count,
+                'error_count': error_count,
+                'success_rate': f"{success_rate:.1f}%",
+                'error_rate': f"{error_rate:.1f}%",
+                'total_batches': total_batches,
+                'batch_size': batch_size
+            },
+            'processing_time': processing_time,
+            'processing_time_formatted': f"{processing_time:.2f} seconds",
+            'message': f"Bulk update completed: {success_count}/{total_count} vulnerabilities updated successfully",
+            'performance': {
+                'vulnerabilities_per_second': round(total_count / processing_time, 2) if processing_time > 0 else 0,
+                'batch_processing_time': round(processing_time / total_batches, 2) if total_batches > 0 else 0
+            },
+            'timestamp': timezone.now().isoformat()
         }
         
         logger.info(f"Bulk update completed: {result}")
@@ -2049,8 +2411,19 @@ def update_critical_vulnerabilities_bulk():
             logger.info("No critical vulnerabilities need updating")
             return {
                 'status': 'completed',
+                'task_name': 'Update Critical Vulnerabilities (Bulk)',
                 'message': 'No critical vulnerabilities need updating',
-                'total_vulnerabilities': 0
+                'summary': {
+                    'total_vulnerabilities': 0,
+                    'critical_vulnerabilities_found': 0,
+                    'recently_updated': 'all'
+                },
+                'details': {
+                    'cutoff_time': cutoff_time.isoformat(),
+                    'severity_filter': 'CRITICAL',
+                    'update_threshold': '24 hours'
+                },
+                'timestamp': timezone.now().isoformat()
             }
         
         logger.info(f"Found {len(vulnerability_uuids)} critical vulnerabilities to update")
@@ -2062,7 +2435,13 @@ def update_critical_vulnerabilities_bulk():
         logger.error(f"Error updating critical vulnerabilities: {str(e)}")
         return {
             'status': 'error',
-            'error': str(e)
+            'task_name': 'Update Critical Vulnerabilities (Bulk)',
+            'error': str(e),
+            'error_type': type(e).__name__,
+            'message': f'Error occurred while updating critical vulnerabilities: {str(e)}',
+            'suggestion': 'Check system resources, database connectivity, and external API availability',
+            'priority': 'high',
+            'timestamp': timezone.now().isoformat()
         }
 
 
@@ -2089,15 +2468,30 @@ def monitor_task_status():
         return {
             'status': 'completed',
             'task_name': 'Monitor Task Status',
-            'message': 'Task monitoring completed',
-            'active_tasks': 0
+            'summary': {
+                'active_tasks': 0,
+                'monitoring_period': '1 hour',
+                'cutoff_time': cutoff_time.isoformat()
+            },
+            'message': 'Task monitoring completed - no active tasks found',
+            'details': {
+                'monitoring_scope': 'vulnerability update tasks',
+                'monitoring_frequency': 'manual',
+                'next_recommended_check': (timezone.now() + timedelta(minutes=30)).isoformat()
+            },
+            'timestamp': timezone.now().isoformat()
         }
         
     except Exception as e:
         logger.error(f"Error in task monitoring: {str(e)}")
         return {
             'status': 'error',
-            'error': str(e)
+            'task_name': 'Monitor Task Status',
+            'error': str(e),
+            'error_type': type(e).__name__,
+            'message': f'Error occurred during task monitoring: {str(e)}',
+            'suggestion': 'Check system resources, database connectivity, and Celery worker status',
+            'timestamp': timezone.now().isoformat()
         }
 
 
@@ -2217,8 +2611,18 @@ def update_cisa_kev_vulnerabilities():
             return {
                 'status': 'completed',
                 'task_name': 'Update CISA KEV Vulnerabilities',
-                'message': 'No vulnerabilities found in CISA KEV',
-                'total_vulnerabilities': 0
+                'message': 'No vulnerabilities found in CISA KEV catalog',
+                'summary': {
+                    'total_vulnerabilities_checked': len(all_cve_ids),
+                    'kev_vulnerabilities_found': 0,
+                    'kev_coverage': '0%'
+                },
+                'details': {
+                    'cisa_kev_catalog_checked': True,
+                    'cve_ids_processed': len(all_cve_ids),
+                    'kev_results': 'empty'
+                },
+                'timestamp': timezone.now().isoformat()
             }
         
         # Get UUIDs for KEV vulnerabilities
@@ -2227,6 +2631,9 @@ def update_cisa_kev_vulnerabilities():
         
         logger.info(f"Found {len(vulnerability_uuids)} vulnerabilities in CISA KEV")
         
+        # Calculate KEV coverage statistics
+        kev_coverage = (len(kev_cve_ids) / len(all_cve_ids) * 100) if all_cve_ids else 0
+        
         # Use bulk update task
         return update_vulnerability_details_bulk.delay(vulnerability_uuids, batch_size=25)
         
@@ -2234,7 +2641,13 @@ def update_cisa_kev_vulnerabilities():
         logger.error(f"Error updating CISA KEV vulnerabilities: {str(e)}")
         return {
             'status': 'error',
-            'error': str(e)
+            'task_name': 'Update CISA KEV Vulnerabilities',
+            'error': str(e),
+            'error_type': type(e).__name__,
+            'message': f'Error occurred while checking CISA KEV catalog: {str(e)}',
+            'suggestion': 'Check CISA API connectivity, network access, and system resources',
+            'priority': 'high',
+            'timestamp': timezone.now().isoformat()
         }
 
 

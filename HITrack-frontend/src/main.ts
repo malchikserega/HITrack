@@ -11,6 +11,10 @@ import { notificationPlugin } from './plugins/notifications'
 import datePlugin from './plugins/date'
 import { formatDate } from './utils/dateUtils'
 
+// Import components
+import MetricCard from './components/MetricCard.vue'
+import TaskResultDisplay from './components/TaskResultDisplay.vue'
+
 // Vuetify
 import 'vuetify/styles'
 import '@mdi/font/css/materialdesignicons.css'
@@ -30,6 +34,10 @@ app.config.warnHandler = (msg: string, vm: any, trace: string) => {
 // Add global properties
 app.config.globalProperties.$notify = notificationPlugin
 app.config.globalProperties.$formatDate = formatDate
+
+// Register global components
+app.component('MetricCard', MetricCard)
+app.component('TaskResultDisplay', TaskResultDisplay)
 
 // Use plugins
 app.use(createPinia())

@@ -221,20 +221,20 @@
                 <v-expansion-panel-title>
                   <div class="d-flex align-center">
                     <v-icon
-                      :color="getEvidenceColor(location.evidence_type)"
+                      :color="getEvidenceColor(location.evidence_type || 'unknown')"
                       class="mr-3"
                       size="20"
                     >
-                      {{ getEvidenceIcon(location.evidence_type) }}
+                      {{ getEvidenceIcon(location.evidence_type || 'unknown') }}
                     </v-icon>
-                    <span class="file-path">{{ location.path }}</span>
+                    <span class="file-path">{{ location.path || 'No path' }}</span>
                     <v-chip
                       size="small"
-                      :color="getEvidenceColor(location.evidence_type)"
+                      :color="getEvidenceColor(location.evidence_type || 'unknown')"
                       variant="tonal"
                       class="ml-auto evidence-chip"
                     >
-                      {{ location.evidence_type }}
+                      {{ location.evidence_type || 'unknown' }}
                     </v-chip>
                   </div>
                 </v-expansion-panel-title>
@@ -243,7 +243,7 @@
                   <div class="location-details">
                     <div class="detail-row">
                       <span class="detail-label">Image:</span>
-                      <span class="detail-value">{{ location.image?.name || 'Unknown' }}</span>
+                      <span class="detail-value">{{ location.image?.name || location.image?.uuid || 'Unknown' }}</span>
                     </div>
                     
                     <div class="detail-row" v-if="location.layer_id">
@@ -259,6 +259,12 @@
                     <div class="detail-row" v-if="location.annotations && Object.keys(location.annotations).length">
                       <span class="detail-label">Annotations:</span>
                       <pre class="detail-value text-caption">{{ JSON.stringify(location.annotations, null, 2) }}</pre>
+                    </div>
+                    
+                    <!-- Raw location data for debugging -->
+                    <div class="detail-row mt-3">
+                      <span class="detail-label">Raw Data:</span>
+                      <pre class="detail-value text-caption">{{ JSON.stringify(location, null, 2) }}</pre>
                     </div>
                   </div>
                 </v-expansion-panel-text>
@@ -322,27 +328,51 @@
               density="comfortable"
               @click:row="onVulnerabilityClick"
             >
+              <template v-slot:item.vulnerability_id="{ item }">
+                <div class="vulnerability-id">
+                  <span class="font-mono text-caption">{{ item.vulnerability_id || item.uuid || 'N/A' }}</span>
+                </div>
+              </template>
+              
               <template v-slot:item.severity="{ item }">
                 <v-chip
                   size="small"
                   :color="getSeverityColor(item.severity)"
                   variant="tonal"
                 >
-                  {{ item.severity }}
+                  {{ item.severity || 'UNKNOWN' }}
                 </v-chip>
               </template>
+              
+              <template v-slot:item.vulnerability_type="{ item }">
+                <span>{{ item.vulnerability_type || item.type || 'N/A' }}</span>
+              </template>
+              
               <template v-slot:item.affected_versions="{ item }">
-                <v-chip
-                  v-for="version in item.affected_versions"
-                  :key="version"
-                  size="small"
-                  color="warning"
-                  variant="tonal"
-                  class="mr-1"
-                >
-                  {{ version }}
-                </v-chip>
+                <div v-if="item.affected_versions && item.affected_versions.length > 0">
+                  <v-chip
+                    v-for="version in item.affected_versions"
+                    :key="version"
+                    size="small"
+                    color="warning"
+                    variant="tonal"
+                    class="mr-1 mb-1"
+                  >
+                    {{ version }}
+                  </v-chip>
+                </div>
+                <span v-else class="text-grey text-caption">No specific versions</span>
               </template>
+              
+              <template v-slot:item.description="{ item }">
+                <div class="vulnerability-description">
+                  <span v-if="item.description" class="text-truncate d-block" style="max-width: 200px;">
+                    {{ item.description }}
+                  </span>
+                  <span v-else class="text-grey text-caption">No description</span>
+                </div>
+              </template>
+              
               <template v-slot:item.actions="{ item }">
                 <v-tooltip location="top" text="View vulnerability details">
                   <template v-slot:activator="{ props }">
@@ -492,11 +522,27 @@ const onVulnerabilityClick = (event: any, item: any) => {
   const fromPage = `${currentRoute.path}${queryString}`
   sessionStorage.setItem('fromPage', fromPage)
   
-  if (vulnerability && vulnerability.uuid) {
-    router.push({ name: 'vulnerability-detail', params: { uuid: vulnerability.uuid } })
-  } else if (vulnerability && vulnerability.vulnerability_id) {
-    // Try to find the vulnerability by ID first
-    router.push({ name: 'vulnerabilities', query: { search: vulnerability.vulnerability_id } })
+  // Try different possible ID fields
+  const vulnerabilityId = vulnerability?.uuid || 
+                          vulnerability?.vulnerability_id || 
+                          vulnerability?.id || 
+                          vulnerability?.cve_id
+  
+  if (vulnerabilityId) {
+    try {
+      router.push({ name: 'vulnerability-detail', params: { uuid: vulnerabilityId } })
+    } catch (err) {
+      console.error('Navigation error:', err)
+      // Fallback to search
+      router.push({ name: 'vulnerabilities', query: { search: vulnerabilityId } })
+    }
+  } else {
+    // Fallback to search by description or other fields
+    const searchTerm = vulnerability?.description || 
+                       vulnerability?.vulnerability_id || 
+                       vulnerability?.type || 
+                       'vulnerability'
+    router.push({ name: 'vulnerabilities', query: { search: searchTerm } })
   }
 }
 
@@ -507,7 +553,21 @@ const showVersionLocationsModal = async (version: any) => {
   // Load locations for this specific version
   try {
     const response = await api.get(`/component-versions/${version.uuid}/locations/`)
-    versionLocations.value = response.data.locations || []
+    
+    // Handle different response structures
+    if (response.data.results && response.data.results.locations) {
+      // New API structure
+      versionLocations.value = response.data.results.locations || []
+    } else if (response.data.locations) {
+      // Direct locations array
+      versionLocations.value = response.data.locations || []
+    } else if (Array.isArray(response.data)) {
+      // Direct array response
+      versionLocations.value = response.data || []
+    } else {
+      // Fallback
+      versionLocations.value = []
+    }
   } catch (err) {
     console.error('Error loading version locations:', err)
     versionLocations.value = []
@@ -521,7 +581,30 @@ const showVersionVulnerabilitiesModal = async (version: any) => {
   // Load vulnerabilities for this specific version
   try {
     const response = await api.get(`/component-versions/${version.uuid}/vulnerabilities/`)
-    versionVulnerabilities.value = response.data || []
+    
+    let vulnerabilities = []
+    
+    // Handle different response structures
+    if (response.data.results && response.data.results.vulnerabilities) {
+      // New API structure
+      vulnerabilities = response.data.results.vulnerabilities || []
+    } else if (response.data.vulnerabilities) {
+      // Direct vulnerabilities array
+      vulnerabilities = response.data.vulnerabilities || []
+    } else if (Array.isArray(response.data)) {
+      // Direct array response
+      vulnerabilities = response.data || []
+    } else if (response.data.results && Array.isArray(response.data.results)) {
+      // Results is directly an array
+      vulnerabilities = response.data.results || []
+    } else {
+      // Fallback
+      vulnerabilities = []
+    }
+    
+    // Force reactivity by creating a new array
+    versionVulnerabilities.value = [...vulnerabilities]
+    
   } catch (err) {
     console.error('Error loading version vulnerabilities:', err)
     versionVulnerabilities.value = []
