@@ -97,6 +97,22 @@
           >
             Add New Tag
           </v-btn>
+          <v-tooltip :text="getScanTooltip()" location="top">
+            <template v-slot:activator="{ props }">
+              <div v-bind="props">
+                <v-btn
+                  icon="mdi-refresh"
+                  variant="tonal"
+                  size="default"
+                  color="primary"
+                  :disabled="isScanDisabled()"
+                  :loading="scanning"
+                  @click="onScanRepository"
+                  class="ml-2"
+                />
+              </div>
+            </template>
+          </v-tooltip>
           <v-select
             :items="[10, 20, 50, 100]"
             v-model="tagsPerPage"
@@ -115,10 +131,11 @@
           :loading="tagsLoading"
           :items-per-page="tagsPerPage"
           :page="tagsPage"
-          :sort-by.sync="tagsSortBy"
+          :server-items-length="tagsTotal"
           hide-default-footer
           item-class="clickable-row"
           @click:row="onTagRowClick"
+          @update:sort-by="onSortChange"
         >
           <template #item.tag="{ item }">
             <div class="d-flex align-center">
@@ -346,21 +363,21 @@ const tagsLoading = ref(true)
 const chartsLoading = ref(true)
 
 const headers = [
-  { title: 'Tag', key: 'tag', sortable: true },
-  { title: 'Status', key: 'processing_status', sortable: true },
-  { title: 'Vulnerabilities', key: 'findings', sortable: true },
-  { title: 'Components', key: 'components', sortable: true },
-  { title: 'Updated', key: 'updated_at', sortable: true },
+  { title: 'Tag', key: 'tag', sortable: false },
+  { title: 'Status', key: 'processing_status', sortable: false },
+  { title: 'Vulnerabilities', key: 'findings', sortable: false },
+  { title: 'Components', key: 'components', sortable: false },
+  { title: 'Updated', key: 'updated_at', sortable: false },
   { title: 'Actions', key: 'actions', sortable: false }
 ]
 
 const tags = ref<any[]>([])
 const tagSearch = ref('')
 const tagsPage = ref(1)
-const tagsPerPage = ref(10)
+const tagsPerPage = ref(25)
 const tagsTotal = ref(0)
 interface SortItem { key: string; order: 'asc' | 'desc' }
-const tagsSortBy = ref<SortItem[]>([{ key: 'updated_at', order: 'desc' }])
+const tagsSortBy = ref<SortItem[]>([{ key: 'tag', order: 'desc' }])
 const tagsPageCount = computed(() => Math.ceil(tagsTotal.value / tagsPerPage.value) || 1)
 
 const tagsForCharts = ref<any[]>([])
@@ -375,6 +392,7 @@ const addTagForm = ref<any>(null)
 const deletingTag = ref<string | null>(null)
 const showDeleteDialog = ref(false)
 const tagToDelete = ref<any>(null)
+const scanning = ref(false)
 
 const tagNameRules = [
   (v: string) => !!v || 'Tag name is required',
@@ -624,7 +642,9 @@ const fetchTags = async () => {
     if (tagsSortBy.value && tagsSortBy.value.length > 0) {
       params.ordering = tagsSortBy.value.map(s => s.order === 'desc' ? `-${s.key}` : s.key).join(',')
     }
+    console.log('Request params:', params)
     const resp = await api.get(`repositories/${route.params.uuid}/tags-list/`, { params })
+    console.log('API Response:', resp.data.results.map(tag => tag.tag))
     tags.value = resp.data.results
     tagsTotal.value = resp.data.count
   } catch (e) {
@@ -635,7 +655,7 @@ const fetchTags = async () => {
   }
 }
 
-watch([tagSearch, tagsSortBy], () => {
+watch([tagSearch], () => {
   tagsPage.value = 1
   fetchTags()
 })
@@ -741,6 +761,50 @@ const onTagsPerPageChange = () => {
 
 const onTagRowClick = (event: any, { item }: any) => {
   router.push({ name: 'tag-images', params: { uuid: item.uuid } })
+}
+
+const onSortChange = (newSortBy: any) => {
+  tagsSortBy.value = newSortBy
+  tagsPage.value = 1
+  fetchTags()
+}
+
+const isScanDisabled = () => {
+  return repository.value?.scan_status === 'in_process'
+}
+
+const getScanTooltip = () => {
+  if (repository.value?.scan_status === 'in_process') {
+    return 'Repository is already being scanned'
+  }
+  return 'Scan repository for new tags'
+}
+
+const onScanRepository = async () => {
+  if (!repository.value?.uuid) {
+    notificationService.error('Cannot scan repository: missing UUID')
+    return
+  }
+  if (isScanDisabled()) {
+    notificationService.warning(getScanTooltip())
+    return
+  }
+  scanning.value = true
+  try {
+    await api.post(`repositories/${repository.value.uuid}/scan_tags/`)
+    notificationService.success('Repository scan started successfully')
+    await fetchRepository()
+    await fetchTags()
+  } catch (error: any) {
+    if (error.response?.status === 409) {
+      notificationService.warning(error.response.data.error || 'Repository is already being scanned')
+    } else {
+      console.error('Error starting repository scan:', error)
+      notificationService.error('Failed to start repository scan')
+    }
+  } finally {
+    scanning.value = false
+  }
 }
 
 onMounted(async () => {

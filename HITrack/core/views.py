@@ -1618,7 +1618,70 @@ class RepositoryTagListForRepositoryView(ListAPIView):
 
     def get_queryset(self):
         repository_uuid = self.kwargs['repository_uuid']
-        return RepositoryTag.objects.filter(repository__uuid=repository_uuid)
+        queryset = RepositoryTag.objects.filter(repository__uuid=repository_uuid)
+        
+        # Check if ordering by tag is requested
+        ordering = self.request.query_params.get('ordering', '')
+        if 'tag' in ordering:
+            # Get all tags and sort them semantically
+            tags = list(queryset)
+            version_regex = re.compile(r'^(\d+\.\d+\.\d+)')
+            
+            def version_key(tag):
+                # Extract all numeric parts from the beginning of the tag
+                parts = []
+                remaining = tag.tag
+                
+                # Extract numeric parts (major.minor.patch.build)
+                while remaining:
+                    match = re.match(r'^(\d+)', remaining)
+                    if match:
+                        parts.append(int(match.group(1)))
+                        remaining = remaining[len(match.group(1)):]
+                        # Skip non-numeric characters
+                        while remaining and not remaining[0].isdigit():
+                            remaining = remaining[1:]
+                    else:
+                        break
+                
+                # Pad with zeros to ensure consistent comparison
+                while len(parts) < 4:
+                    parts.append(0)
+                
+                # Take only first 4 parts (major.minor.patch.build)
+                parts = parts[:4]
+                
+                # Add suffix for secondary sorting
+                suffix = remaining or ''
+                
+                return (tuple(parts), suffix)
+            
+            # Sort by version (descending by default for tag ordering)
+            reverse = ordering.startswith('-')
+            tags.sort(key=version_key, reverse=reverse)
+            
+            # Return the sorted tags as a list (we'll handle pagination manually)
+            return tags
+        
+        return queryset
+
+    def list(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+        
+        # Check if we have custom tag sorting
+        ordering = request.query_params.get('ordering', '')
+        if 'tag' in ordering and isinstance(queryset, list):
+            # Handle pagination manually for custom sorted list
+            page = self.paginate_queryset(queryset)
+            if page is not None:
+                serializer = self.get_serializer(page, many=True)
+                return self.get_paginated_response(serializer.data)
+            
+            serializer = self.get_serializer(queryset, many=True)
+            return Response(serializer.data)
+        
+        # Use default behavior for other orderings
+        return super().list(request, *args, **kwargs)
 
 class ReportGeneratorView(APIView):
     permission_classes = [IsAuthenticated]

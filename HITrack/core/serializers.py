@@ -536,20 +536,26 @@ class RepositoryTagSerializer(serializers.ModelSerializer):
 
     @extend_schema_field(serializers.IntegerField())
     def get_findings(self, obj):
-        # Count only vulnerabilities that are linked through ComponentVersionVulnerability
+        # Count all vulnerabilities across all images in this tag
+        # Each image's vulnerabilities should be counted separately
+        from .models import ComponentVersionVulnerability
+        
         total_findings = 0
         for image in obj.images.all():
             total_findings += ComponentVersionVulnerability.objects.filter(
                 component_version__images=image
             ).count()
+        
         return total_findings
 
     @extend_schema_field(serializers.IntegerField())
     def get_components(self, obj):
-        # Sum of all components_count across images
+        # Count all component versions across all images in this tag
+        # Each image's components should be counted separately
         total_components = 0
         for image in obj.images.all():
             total_components += image.component_versions.count()
+        
         return total_components
 
 
@@ -565,20 +571,26 @@ class RepositoryTagListSerializer(serializers.ModelSerializer):
 
     @extend_schema_field(serializers.IntegerField())
     def get_findings(self, obj):
-        # Count only vulnerabilities that are linked through ComponentVersionVulnerability
+        # Count all vulnerabilities across all images in this tag
+        # Each image's vulnerabilities should be counted separately
+        from .models import ComponentVersionVulnerability
+        
         total_findings = 0
         for image in obj.images.all():
             total_findings += ComponentVersionVulnerability.objects.filter(
                 component_version__images=image
             ).count()
+        
         return total_findings
 
     @extend_schema_field(serializers.IntegerField())
     def get_components(self, obj):
-        # Sum of all components_count across images
+        # Count all component versions across all images in this tag
+        # Each image's components should be counted separately
         total_components = 0
         for image in obj.images.all():
             total_components += image.component_versions.count()
+        
         return total_components
 
     def get_releases(self, obj):
