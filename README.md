@@ -1,9 +1,13 @@
-# HITrack - Container Security Platform
-
-[![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
-[![Python](https://img.shields.io/badge/Python-3.12+-blue.svg)](https://www.python.org/)
-[![Vue.js](https://img.shields.io/badge/Vue.js-3.4+-green.svg)](https://vuejs.org/)
-[![Django](https://img.shields.io/badge/Django-5.0+-darkgreen.svg)](https://www.djangoproject.com/)
+<div align="center">
+  <img src="docs/logo.png" alt="HITrack Logo" width="200" height="200">
+  
+  # HITrack - Container Security Platform
+  
+  [![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
+  [![Python](https://img.shields.io/badge/Python-3.12+-blue.svg)](https://www.python.org/)
+  [![Vue.js](https://img.shields.io/badge/Vue.js-3.4+-green.svg)](https://vuejs.org/)
+  [![Django](https://img.shields.io/badge/Django-5.0+-darkgreen.svg)](https://www.djangoproject.com/)
+</div>
 
 HITrack is a container security platform that helps organizations track and manage vulnerabilities in their container images and repositories.
 
