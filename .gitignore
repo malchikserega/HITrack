@@ -1,0 +1,10 @@
+venv
+static_data
+storage
+volume
+HITrack-frontend/.vscode
+HITrack-frontend/node_modules
+HITrack-frontend/dist
+__pycache__
+.DS_Store
+.idea

@@ -1,0 +1,42 @@
+/* Common animations and utilities */
+
+/* Loading spinner animation */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.mdi-spin {
+  animation: spin 1s linear infinite;
+}
+
+/* Cursor utilities */
+.cursor-pointer {
+  cursor: pointer;
+}
+
+/* Common transitions */
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.3s ease;
+}
+
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
+/* Table hover effects */
+.table-row-hover:hover {
+  background-color: #f5f5f5;
+  transition: background-color 0.2s ease;
+}
+
+/* Card shadows */
+.card-elevation {
+  box-shadow: 0 2px 12px 0 rgba(60, 60, 60, 0.07);
+  transition: box-shadow 0.3s ease;
+}
+
+.card-elevation:hover {
+  box-shadow: 0 4px 20px 0 rgba(60, 60, 60, 0.12);
+} 
