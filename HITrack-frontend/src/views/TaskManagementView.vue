@@ -1,5 +1,6 @@
 <template>
-  <v-container fluid>
+  <div class="task-management">
+    <v-container fluid>
     <v-row>
       <v-col cols="12">
         <div class="d-flex align-center justify-space-between mb-4">
@@ -383,7 +384,8 @@
         </v-card>
       </v-col>
     </v-row>
-  </v-container>
+    </v-container>
+  </div>
 </template>
 
 <script lang="ts">
@@ -708,6 +710,16 @@ export default defineComponent({
 </script>
 
 <style scoped>
+.task-management {
+  padding: 20px;
+  background: #ffffff;
+  min-height: 100vh;
+}
+
+/* Retrowave theme specific background */
+.retrowave-theme .task-management {
+  background: linear-gradient(135deg, #0a0a0f 0%, #1a0a1f 100%) !important;
+}
 /* Custom styles for better alignment */
 .v-data-table {
   border-radius: 8px;

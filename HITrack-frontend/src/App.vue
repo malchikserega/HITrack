@@ -66,6 +66,11 @@
     <div ref="matrixBgRef" class="matrix-bg" :style="{ display: isMatrix && matrixAnimation ? 'block' : 'none' }">
       <canvas ref="matrixCanvasRef" id="matrix-canvas" style="width:100vw;height:100vh;display:block;"></canvas>
     </div>
+
+    <!-- Theme Indicator -->
+    <div v-if="showThemeIndicatorRef" class="theme-indicator">
+      RETROWAVE MODE
+    </div>
   </v-app>
 </template>
 
@@ -73,15 +78,18 @@
 import { ref, computed, onMounted, watch, onUnmounted, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useAuthStore } from './stores/auth'
+import { useThemeStore } from './stores/theme'
 import { notificationService } from './plugins/notifications'
 import { useTheme } from 'vuetify'
 
 const router = useRouter()
 const route = useRoute()
 const authStore = useAuthStore()
+const themeStore = useThemeStore()
 
 const isAuthenticated = computed(() => authStore.isAuthenticated)
 const drawer = ref(false)
+const showThemeIndicatorRef = ref(false)
 
 const theme = useTheme()
 
@@ -154,7 +162,26 @@ function handleResize() {
   }
 }
 
+// Theme functionality
+let cleanupThemeListener: (() => void) | null = null
+
+const showThemeIndicator = () => {
+  showThemeIndicatorRef.value = true
+  setTimeout(() => {
+    showThemeIndicatorRef.value = false
+  }, 3000)
+}
+
 onMounted(() => {
+  // Initialize theme system
+  themeStore.applyTheme()
+  cleanupThemeListener = themeStore.initKeyboardListener()
+  
+  // Watch for theme changes to show indicator
+  watch(() => themeStore.currentTheme, () => {
+    showThemeIndicator()
+  })
+  
   watch([isMatrix, matrixAnimation], async ([matrix, anim]) => {
     await nextTick()
     if (matrix && anim) {
@@ -170,6 +197,9 @@ onMounted(() => {
 onUnmounted(() => {
   stopMatrixRain()
   window.removeEventListener('resize', handleResize)
+  if (cleanupThemeListener) {
+    cleanupThemeListener()
+  }
 })
 
 const menuItems = [
@@ -232,8 +262,81 @@ onMounted(async () => {
 
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+@import './assets/themes.css';
 body {
   font-family: 'Roboto', sans-serif;
+  background-color: #ffffff !important;
+}
+
+/* Ensure white background for main theme */
+.v-application {
+  background-color: #ffffff !important;
+}
+
+.v-main {
+  background-color: #ffffff !important;
+}
+
+.v-main__wrap {
+  background-color: #ffffff !important;
+}
+
+/* Override any other background colors for main theme */
+.v-application:not(.retrowave-theme):not(.v-theme--matrix) {
+  background-color: #ffffff !important;
+}
+
+.v-application:not(.retrowave-theme):not(.v-theme--matrix) .v-main {
+  background-color: #ffffff !important;
+}
+
+.v-application:not(.retrowave-theme):not(.v-theme--matrix) .v-main__wrap {
+  background-color: #ffffff !important;
+}
+
+/* Fix tooltips and overlays for main theme - more specific selectors */
+.v-application:not(.retrowave-theme):not(.v-theme--matrix) .v-tooltip .v-overlay__content,
+.v-application:not(.retrowave-theme):not(.v-theme--matrix) .v-tooltip__content,
+.v-application:not(.retrowave-theme):not(.v-theme--matrix) .v-overlay__content[data-v-tooltip],
+.v-application:not(.retrowave-theme):not(.v-theme--matrix) .v-tooltip .v-overlay__content .v-tooltip__content {
+  background: #333333 !important;
+  color: #ffffff !important;
+  border: 1px solid #666666 !important;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3) !important;
+}
+
+.v-application:not(.retrowave-theme):not(.v-theme--matrix) .v-menu .v-overlay__content {
+  background: #ffffff !important;
+  color: #000000 !important;
+  border: 1px solid #e0e0e0 !important;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15) !important;
+}
+
+.v-application:not(.retrowave-theme):not(.v-theme--matrix) .v-dialog .v-card {
+  background: #ffffff !important;
+  color: #000000 !important;
+}
+
+.v-application:not(.retrowave-theme):not(.v-theme--matrix) .v-snackbar .v-snackbar__wrapper {
+  background: #333333 !important;
+  color: #ffffff !important;
+}
+
+/* Global tooltip fix - highest priority */
+.v-tooltip .v-overlay__content,
+.v-tooltip__content,
+.v-overlay__content[data-v-tooltip] {
+  background: #333333 !important;
+  color: #ffffff !important;
+  border: 1px solid #666666 !important;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3) !important;
+}
+
+/* Ensure all overlay elements are visible in main theme */
+.v-application:not(.retrowave-theme):not(.v-theme--matrix) .v-overlay__content:not(.v-tooltip .v-overlay__content) {
+  background: #ffffff !important;
+  color: #000000 !important;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15) !important;
 }
 .v-theme--matrix, .v-theme--matrix body {
   font-family: 'Share Tech Mono', monospace !important;
@@ -243,7 +346,26 @@ body {
 .v-theme--matrix .v-main__wrap,
 .v-theme--matrix .v-application__wrap,
 .v-theme--matrix .router-view {
-  background: transparent !important;
+  background: #000000 !important;
+}
+
+/* Matrix theme - ensure page containers have black background but keep normal element colors */
+.v-theme--matrix .home,
+.v-theme--matrix .images,
+.v-theme--matrix .repositories,
+.v-theme--matrix .vulnerabilities,
+.v-theme--matrix .components,
+.v-theme--matrix .task-management,
+.v-theme--matrix .component-detail,
+.v-theme--matrix .component-version-detail,
+.v-theme--matrix .component-locations,
+.v-theme--matrix .image-detail,
+.v-theme--matrix .vulnerability-detail-container,
+.v-theme--matrix .component-matrix-view,
+.v-theme--matrix .releases-page,
+.v-theme--matrix .report-generator,
+.v-theme--matrix .not-found {
+  background: #000000 !important;
 }
 .matrix-bg {
   position: fixed;
@@ -345,5 +467,237 @@ body {
 .v-theme--matrix .v-app-bar .v-btn {
   background: transparent !important;
   box-shadow: none !important;
+}
+
+/* Matrix theme - only page backgrounds should be black, keep normal element colors */
+
+/* Matrix theme - fix tooltips and overlays */
+.v-theme--matrix .v-tooltip .v-overlay__content {
+  background: #000000 !important;
+  color: #39FF14 !important;
+  border: 1px solid #39FF14 !important;
+}
+
+.v-theme--matrix .v-menu .v-overlay__content {
+  background: #000000 !important;
+  color: #39FF14 !important;
+  border: 1px solid #39FF14 !important;
+}
+
+.v-theme--matrix .v-dialog .v-card {
+  background: #000000 !important;
+  color: #39FF14 !important;
+  border: 1px solid #39FF14 !important;
+}
+
+.v-theme--matrix .v-snackbar .v-snackbar__wrapper {
+  background: #000000 !important;
+  color: #39FF14 !important;
+  border: 1px solid #39FF14 !important;
+}
+
+.v-theme--matrix .v-tooltip__content {
+  background: #000000 !important;
+  color: #39FF14 !important;
+  border: 1px solid #39FF14 !important;
+}
+
+/* Matrix theme - ensure all overlay elements are visible */
+.v-theme--matrix .v-overlay__content {
+  background: #000000 !important;
+  color: #39FF14 !important;
+  border: 1px solid #39FF14 !important;
+}
+
+/* Matrix theme - fix specific Vuetify components */
+.v-theme--matrix .v-card {
+  background: #000000 !important;
+  color: #39FF14 !important;
+  border: 1px solid #39FF14 !important;
+}
+
+.v-theme--matrix .v-sheet {
+  background: #000000 !important;
+  color: #39FF14 !important;
+  border: 1px solid #39FF14 !important;
+}
+
+.v-theme--matrix .v-table {
+  background: #000000 !important;
+  color: #39FF14 !important;
+  border: 1px solid #39FF14 !important;
+}
+
+.v-theme--matrix .v-table th,
+.v-theme--matrix .v-table td {
+  background: #000000 !important;
+  color: #39FF14 !important;
+  border: 1px solid #39FF14 !important;
+}
+
+.v-theme--matrix .v-table th {
+  background: #001100 !important;
+  color: #39FF14 !important;
+  font-weight: bold !important;
+  text-transform: uppercase !important;
+  letter-spacing: 1px !important;
+}
+
+.v-theme--matrix .v-table tbody tr:hover {
+  background: #001100 !important;
+  color: #39FF14 !important;
+}
+
+.v-theme--matrix .v-table tbody tr:nth-child(even) {
+  background: #000800 !important;
+}
+
+.v-theme--matrix .v-table tbody tr:nth-child(odd) {
+  background: #000000 !important;
+}
+
+.v-theme--matrix .v-btn {
+  background: #000000 !important;
+  color: #39FF14 !important;
+  border: 1px solid #39FF14 !important;
+}
+
+.v-theme--matrix .v-btn:hover {
+  background: #001100 !important;
+  color: #39FF14 !important;
+  box-shadow: 0 0 10px rgba(57, 255, 20, 0.5) !important;
+}
+
+.v-theme--matrix .v-text-field .v-field {
+  background: #000000 !important;
+  color: #39FF14 !important;
+  border: 1px solid #39FF14 !important;
+}
+
+.v-theme--matrix .v-text-field input {
+  color: #39FF14 !important;
+}
+
+.v-theme--matrix .v-text-field .v-field__outline {
+  color: #39FF14 !important;
+}
+
+.v-theme--matrix .v-list-item {
+  background: #000000 !important;
+  color: #39FF14 !important;
+  border: 1px solid #39FF14 !important;
+}
+
+.v-theme--matrix .v-list-item:hover {
+  background: #001100 !important;
+  color: #39FF14 !important;
+}
+
+.v-theme--matrix .v-list-item-title {
+  color: #39FF14 !important;
+}
+
+.v-theme--matrix .v-list-item-subtitle {
+  color: #00FF41 !important;
+}
+
+.v-theme--matrix h1,
+.v-theme--matrix h2,
+.v-theme--matrix h3,
+.v-theme--matrix h4,
+.v-theme--matrix h5,
+.v-theme--matrix h6 {
+  color: #39FF14 !important;
+}
+
+.v-theme--matrix p,
+.v-theme--matrix span,
+.v-theme--matrix div {
+  color: #39FF14 !important;
+}
+
+/* Matrix theme - specific table styling */
+.v-theme--matrix .v-data-table {
+  background: #000000 !important;
+  color: #39FF14 !important;
+  border: 1px solid #39FF14 !important;
+}
+
+.v-theme--matrix .v-data-table .v-data-table__wrapper {
+  background: #000000 !important;
+}
+
+.v-theme--matrix .v-data-table .v-data-table__wrapper table {
+  background: #000000 !important;
+  color: #39FF14 !important;
+  border: 1px solid #39FF14 !important;
+}
+
+.v-theme--matrix .v-data-table .v-data-table__wrapper table th {
+  background: #001100 !important;
+  color: #39FF14 !important;
+  border: 1px solid #39FF14 !important;
+  font-weight: bold !important;
+  text-transform: uppercase !important;
+  letter-spacing: 1px !important;
+}
+
+.v-theme--matrix .v-data-table .v-data-table__wrapper table td {
+  background: #000000 !important;
+  color: #39FF14 !important;
+  border: 1px solid #39FF14 !important;
+}
+
+.v-theme--matrix .v-data-table .v-data-table__wrapper table tbody tr:hover {
+  background: #001100 !important;
+  color: #39FF14 !important;
+}
+
+.v-theme--matrix .v-data-table .v-data-table__wrapper table tbody tr:nth-child(even) {
+  background: #000800 !important;
+}
+
+.v-theme--matrix .v-data-table .v-data-table__wrapper table tbody tr:nth-child(odd) {
+  background: #000000 !important;
+}
+
+/* Retrowave theme - fix tooltips and overlays */
+.retrowave-theme .v-tooltip .v-overlay__content {
+  background: #0a0a0f !important;
+  color: #00bfff !important;
+  border: 1px solid #00bfff !important;
+  box-shadow: 0 0 20px rgba(0, 191, 255, 0.5) !important;
+}
+
+.retrowave-theme .v-menu .v-overlay__content {
+  background: #0a0a0f !important;
+  color: #00bfff !important;
+  border: 1px solid #00bfff !important;
+  box-shadow: 0 0 20px rgba(0, 191, 255, 0.5) !important;
+}
+
+.retrowave-theme .v-dialog .v-card {
+  background: #0a0a0f !important;
+  color: #00bfff !important;
+  border: 1px solid #00bfff !important;
+}
+
+.retrowave-theme .v-snackbar .v-snackbar__wrapper {
+  background: #0a0a0f !important;
+  color: #00bfff !important;
+  border: 1px solid #00bfff !important;
+}
+
+.retrowave-theme .v-tooltip__content {
+  background: #0a0a0f !important;
+  color: #00bfff !important;
+  border: 1px solid #00bfff !important;
+}
+
+.retrowave-theme .v-overlay__content {
+  background: #0a0a0f !important;
+  color: #00bfff !important;
+  border: 1px solid #00bfff !important;
+  box-shadow: 0 0 20px rgba(0, 191, 255, 0.5) !important;
 }
 </style> 

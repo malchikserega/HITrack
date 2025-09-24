@@ -115,6 +115,18 @@ const router = createRouter({
       name: 'component-version',
       component: () => import('../views/ComponentVersionView.vue'),
       meta: { requiresAuth: true }
+    },
+    {
+      path: '/404',
+      name: 'not-found',
+      component: () => import('../views/NotFoundView.vue'),
+      meta: { requiresAuth: false }
+    },
+    {
+      path: '/:pathMatch(.*)*',
+      name: 'catch-all',
+      component: () => import('../views/NotFoundView.vue'),
+      meta: { requiresAuth: false }
     }
   ]
 })

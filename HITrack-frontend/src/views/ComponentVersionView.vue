@@ -724,6 +724,13 @@ onMounted(async () => {
   padding: 20px;
   max-width: 1200px;
   margin: 0 auto;
+  background: #ffffff;
+  min-height: 100vh;
+}
+
+/* Retrowave theme specific background */
+.retrowave-theme .component-version-detail {
+  background: linear-gradient(135deg, #0a0a0f 0%, #1a0a1f 100%) !important;
 }
 
 .loading-container,

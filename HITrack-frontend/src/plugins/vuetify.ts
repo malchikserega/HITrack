@@ -13,6 +13,10 @@ export default createVuetify({
       light: {
         colors: {
           background: '#FFFFFF',
+          surface: '#FFFFFF',
+          'surface-bright': '#FFFFFF',
+          'surface-light': '#FFFFFF',
+          'surface-variant': '#FFFFFF',
           primary: '#000000',      
           secondary: '#232526',
         }

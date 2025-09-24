@@ -98,6 +98,7 @@ export interface Image extends BaseEntity {
   digest: string
   scan_status: string
   has_sbom: boolean
+  has_grype: boolean
   findings: number
   unique_findings: number
   severity_counts: { [key: string]: number }

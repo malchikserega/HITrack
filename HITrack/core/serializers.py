@@ -245,6 +245,8 @@ class ImageSerializer(serializers.ModelSerializer):
     fixable_severity_counts = serializers.SerializerMethodField()
     unique_severity_counts = serializers.SerializerMethodField()
     fixable_unique_severity_counts = serializers.SerializerMethodField()
+    has_sbom = serializers.SerializerMethodField()
+    has_grype = serializers.SerializerMethodField()
     repository_info = serializers.SerializerMethodField()
 
     class Meta:
@@ -255,6 +257,7 @@ class ImageSerializer(serializers.ModelSerializer):
             'fully_fixable_components_count',
             'fixable_findings', 'fixable_unique_findings', 'fixable_severity_counts',
             'unique_severity_counts', 'fixable_unique_severity_counts',
+            'has_sbom', 'has_grype',
             'repository_info', 'created_at', 'updated_at'
         ]
         read_only_fields = ['created_at', 'updated_at', 'uuid']
@@ -378,6 +381,14 @@ class ImageSerializer(serializers.ModelSerializer):
         all_sevs = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN']
         return {sev: counter.get(sev, 0) for sev in all_sevs}
 
+    @extend_schema_field(serializers.BooleanField())
+    def get_has_sbom(self, obj):
+        return bool(obj.sbom_data)
+
+    @extend_schema_field(serializers.BooleanField())
+    def get_has_grype(self, obj):
+        return bool(obj.grype_data)
+
     @extend_schema_field(serializers.DictField())
     def get_repository_info(self, obj):
         # Get repository and tag information for this image
@@ -420,6 +431,7 @@ class ImageSerializer(serializers.ModelSerializer):
 
 class ImageListSerializer(serializers.ModelSerializer):
     has_sbom = serializers.SerializerMethodField()
+    has_grype = serializers.SerializerMethodField()
     findings = serializers.SerializerMethodField()
     unique_findings = serializers.SerializerMethodField()
     components_count = serializers.SerializerMethodField()
@@ -427,12 +439,16 @@ class ImageListSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Image
-        fields = ['uuid', 'name', 'digest', 'scan_status', 'has_sbom', 'findings', 'unique_findings', 'components_count', 'repository_info', 'updated_at']
+        fields = ['uuid', 'name', 'digest', 'scan_status', 'has_sbom', 'has_grype', 'findings', 'unique_findings', 'components_count', 'repository_info', 'updated_at']
         read_only_fields = ['uuid', 'updated_at']
 
     @extend_schema_field(serializers.BooleanField())
     def get_has_sbom(self, obj):
         return bool(obj.sbom_data)
+
+    @extend_schema_field(serializers.BooleanField())
+    def get_has_grype(self, obj):
+        return bool(obj.grype_data)
 
     @extend_schema_field(serializers.IntegerField())
     def get_findings(self, obj):

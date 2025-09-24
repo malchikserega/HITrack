@@ -3,11 +3,23 @@
     <v-container>
       <v-row justify="center">
         <v-col cols="12" sm="8" md="6" lg="4">
-          <v-card class="elevation-12">
-            <v-toolbar color="primary" dark flat>
-              <v-toolbar-title>Login</v-toolbar-title>
-            </v-toolbar>
-            <v-card-text>
+          <!-- Main Logo Display -->
+          <div class="text-center mb-8">
+            <v-img
+              src="/logo.png?v=1"
+              alt="HITrack Logo"
+              class="main-logo mx-auto mb-4"
+              max-width="200"
+              max-height="200"
+              contain
+            ></v-img>
+            <h1 class="text-h2 font-weight-bold mb-2" :class="{ 'neon-text': themeStore.isRetrowave }">HITrack</h1>
+          </div>
+          
+          <v-card class="elevation-8 login-card">
+            <v-card-title class="text-center pa-6">
+            </v-card-title>
+            <v-card-text class="pa-6">
               <v-form
                 ref="form"
                 v-model="isFormValid"
@@ -24,6 +36,8 @@
                   @input="clearError('username')"
                   required
                   variant="outlined"
+                  class="mb-4"
+                  color="primary"
                 ></v-text-field>
 
                 <v-text-field
@@ -39,29 +53,31 @@
                   @input="clearError('password')"
                   required
                   variant="outlined"
+                  class="mb-4"
+                  color="primary"
                 ></v-text-field>
 
                 <v-alert
                   v-if="error"
                   type="error"
-                  class="mt-3"
+                  class="mt-4 mb-4"
                   closable
                   @click:close="error = ''"
                 >
                   {{ error }}
                 </v-alert>
 
-                <v-card-actions>
-                  <v-spacer></v-spacer>
-                  <v-btn
-                    color="primary"
-                    type="submit"
-                    :loading="loading"
-                    :disabled="!isFormValid || loading"
-                  >
-                    Login
-                  </v-btn>
-                </v-card-actions>
+                <v-btn
+                  color="primary"
+                  type="submit"
+                  :loading="loading"
+                  :disabled="!isFormValid || loading"
+                  size="large"
+                  block
+                  class="mt-4"
+                >
+                  Sign In
+                </v-btn>
               </v-form>
             </v-card-text>
           </v-card>
@@ -75,10 +91,12 @@
 import { ref, reactive, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
+import { useThemeStore } from '../stores/theme'
 import { notificationService } from '../plugins/notifications'
 
 const router = useRouter()
 const authStore = useAuthStore()
+const themeStore = useThemeStore()
 const form = ref<HTMLFormElement | null>(null)
 
 const username = ref('')
@@ -155,9 +173,47 @@ onMounted(async () => {
 
 <style scoped>
 .login {
-  height: 100vh;
+  min-height: 100vh;
   display: flex;
   align-items: center;
-  background-color: #f5f5f5;
+  padding: 20px 0;
+  background: #ffffff;
+}
+
+/* Retrowave theme specific background */
+.retrowave-theme .login {
+  background: linear-gradient(135deg, #0a0a0f 0%, #1a0a1f 100%) !important;
+}
+
+.main-logo {
+  background: transparent !important;
+  border: none !important;
+  filter: drop-shadow(0 0 20px rgba(0, 191, 255, 0.7)) drop-shadow(0 0 40px rgba(255, 20, 147, 0.5));
+  transition: transform 0.2s ease;
+  width: 200px !important;
+  height: 200px !important;
+}
+
+.main-logo:hover {
+  transform: scale(1.05);
+  filter: drop-shadow(0 0 30px rgba(0, 191, 255, 0.9)) drop-shadow(0 0 60px rgba(255, 20, 147, 0.7));
+}
+
+
+@media (max-width: 600px) {
+  .main-logo {
+    max-width: 150px !important;
+    max-height: 150px !important;
+    width: 150px !important;
+    height: 150px !important;
+  }
+  
+  h1 {
+    font-size: 2rem !important;
+  }
+  
+  .login {
+    padding: 10px 0;
+  }
 }
 </style> 

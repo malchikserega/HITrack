@@ -112,16 +112,116 @@
               </v-col>
             </v-row>
 
-            <!-- SBOM section -->
+            <!-- Analysis Data section -->
             <v-card class="mb-4">
-              <v-card-title class="font-weight-bold">SBOM</v-card-title>
+              <v-card-title class="font-weight-bold d-flex align-center">
+                <v-icon class="mr-2">mdi-database-search</v-icon>
+                Analysis Data
+                <v-spacer></v-spacer>
+                <v-chip-group>
+                  <v-chip 
+                    :color="image?.has_sbom ? 'success' : 'grey'" 
+                    size="small"
+                    variant="outlined"
+                  >
+                    <v-icon start>{{ image?.has_sbom ? 'mdi-check' : 'mdi-close' }}</v-icon>
+                    SBOM
+                  </v-chip>
+                  <v-chip 
+                    :color="image?.has_grype ? 'success' : 'grey'" 
+                    size="small"
+                    variant="outlined"
+                  >
+                    <v-icon start>{{ image?.has_grype ? 'mdi-check' : 'mdi-close' }}</v-icon>
+                    Grype
+                  </v-chip>
+                </v-chip-group>
+              </v-card-title>
               <v-card-text>
-                <v-btn size="x-small" variant="text" @click="toggleSbom">{{ showSbom ? 'Hide SBOM' : 'Show SBOM' }}</v-btn>
+                <p class="text-body-2 text-grey mb-4">
+                  View detailed analysis data including Software Bill of Materials (SBOM) and vulnerability scan results from Grype.
+                </p>
+                
+                <!-- Action buttons -->
+                <div class="d-flex gap-2 flex-wrap">
+                  <v-btn
+                    color="primary"
+                    variant="outlined"
+                    size="small"
+                    @click="toggleSbom"
+                    :disabled="!image?.has_sbom"
+                    class="flex-grow-1 flex-md-grow-0"
+                  >
+                    <v-icon start>mdi-file-document-outline</v-icon>
+                    {{ showSbom ? 'Hide SBOM' : 'Show SBOM' }}
+                  </v-btn>
+                  
+                  <v-btn
+                    color="primary"
+                    variant="outlined"
+                    size="small"
+                    @click="toggleGrype"
+                    :disabled="!image?.has_grype"
+                    class="flex-grow-1 flex-md-grow-0"
+                  >
+                    <v-icon start>mdi-bug</v-icon>
+                    {{ showGrype ? 'Hide Grype JSON' : 'Show Grype JSON' }}
+                  </v-btn>
+                </div>
+
+                <!-- SBOM Data -->
                 <v-expand-transition>
-                  <div v-if="showSbom">
+                  <div v-if="showSbom" class="mt-4">
+                    <v-divider class="mb-4"></v-divider>
+                    <div class="d-flex align-center justify-space-between mb-2">
+                      <div class="d-flex align-center">
+                        <v-icon class="mr-2" color="primary">mdi-file-document-outline</v-icon>
+                        <span class="font-weight-medium">SBOM Data</span>
+                      </div>
+                      <v-btn
+                        v-if="sbomData && !sbomData.error"
+                        size="x-small"
+                        variant="text"
+                        color="primary"
+                        @click="copyToClipboard('sbom')"
+                        :loading="sbomCopyLoading"
+                        class="copy-button"
+                      >
+                        <v-icon start>mdi-content-copy</v-icon>
+                        Copy
+                      </v-btn>
+                    </div>
                     <v-progress-linear v-if="sbomLoading" indeterminate color="primary" class="my-4" height="6" rounded />
                     <pre v-else-if="sbomData && !sbomData.error" class="sbom-json">{{ JSON.stringify(sbomData, null, 2) }}</pre>
                     <div v-else-if="sbomData && sbomData.error" class="text-error">{{ sbomData.error }}</div>
+                  </div>
+                </v-expand-transition>
+
+                <!-- Grype Data -->
+                <v-expand-transition>
+                  <div v-if="showGrype" class="mt-4">
+                    <v-divider class="mb-4"></v-divider>
+                    <div class="d-flex align-center justify-space-between mb-2">
+                      <div class="d-flex align-center">
+                        <v-icon class="mr-2" color="primary">mdi-bug</v-icon>
+                        <span class="font-weight-medium">Grype Scan Results</span>
+                      </div>
+                      <v-btn
+                        v-if="grypeData && !grypeData.error"
+                        size="x-small"
+                        variant="text"
+                        color="primary"
+                        @click="copyToClipboard('grype')"
+                        :loading="grypeCopyLoading"
+                        class="copy-button"
+                      >
+                        <v-icon start>mdi-content-copy</v-icon>
+                        Copy
+                      </v-btn>
+                    </div>
+                    <v-progress-linear v-if="grypeLoading" indeterminate color="primary" class="my-4" height="6" rounded />
+                    <pre v-else-if="grypeData && !grypeData.error" class="grype-json">{{ JSON.stringify(grypeData, null, 2) }}</pre>
+                    <div v-else-if="grypeData && grypeData.error" class="text-error">{{ grypeData.error }}</div>
                   </div>
                 </v-expand-transition>
               </v-card-text>
@@ -425,6 +525,15 @@ const showSbom = ref(false)
 const sbomLoading = ref(false)
 const sbomData = ref<any>(null)
 
+// Grype lazy loading
+const showGrype = ref(false)
+const grypeLoading = ref(false)
+const grypeData = ref<any>(null)
+
+// Copy functionality
+const sbomCopyLoading = ref(false)
+const grypeCopyLoading = ref(false)
+
 // Active tab
 const activeTab = ref('components')
 
@@ -605,6 +714,52 @@ async function toggleSbom() {
   } else {
     // Hide
     showSbom.value = false;
+  }
+}
+
+async function toggleGrype() {
+  if (!showGrype.value) {
+    // Open - if not loaded yet, load
+    showGrype.value = true;
+    if (!grypeData.value) {
+      grypeLoading.value = true;
+      try {
+        const uuid = route.params.uuid;
+        const response = await api.get(`/images/${uuid}/grype/`);
+        grypeData.value = response.data;
+      } catch (e: any) {
+        grypeData.value = { error: e?.response?.data?.detail || 'Failed to load Grype data.' };
+      } finally {
+        grypeLoading.value = false;
+      }
+    }
+  } else {
+    // Hide
+    showGrype.value = false;
+  }
+}
+
+async function copyToClipboard(type: 'sbom' | 'grype') {
+  const loadingRef = type === 'sbom' ? sbomCopyLoading : grypeCopyLoading;
+  const dataRef = type === 'sbom' ? sbomData : grypeData;
+  
+  if (!dataRef.value || dataRef.value.error) {
+    return;
+  }
+
+  loadingRef.value = true;
+  
+  try {
+    const jsonString = JSON.stringify(dataRef.value, null, 2);
+    await navigator.clipboard.writeText(jsonString);
+    
+    // Show success notification
+    notificationService.success(`${type.toUpperCase()} data copied to clipboard`);
+  } catch (err) {
+    console.error('Failed to copy to clipboard:', err);
+    notificationService.error('Failed to copy to clipboard');
+  } finally {
+    loadingRef.value = false;
   }
 }
 
@@ -826,6 +981,13 @@ onMounted(fetchImage)
 <style scoped>
 .image-detail {
   padding: 20px;
+  background: #ffffff;
+  min-height: 100vh;
+}
+
+/* Retrowave theme specific background */
+.retrowave-theme .image-detail {
+  background: linear-gradient(135deg, #0a0a0f 0%, #1a0a1f 100%) !important;
 }
 .main-info-card {
   border-radius: 12px;
@@ -850,13 +1012,37 @@ onMounted(fetchImage)
   margin-top: 4px;
   font-weight: 500;
 }
-.sbom-json {
+.sbom-json, .grype-json {
   background: #f8f8f8;
   border-radius: 6px;
   padding: 12px;
   font-size: 0.95rem;
   max-height: 400px;
   overflow: auto;
+}
+
+/* Analysis Data section improvements */
+.gap-2 {
+  gap: 8px;
+}
+
+.flex-grow-1 {
+  flex-grow: 1;
+}
+
+@media (min-width: 960px) {
+  .flex-md-grow-0 {
+    flex-grow: 0;
+  }
+}
+
+/* Copy button styling */
+.copy-button {
+  transition: all 0.2s ease;
+}
+
+.copy-button:hover {
+  transform: translateY(-1px);
 }
 .status-chip {
   font-size: 1.15rem;

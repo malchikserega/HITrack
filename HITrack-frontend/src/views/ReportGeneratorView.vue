@@ -353,6 +353,13 @@ onMounted(() => {
 <style scoped>
 .report-generator {
   padding: 20px;
+  background: #ffffff;
+  min-height: 100vh;
+}
+
+/* Retrowave theme specific background */
+.retrowave-theme .report-generator {
+  background: linear-gradient(135deg, #0a0a0f 0%, #1a0a1f 100%) !important;
 }
 
 .wide-card {

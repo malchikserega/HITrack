@@ -712,6 +712,13 @@ class ImageViewSet(BaseViewSet):
             return Response(image.sbom_data)
         return Response({'error': 'No SBOM data available.'}, status=404)
 
+    @action(detail=True, methods=['get'])
+    def grype(self, request, uuid=None):
+        image = self.get_object()
+        if image.grype_data:
+            return Response(image.grype_data)
+        return Response({'error': 'No Grype data available.'}, status=404)
+
     @action(detail=True, methods=['get'], url_path='components')
     def components(self, request, uuid=None):
         """
@@ -815,6 +822,7 @@ class ImageViewSet(BaseViewSet):
         })
 
 class ComponentViewSet(viewsets.ReadOnlyModelViewSet):
+    permission_classes = [IsAuthenticated]
     queryset = Component.objects.all()
     filterset_fields = ['name', 'type']
     search_fields = ['name', 'type']
@@ -1350,6 +1358,7 @@ class VulnerabilityDetailsViewSet(viewsets.ReadOnlyModelViewSet):
     retrieve:
     Return the details of a specific vulnerability detail record.
     """
+    permission_classes = [IsAuthenticated]
     queryset = VulnerabilityDetails.objects.all()
     serializer_class = VulnerabilityDetailsSerializer
     filterset_fields = ['exploit_available', 'exploit_public', 'exploit_verified', 'data_source']
@@ -1609,6 +1618,7 @@ class JobViewSet(viewsets.ViewSet):
             )
 
 class RepositoryTagListForRepositoryView(ListAPIView):
+    permission_classes = [IsAuthenticated]
     serializer_class = RepositoryTagListSerializer
     pagination_class = CustomPageNumberPagination
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
@@ -2249,6 +2259,7 @@ class PeriodicTaskViewSet(viewsets.ReadOnlyModelViewSet):
     """
     ViewSet for managing periodic tasks
     """
+    permission_classes = [IsAuthenticated]
     queryset = PeriodicTask.objects.all().order_by('name')
     serializer_class = PeriodicTaskSerializer
     filterset_fields = ['enabled', 'task']

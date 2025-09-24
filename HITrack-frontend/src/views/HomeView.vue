@@ -6,8 +6,8 @@
         <v-col cols="12">
           <div class="d-flex align-center justify-space-between mb-6">
             <div>
-              <h1 class="text-h3 font-weight-black mb-2">Security Dashboard</h1>
-              <p class="text-body-1 text-medium-emphasis">Choose the red pill, choose the blue pill...</p>
+              <h1 class="text-h3 font-weight-black mb-2" :class="{ 'neon-text': themeStore.isRetrowave }">Security Dashboard</h1>
+              <p class="text-body-1 text-medium-emphasis" :class="{ 'neon-subtitle': themeStore.isRetrowave }">Choose the red pill, choose the blue pill...</p>
             </div>
             <v-btn
               color="primary"
@@ -311,6 +311,7 @@ import { useRouter } from 'vue-router'
 import api from '../plugins/axios'
 import { notificationService } from '../plugins/notifications'
 import { useTheme } from 'vuetify'
+import { useThemeStore } from '../stores/theme'
 
 import MetricCard from '../components/MetricCard.vue'
 import SeverityDistributionChart from '../components/SeverityDistributionChart.vue'
@@ -321,6 +322,7 @@ import { getVulnerabilityTypeColor, getSeverityColor, getEpssColor, getEpssSourc
 
 const router = useRouter()
 const theme = useTheme()
+const themeStore = useThemeStore()
 
 // Data
 const dashboardData = ref<any>({})
@@ -472,8 +474,13 @@ onUnmounted(() => {
 <style scoped>
 .home {
   padding: 20px;
-  background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+  background: #ffffff;
   min-height: 100vh;
+}
+
+/* Retrowave theme specific background */
+.retrowave-theme .home {
+  background: linear-gradient(135deg, #0a0a0f 0%, #1a0a1f 100%) !important;
 }
 
 /* Matrix theme override */

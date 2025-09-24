@@ -263,6 +263,7 @@ const editedItem = ref<Image>({
   digest: '',
   scan_status: '',
   has_sbom: false,
+  has_grype: false,
   findings: 0,
   unique_findings: 0,
   severity_counts: {},
@@ -288,6 +289,7 @@ const defaultItem = {
   digest: '',
   scan_status: '',
   has_sbom: false,
+  has_grype: false,
   findings: 0,
   unique_findings: 0,
   severity_counts: {},
@@ -360,6 +362,7 @@ const openDialog = (title: string, item?: Image) => {
       digest: item.digest,
       scan_status: item.scan_status,
       has_sbom: item.has_sbom,
+      has_grype: item.has_grype,
       findings: item.findings,
       unique_findings: item.unique_findings,
       severity_counts: item.severity_counts,
@@ -539,6 +542,13 @@ onMounted(() => {
 <style scoped>
 .images {
   padding: 20px;
+  background: #ffffff;
+  min-height: 100vh;
+}
+
+/* Retrowave theme specific background */
+.retrowave-theme .images {
+  background: linear-gradient(135deg, #0a0a0f 0%, #1a0a1f 100%) !important;
 }
 
 .images-table-responsive {
