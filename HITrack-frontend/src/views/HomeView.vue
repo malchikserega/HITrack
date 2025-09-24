@@ -6,7 +6,7 @@
         <v-col cols="12">
           <div class="d-flex align-center justify-space-between mb-6">
             <div>
-              <h1 class="text-h3 font-weight-black mb-2" :class="{ 'neon-text': themeStore.isRetrowave }">Security Dashboard</h1>
+              <h1 class="text-h3 font-weight-black mb-2" :class="{ 'neon-text': themeStore.isRetrowave }">Metrics</h1>
               <p class="text-body-1 text-medium-emphasis" :class="{ 'neon-subtitle': themeStore.isRetrowave }">Choose the red pill, choose the blue pill...</p>
             </div>
             <v-btn

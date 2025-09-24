@@ -56,6 +56,9 @@ export const useAuthStore = defineStore('auth', {
 
         localStorage.setItem('token', access)
         localStorage.setItem('refreshToken', refresh)
+        
+        // Update axios default headers
+        api.defaults.headers.common['Authorization'] = `Bearer ${access}`
 
         return { success: true }
       } catch (error) {
@@ -100,6 +103,9 @@ export const useAuthStore = defineStore('auth', {
         }
 
         localStorage.setItem('token', access)
+        
+        // Update axios default headers
+        api.defaults.headers.common['Authorization'] = `Bearer ${access}`
 
         return true
       } catch (error) {
@@ -114,6 +120,9 @@ export const useAuthStore = defineStore('auth', {
       this.user = null
       localStorage.removeItem('token')
       localStorage.removeItem('refreshToken')
+      
+      // Clear axios default headers
+      delete api.defaults.headers.common['Authorization']
     }
   }
 }) 

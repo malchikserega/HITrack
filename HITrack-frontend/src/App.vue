@@ -80,6 +80,7 @@ import { useRouter, useRoute } from 'vue-router'
 import { useAuthStore } from './stores/auth'
 import { useThemeStore } from './stores/theme'
 import { notificationService } from './plugins/notifications'
+import api from './plugins/axios'
 import { useTheme } from 'vuetify'
 
 const router = useRouter()
@@ -172,7 +173,7 @@ const showThemeIndicator = () => {
   }, 3000)
 }
 
-onMounted(() => {
+onMounted(async () => {
   // Initialize theme system
   themeStore.applyTheme()
   cleanupThemeListener = themeStore.initKeyboardListener()
@@ -192,6 +193,19 @@ onMounted(() => {
       window.removeEventListener('resize', handleResize)
     }
   }, { immediate: true })
+  
+  // Initialize authentication
+  if (authStore.token) {
+    api.defaults.headers.common['Authorization'] = `Bearer ${authStore.token}`
+  }
+  
+  // Check authentication status on app start
+  const isAuth = await authStore.checkAuth()
+  if (!isAuth && route.meta.requiresAuth) {
+    router.push('/login')
+  } else if (isAuth && route.path === '/login') {
+    router.push('/')
+  }
 })
 
 onUnmounted(() => {
@@ -249,15 +263,6 @@ watch(isAuthenticated, (newValue) => {
   }
 })
 
-onMounted(async () => {
-  // Check authentication status on app start
-  const isAuth = await authStore.checkAuth()
-  if (!isAuth && route.meta.requiresAuth) {
-    router.push('/login')
-  } else if (isAuth && route.path === '/login') {
-    router.push('/')
-  }
-})
 </script>
 
 <style>
