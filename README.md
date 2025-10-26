@@ -58,14 +58,23 @@ TBD
 
 ## 🛠️ Development
 
+
 ### Backend
 ```bash
 cd HITrack
 python -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+
+#Celery BEAT
+celery -A hitrack_celery beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+#Celery WORKER
+celery -A hitrack_celery worker --loglevel=INFO -E --pool=threads
+# DB & Redis
+docker compose up hitrack-db hitrack-redis
 python manage.py runserver
 ```
+
 
 ### Frontend
 ```bash
