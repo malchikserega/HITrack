@@ -1,0 +1,117 @@
+version: '3.8'
+
+services:
+  hitrack-db:
+    image: postgres:17-alpine
+    restart: always
+    environment:
+      - POSTGRES_USER=hitrack
+      - POSTGRES_PASSWORD=hitrack
+    ports:
+      - '5432:5432'
+    volumes:
+      - ./volume/db_volume:/var/lib/postgresql/data
+    networks:
+      - hitrack-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hitrack"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  hitrack-redis:
+    restart: always
+    build:
+      context: redis
+    ports:
+      - "6379:6379"
+    networks:
+      - hitrack-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  hitrack-api:
+    image: hitrack-api
+    build:
+      context: ./HITrack
+    environment:
+      - DB_HOST=hitrack-db
+    volumes:
+      - ./storage:/storage
+      - ./static_data:/code/static
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      hitrack-db:
+        condition: service_healthy
+    links:
+      - hitrack-db
+    #    ports:
+    #      - "8000:80"
+    env_file: env.env
+    command: "dev"
+    networks:
+      - hitrack-network
+
+  worker:
+    image: hitrack-api
+    links:
+      - hitrack-db
+      - hitrack-redis
+    deploy:
+      replicas: 2
+    volumes:
+      - ./storage:/storage
+      - ./static_data:/code/static
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      hitrack-db:
+        condition: service_healthy
+      hitrack-api:
+        condition: service_started
+      hitrack-redis:
+        condition: service_healthy
+    env_file: env.env
+    command: "worker"
+    networks:
+      - hitrack-network
+
+  hitrack-frontend:
+    restart: always
+    build: 
+      context: ./HITrack-frontend
+      args:
+        - VITE_API_URL=http://127.0.0.1:1337/api
+#    ports:
+#      - "80:80"
+    environment:
+      - VIRTUAL_PORT=80
+      - VUE_APP_NAME=HITrack
+      - VITE_API_URL=http://127.0.0.1:1337/api
+    networks:
+      - hitrack-network
+
+  httpd:
+    image: httpd:latest
+    ports:
+      - "127.0.0.1:1337:80"
+    volumes:
+      - ./storage:/usr/local/apache2/htdocs/storage
+      - ./storage/static:/usr/local/apache2/htdocs/static
+      - ./httpd/httpd.conf:/usr/local/apache2/conf/httpd.conf:ro
+      - ./httpd/proxy-html.conf:/usr/local/apache2/conf/extra/proxy-html.conf:ro
+    depends_on:
+      hitrack-api:
+        condition: service_started
+      worker:
+        condition: service_started
+    networks:
+      - hitrack-network
+
+volumes:
+  postgres_data:
+
+networks:
+  hitrack-network:

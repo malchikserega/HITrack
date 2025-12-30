@@ -1,0 +1,116 @@
+/* Reset and base styles */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'Roboto', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  color: #2c3e50;
+  background-color: #ffffff;
+}
+
+/* Global styles */
+.v-application {
+  font-family: 'Roboto', sans-serif !important;
+  background-color: #ffffff !important;
+}
+
+/* Ensure all main theme elements have white background */
+.v-application:not(.retrowave-theme):not(.v-theme--matrix) {
+  background-color: #ffffff !important;
+}
+
+.v-application:not(.retrowave-theme):not(.v-theme--matrix) .v-main {
+  background-color: #ffffff !important;
+}
+
+.v-application:not(.retrowave-theme):not(.v-theme--matrix) .v-main__wrap {
+  background-color: #ffffff !important;
+}
+
+.v-application:not(.retrowave-theme):not(.v-theme--matrix) .v-content {
+  background-color: #ffffff !important;
+}
+
+/* Ensure cards and surfaces have white background in main theme */
+.v-application:not(.retrowave-theme):not(.v-theme--matrix) .v-card {
+  background-color: #ffffff !important;
+}
+
+.v-application:not(.retrowave-theme):not(.v-theme--matrix) .v-sheet {
+  background-color: #ffffff !important;
+}
+
+/* Matrix theme - only main containers should have black background */
+.v-theme--matrix .v-main {
+  background-color: #000000 !important;
+}
+
+.v-theme--matrix .v-main__wrap {
+  background-color: #000000 !important;
+}
+
+/* Global tooltip styles - highest priority */
+.v-tooltip .v-overlay__content,
+.v-tooltip__content,
+.v-overlay__content[data-v-tooltip],
+.v-tooltip .v-overlay__content .v-tooltip__content,
+.v-tooltip .v-overlay__content .v-tooltip__content .v-tooltip__content,
+.v-tooltip .v-overlay__content .v-tooltip__content .v-tooltip__content .v-tooltip__content,
+.v-tooltip .v-overlay__content .v-tooltip__content .v-tooltip__content .v-tooltip__content .v-tooltip__content,
+.v-tooltip .v-overlay__content .v-tooltip__content .v-tooltip__content .v-tooltip__content .v-tooltip__content .v-tooltip__content,
+.v-tooltip .v-overlay__content .v-tooltip__content .v-tooltip__content .v-tooltip__content .v-tooltip__content .v-tooltip__content .v-tooltip__content,
+.v-tooltip .v-overlay__content .v-tooltip__content .v-tooltip__content .v-tooltip__content .v-tooltip__content .v-tooltip__content .v-tooltip__content .v-tooltip__content,
+.v-tooltip .v-overlay__content .v-tooltip__content .v-tooltip__content .v-tooltip__content .v-tooltip__content .v-tooltip__content .v-tooltip__content .v-tooltip__content .v-tooltip__content {
+  background: #333333 !important;
+  color: #ffffff !important;
+  border: 1px solid #666666 !important;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3) !important;
+}
+
+/* Additional tooltip selectors */
+.v-tooltip .v-overlay__content *,
+.v-tooltip__content *,
+.v-overlay__content[data-v-tooltip] * {
+  color: #ffffff !important;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f1f1;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #888;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}
+
+/* Utility classes */
+.text-center {
+  text-align: center;
+}
+
+.mt-4 {
+  margin-top: 1rem;
+}
+
+.mb-4 {
+  margin-bottom: 1rem;
+}
+
+.p-4 {
+  padding: 1rem;
+} 
