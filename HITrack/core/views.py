@@ -336,23 +336,65 @@ class RepositoryViewSet(BaseViewSet):
     def paginated_tags(self, request, uuid=None):
         """
         Returns paginated, searchable, and sortable list of tags for a repository.
+        Optimized with efficient bulk queries to avoid N+1 and complex JOINs.
         """
         repository = self.get_object()
-        tags = repository.tags.all()
+        from .models import ComponentVersionVulnerability, ComponentVersion, Image
+        from django.db.models import Prefetch
 
-        # Search
+        # Get tags with lightweight prefetch
+        tags = repository.tags.prefetch_related('releases__release')
+
+        # Apply search filter first to reduce data
         search = request.query_params.get('search')
         if search:
             tags = tags.filter(Q(tag__icontains=search))
 
-        # Ordering
+        # Apply ordering at DB level (more efficient)
         ordering = request.query_params.get('ordering', '-created_at')
         if ordering:
             tags = tags.order_by(ordering)
 
-        # Pagination
+        # Pagination before counting (only count what we need)
         paginator = CustomPageNumberPagination()
         page = paginator.paginate_queryset(tags, request)
+        
+        if page is None:
+            page = list(tags)
+        
+        # Get tag IDs for the current page only
+        tag_ids = [tag.pk for tag in page]
+        
+        # Bulk count findings for page tags only - much faster
+        findings_counts = {}
+        if tag_ids:
+            # Use direct query through Image -> ComponentVersion -> ComponentVersionVulnerability
+            findings_data = ComponentVersionVulnerability.objects.filter(
+                component_version__images__repository_tags__pk__in=tag_ids
+            ).values('component_version__images__repository_tags__pk').annotate(
+                count=Count('pk')
+            )
+            for item in findings_data:
+                tag_pk = item['component_version__images__repository_tags__pk']
+                findings_counts[tag_pk] = findings_counts.get(tag_pk, 0) + item['count']
+        
+        # Bulk count components for page tags only
+        components_counts = {}
+        if tag_ids:
+            components_data = ComponentVersion.objects.filter(
+                images__repository_tags__pk__in=tag_ids
+            ).values('images__repository_tags__pk').annotate(
+                count=Count('pk')
+            )
+            for item in components_data:
+                tag_pk = item['images__repository_tags__pk']
+                components_counts[tag_pk] = components_counts.get(tag_pk, 0) + item['count']
+        
+        # Attach counts to tags on the page
+        for tag in page:
+            tag.total_findings = findings_counts.get(tag.pk, 0)
+            tag.total_components = components_counts.get(tag.pk, 0)
+        
         serializer = RepositoryTagListSerializer(page, many=True)
         return paginator.get_paginated_response(serializer.data)
 
@@ -361,10 +403,16 @@ class RepositoryViewSet(BaseViewSet):
         """
         Returns the latest 30 tags for repository for use in charts (fields: uuid, tag, findings, components, created_at)
         Tags are sorted by semantic version (numeric part) and then by suffix, returning the most recent 30 tags.
+        Optimized with efficient bulk queries to avoid N+1 and complex JOINs.
         """
         repository = self.get_object()
-        tags = list(repository.tags.all())
+        from .models import ComponentVersionVulnerability, ComponentVersion
         
+        # Get all tags first with prefetch for releases
+        tags = repository.tags.prefetch_related('releases__release')
+        tags_list = list(tags)
+        
+        # Sort by version first (before counting to reduce data)
         version_regex = re.compile(r'^(\d+\.\d+\.\d+)')
         def version_key(tag):
             match = version_regex.match(tag.tag)
@@ -378,7 +426,40 @@ class RepositoryViewSet(BaseViewSet):
             else:
                 return (packaging_version.Version('0.0.0'), tag.tag)
         
-        sorted_tags = sorted(tags, key=version_key)[-30:]
+        sorted_tags = sorted(tags_list, key=version_key)[-30:]
+        
+        # Get tag IDs for only the 30 tags we need
+        tag_ids = [tag.pk for tag in sorted_tags]
+        
+        # Bulk count findings for these 30 tags only - much faster
+        findings_counts = {}
+        if tag_ids:
+            findings_data = ComponentVersionVulnerability.objects.filter(
+                component_version__images__repository_tags__pk__in=tag_ids
+            ).values('component_version__images__repository_tags__pk').annotate(
+                count=Count('pk')
+            )
+            for item in findings_data:
+                tag_pk = item['component_version__images__repository_tags__pk']
+                findings_counts[tag_pk] = findings_counts.get(tag_pk, 0) + item['count']
+        
+        # Bulk count components for these 30 tags only
+        components_counts = {}
+        if tag_ids:
+            components_data = ComponentVersion.objects.filter(
+                images__repository_tags__pk__in=tag_ids
+            ).values('images__repository_tags__pk').annotate(
+                count=Count('pk')
+            )
+            for item in components_data:
+                tag_pk = item['images__repository_tags__pk']
+                components_counts[tag_pk] = components_counts.get(tag_pk, 0) + item['count']
+        
+        # Attach counts to tags
+        for tag in sorted_tags:
+            tag.total_findings = findings_counts.get(tag.pk, 0)
+            tag.total_components = components_counts.get(tag.pk, 0)
+        
         serializer = RepositoryTagListSerializer(sorted_tags, many=True)
         return Response(serializer.data)
 
@@ -473,6 +554,59 @@ class RepositoryTagViewSet(BaseViewSet):
             'status': 'success',
             'message': f'Rescan started for {started} images',
             'count': started
+        })
+
+    @action(detail=True, methods=['post'], url_path='reanalyze-sbom')
+    def reanalyze_sbom(self, request, uuid=None):
+        """
+        Re-analyze SBOM for all images in this tag that have SBOM data.
+        This will re-run Grype scan on existing SBOM data.
+        Skips images that are already being scanned, but continues with others.
+        """
+        tag = self.get_object()
+        images = tag.images.filter(
+            sbom_data__isnull=False
+        ).exclude(sbom_data={})
+        
+        if not images.exists():
+            return Response(
+                {'error': 'No images with SBOM data found for this tag'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Separate images into those that can be scanned and those that are already in process
+        available_images = images.exclude(scan_status__in=['in_process', 'pending'])
+        skipped_images = images.filter(scan_status__in=['in_process', 'pending'])
+        
+        if not available_images.exists():
+            return Response(
+                {
+                    'error': 'All images are already being scanned or queued for scanning',
+                    'skipped_count': skipped_images.count(),
+                    'total_images_with_sbom': images.count()
+                },
+                status=status.HTTP_409_CONFLICT
+            )
+        
+        started = 0
+        from .tasks import scan_image_with_grype
+        for image in available_images:
+            # Set status to pending to prevent duplicate scans
+            image.scan_status = 'pending'
+            image.save()
+            scan_image_with_grype.delay(str(image.uuid))
+            started += 1
+        
+        message = f'Reanalysis started for {started} images with SBOM data'
+        if skipped_images.exists():
+            message += f' ({skipped_images.count()} images skipped - already in process)'
+        
+        return Response({
+            'status': 'success',
+            'message': message,
+            'count': started,
+            'skipped_count': skipped_images.count(),
+            'total_images_with_sbom': images.count()
         })
 
     @action(detail=True, methods=['post'])
@@ -1628,7 +1762,26 @@ class RepositoryTagListForRepositoryView(ListAPIView):
 
     def get_queryset(self):
         repository_uuid = self.kwargs['repository_uuid']
-        queryset = RepositoryTag.objects.filter(repository__uuid=repository_uuid)
+        from .models import ComponentVersionVulnerability, ComponentVersion
+        
+        # Optimize queryset - use only lightweight prefetch for releases
+        # Count findings and components directly through ManyToMany relationships
+        queryset = RepositoryTag.objects.filter(
+            repository__uuid=repository_uuid
+        ).prefetch_related(
+            'releases__release'
+        ).annotate(
+            # Count findings: RepositoryTag -> Image -> ComponentVersion -> ComponentVersionVulnerability
+            total_findings=Count(
+                'images__component_versions__componentversionvulnerability',
+                distinct=False
+            ),
+            # Count components: RepositoryTag -> Image -> ComponentVersion
+            total_components=Count(
+                'images__component_versions',
+                distinct=False
+            )
+        )
         
         # Check if ordering by tag is requested
         ordering = self.request.query_params.get('ordering', '')

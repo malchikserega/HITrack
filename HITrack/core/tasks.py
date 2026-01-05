@@ -107,15 +107,36 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
                 )
                 _, stderr = login_process.communicate(input=token)
                 
+                # Check if login failed
                 if login_process.returncode != 0:
-                    logger.error(f"Failed to login to registry {registry_host}: {stderr}")
+                    # Check if it's a keychain error (credentials already exist) - this is not critical
+                    is_keychain_error = (
+                        "already exists in the keychain" in stderr or
+                        "error storing credentials" in stderr or
+                        "exit status 1" in stderr
+                    )
+                    
+                    if is_keychain_error:
+                        # Credentials might already be stored, try to pull anyway
+                        logger.warning(f"Keychain error during login (credentials may already exist): {stderr}")
+                        logger.info(f"Attempting to pull image {image_ref} anyway (credentials may already be valid)")
+                    else:
+                        # Real login error
+                        logger.error(f"Failed to login to registry {registry_host}: {stderr}")
+                        image.scan_status = 'error'
+                        image.save()
+                        raise
+                
+                # Retry pull after login (or if keychain error occurred, try anyway)
+                logger.info(f"Retrying pull for {image_ref}")
+                try:
+                    subprocess.run(["docker", "pull", image_ref], capture_output=True, check=True)
+                except subprocess.CalledProcessError as pull_error:
+                    # If pull still fails after login attempt, it's a real error
+                    logger.error(f"Failed to pull image {image_ref} even after login attempt")
                     image.scan_status = 'error'
                     image.save()
                     raise
-                
-                # Retry pull after login
-                logger.info(f"Retrying pull for {image_ref}")
-                subprocess.run(["docker", "pull", image_ref], capture_output=True, check=True)
             else:
                 logger.error(f"Failed to pull image {image_ref} and no registry credentials available")
                 image.scan_status = 'error'
@@ -502,13 +523,47 @@ def process_all_tags():
                                     )
                                 
                                 # Create or get image with proper digest
-                                image, created = Image.objects.get_or_create(
-                                    name=image_ref,
-                                    defaults={
-                                        'digest': image_digest,  # Use actual image digest
-                                        'artifact_reference': f"{repository.url}:{repo_tag.tag}"
-                                    }
-                                )
+                                # image_ref from get_helm_images already contains name:tag, which should be unique
+                                # Use name+digest combination for unique identification when digest is available
+                                # If digest is not available, use name only (since image_ref already contains tag)
+                                artifact_ref = f"{repository.url}:{repo_tag.tag}"
+                                if image_digest:
+                                    # Try to find image by name and digest (same name but different digest = different image)
+                                    image = Image.objects.filter(name=image_ref, digest=image_digest).first()
+                                    if image:
+                                        created = False
+                                    else:
+                                        # Check if image with same name but different digest exists
+                                        existing_image = Image.objects.filter(name=image_ref).exclude(digest=image_digest).first()
+                                        if existing_image:
+                                            # Same name but different digest - create new image
+                                            image = Image.objects.create(
+                                                name=image_ref,
+                                                digest=image_digest,
+                                                artifact_reference=artifact_ref
+                                            )
+                                            created = True
+                                        else:
+                                            # No existing image with this name, create new one
+                                            image = Image.objects.create(
+                                                name=image_ref,
+                                                digest=image_digest,
+                                                artifact_reference=artifact_ref
+                                            )
+                                            created = True
+                                else:
+                                    # If no digest, use name only (image_ref already contains name:tag which is unique)
+                                    # But check if image already exists with this name
+                                    image = Image.objects.filter(name=image_ref).first()
+                                    if image:
+                                        created = False
+                                    else:
+                                        image = Image.objects.create(
+                                            name=image_ref,
+                                            digest=None,
+                                            artifact_reference=artifact_ref
+                                        )
+                                        created = True
                                 image.repository_tags.add(repo_tag)
                                 logger.info(f"{'Created' if created else 'Linked'} Helm image {image_ref} with digest {image_digest}")
 
@@ -1170,9 +1225,11 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
                     if updated:
                         cvv.save()
 
+        # Set status to success only after all matches are processed
         image.scan_status = 'success'
         image.save()
         logger.info(f"Successfully processed Grype scan results for image {image_uuid}")
+        logger.info(f"Total matches processed: {len(matches)}")
         # Calculate summary statistics
         total_matches = len(matches)
         unique_vulnerabilities = len(set(match.get('vulnerability', {}).get('id', '') for match in matches))
@@ -1286,13 +1343,14 @@ def scan_image_with_grype(self, image_uuid: str):
             with open(grype_file_path, 'r') as f:
                 grype_results = json.load(f)
 
-            # Save Grype results to image
+            # Save Grype results to image (but don't set status to success yet)
+            # Status will be set to 'success' in process_grype_scan_results after vulnerabilities are processed
             image.grype_data = grype_results
-            image.scan_status = 'success'  # Mark as successfully scanned
+            image.scan_status = 'in_process'  # Keep as in_process until vulnerabilities are processed
             image.save()
             logger.info(f"Saved Grype results for image {image_uuid}")
 
-            # Process Grype results
+            # Process Grype results (this will set status to 'success' when done)
             process_grype_scan_results.delay(str(image_uuid), grype_results)
             
             logger.info(f"Successfully scanned image {image_uuid} with Grype")
@@ -1697,13 +1755,47 @@ def process_single_tag(tag_uuid: str):
                             )
                         
                         # Create or get image with proper digest
-                        image, created = Image.objects.get_or_create(
-                            name=image_ref,
-                            defaults={
-                                'digest': image_digest,  # Use actual image digest
-                                'artifact_reference': f"{repository.url}:{tag.tag}"
-                            }
-                        )
+                        # image_ref from get_helm_images already contains name:tag, which should be unique
+                        # Use name+digest combination for unique identification when digest is available
+                        # If digest is not available, use name only (since image_ref already contains tag)
+                        artifact_ref = f"{repository.url}:{tag.tag}"
+                        if image_digest:
+                            # Try to find image by name and digest (same name but different digest = different image)
+                            image = Image.objects.filter(name=image_ref, digest=image_digest).first()
+                            if image:
+                                created = False
+                            else:
+                                # Check if image with same name but different digest exists
+                                existing_image = Image.objects.filter(name=image_ref).exclude(digest=image_digest).first()
+                                if existing_image:
+                                    # Same name but different digest - create new image
+                                    image = Image.objects.create(
+                                        name=image_ref,
+                                        digest=image_digest,
+                                        artifact_reference=artifact_ref
+                                    )
+                                    created = True
+                                else:
+                                    # No existing image with this name, create new one
+                                    image = Image.objects.create(
+                                        name=image_ref,
+                                        digest=image_digest,
+                                        artifact_reference=artifact_ref
+                                    )
+                                    created = True
+                        else:
+                            # If no digest, use name only (image_ref already contains name:tag which is unique)
+                            # But check if image already exists with this name
+                            image = Image.objects.filter(name=image_ref).first()
+                            if image:
+                                created = False
+                            else:
+                                image = Image.objects.create(
+                                    name=image_ref,
+                                    digest=None,
+                                    artifact_reference=artifact_ref
+                                )
+                                created = True
                         image.repository_tags.add(tag)
                         logger.info(f"{'Created' if created else 'Linked'} Helm image {image_ref} with digest {image_digest}")
 

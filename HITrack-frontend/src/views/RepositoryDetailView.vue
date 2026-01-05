@@ -193,6 +193,21 @@
                 />
               </template>
             </v-tooltip>
+            <v-tooltip text="Reanalyze SBOM for all images in this tag">
+              <template v-slot:activator="{ props }">
+                <v-btn
+                  v-bind="props"
+                  icon="mdi-file-document-refresh"
+                  variant="tonal"
+                  size="x-small"
+                  color="warning"
+                  class="ml-2"
+                  :disabled="isActionDisabled(item, 'rescan')"
+                  :loading="reanalyzingSbom === item.uuid"
+                  @click.stop="onReanalyzeSbom(item)"
+                />
+              </template>
+            </v-tooltip>
             <v-tooltip text="Delete tag">
               <template v-slot:activator="{ props }">
                 <v-btn
@@ -386,6 +401,7 @@ const showOnlyVulnerableVersions = ref(false)
 // Add new tag functionality
 const showAddTagDialog = ref(false)
 const creatingTag = ref(false)
+const reanalyzingSbom = ref<string | null>(null)
 const newTagName = ref('')
 const newTagDescription = ref('')
 const addTagForm = ref<any>(null)
@@ -730,6 +746,53 @@ const onRescanTagImages = async (tag: any) => {
       notificationService.error('Failed to start rescan for tag images')
     }
   }
+}
+
+const onReanalyzeSbom = async (tag: any) => {
+  if (!tag.uuid) return
+  if (isActionDisabled(tag, 'rescan')) {
+    notificationService.warning(getActionTooltip(tag, 'rescan'))
+    return
+  }
+  
+  // Set loading state briefly, then clear it immediately to allow parallel requests
+  reanalyzingSbom.value = tag.uuid
+  
+  // Make request without blocking - don't await, handle response asynchronously
+  api.post(`repository-tags/${tag.uuid}/reanalyze-sbom/`)
+    .then((resp) => {
+      // Show success message with details about skipped images if any
+      const message = resp.data.message || `Reanalysis started for ${resp.data.count} images`
+      if (resp.data.skipped_count && resp.data.skipped_count > 0) {
+        notificationService.info(message)
+      } else {
+        notificationService.success(message)
+      }
+      // Refresh tags list after a short delay to allow backend to process
+      setTimeout(() => {
+        fetchTags()
+      }, 500)
+    })
+    .catch((e: any) => {
+      if (e.response?.status === 409) {
+        // If all images are already being scanned, show warning
+        // Otherwise this shouldn't happen with new logic, but keep for backward compatibility
+        const errorMsg = e.response.data.error || 'All images are already being scanned or queued for scanning'
+        if (e.response.data.skipped_count) {
+          notificationService.info(`${errorMsg} (${e.response.data.skipped_count} images skipped)`)
+        } else {
+          notificationService.warning(errorMsg)
+        }
+      } else if (e.response?.status === 404) {
+        notificationService.warning(e.response.data.error || 'No images with SBOM data found for this tag')
+      } else {
+        notificationService.error('Failed to start SBOM reanalysis')
+      }
+    })
+    .finally(() => {
+      // Clear loading state immediately after request is sent
+      reanalyzingSbom.value = null
+    })
 }
 
 const getProcessingStatusTooltip = (status: string) => {

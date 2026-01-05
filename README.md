@@ -99,10 +99,19 @@ docker compose logs hitrack-api
 
 This project is licensed under the **Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License** (CC BY-NC-SA 4.0).
 
+## Roadmap
+- [ ] JFrog support
+- [ ] AWS ECR
+
+
+
 ## 👥 Contributors
 
 - **Sergei Ovchinnikov** ([@malchikserega](https://github.com/malchikserega))
 - **Ilya Kostyulin** ([@vmvarga](https://github.com/vmvarga))
+
+## Publications
+- https://medium.com/@malchikserega/humble-image-security-tracking-with-syft-grype-under-the-hood-76120e917029
 
 ## 🙏 Acknowledgments
 
