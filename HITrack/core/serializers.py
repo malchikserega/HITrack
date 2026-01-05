@@ -587,11 +587,14 @@ class RepositoryTagListSerializer(serializers.ModelSerializer):
 
     @extend_schema_field(serializers.IntegerField())
     def get_findings(self, obj):
-        # Count all vulnerabilities across all images in this tag
-        # Each image's vulnerabilities should be counted separately
-        from .models import ComponentVersionVulnerability
+        # Use annotated field if available (from optimized queryset)
+        if hasattr(obj, 'total_findings'):
+            return obj.total_findings or 0
         
+        # Fallback: count using prefetched data (Django will use cache if prefetched)
+        from .models import ComponentVersionVulnerability
         total_findings = 0
+        # Use .all() which will use prefetched cache if available
         for image in obj.images.all():
             total_findings += ComponentVersionVulnerability.objects.filter(
                 component_version__images=image
@@ -601,9 +604,13 @@ class RepositoryTagListSerializer(serializers.ModelSerializer):
 
     @extend_schema_field(serializers.IntegerField())
     def get_components(self, obj):
-        # Count all component versions across all images in this tag
-        # Each image's components should be counted separately
+        # Use annotated field if available (from optimized queryset)
+        if hasattr(obj, 'total_components'):
+            return obj.total_components or 0
+
+        # Fallback: count using prefetched data (Django will use cache if prefetched)
         total_components = 0
+        # Use .all() which will use prefetched cache if available
         for image in obj.images.all():
             total_components += image.component_versions.count()
         
@@ -611,7 +618,13 @@ class RepositoryTagListSerializer(serializers.ModelSerializer):
 
     def get_releases(self, obj):
         releases = []
-        for rtr in obj.releases.select_related('release').all():
+        # Use prefetched releases if available
+        if hasattr(obj, '_prefetched_objects_cache') and 'releases' in obj._prefetched_objects_cache:
+            releases_qs = obj.releases.all()
+        else:
+            releases_qs = obj.releases.select_related('release').all()
+
+        for rtr in releases_qs:
             releases.append({
                 'uuid': rtr.release.uuid,
                 'name': rtr.release.name,
