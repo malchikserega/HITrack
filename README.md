@@ -37,19 +37,18 @@ HITrack is a container security platform that helps organizations track and mana
    cd HITrack
    ```
 
-2. **Configure environment**
-   ```bash
-   cp env.env.example env.env
-   ```
-
-3. **Start the application**
+2.**Start the application**
    ```bash
    docker compose up -d
    ```
 
-4. **Access the application**
+3.**Access the application**
    - Frontend: http://localhost:1337
    - Admin: http://localhost:1337/admin/
+
+4. **Default credentials**
+   - Login: admin
+   - Password: P@ssw0rd
 
 ## 🏗️ Architecture
 
