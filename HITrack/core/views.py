@@ -342,7 +342,7 @@ class RepositoryViewSet(BaseViewSet):
         from .models import ComponentVersionVulnerability, ComponentVersion, Image
         from django.db.models import Prefetch
 
-        # Get tags with lightweight prefetch
+        # Get tags with lightweight prefetch for releases only
         tags = repository.tags.prefetch_related('releases__release')
 
         # Apply search filter first to reduce data
@@ -359,8 +359,9 @@ class RepositoryViewSet(BaseViewSet):
         paginator = CustomPageNumberPagination()
         page = paginator.paginate_queryset(tags, request)
         
-        if page is None:
-            page = list(tags)
+        # Convert to list: if page is None (pagination disabled), apply default limit for performance
+        # If page is not None, it's already a slice queryset (e.g., tags[10:20] for page 2)
+        page = list(page) if page is not None else list(tags[:paginator.page_size])
         
         # Get tag IDs for the current page only
         tag_ids = [tag.pk for tag in page]
@@ -379,16 +380,21 @@ class RepositoryViewSet(BaseViewSet):
                 findings_counts[tag_pk] = findings_counts.get(tag_pk, 0) + item['count']
         
         # Bulk count components for page tags only
+        # Count components per tag separately to avoid duplicates when image belongs to multiple tags
         components_counts = {}
         if tag_ids:
-            components_data = ComponentVersion.objects.filter(
-                images__repository_tags__pk__in=tag_ids
-            ).values('images__repository_tags__pk').annotate(
-                count=Count('pk')
-            )
-            for item in components_data:
-                tag_pk = item['images__repository_tags__pk']
-                components_counts[tag_pk] = components_counts.get(tag_pk, 0) + item['count']
+            # For each tag, count components from images that belong to that specific tag
+            for tag_pk in tag_ids:
+                # Get images that belong to this specific tag
+                images_for_tag = Image.objects.filter(
+                    repository_tags__pk=tag_pk
+                ).annotate(
+                    comp_count=Count('component_versions', distinct=False)
+                ).values('uuid', 'comp_count')
+                
+                # Sum components for this tag
+                total = sum(img['comp_count'] for img in images_for_tag)
+                components_counts[tag_pk] = total
         
         # Attach counts to tags on the page
         for tag in page:
@@ -444,16 +450,21 @@ class RepositoryViewSet(BaseViewSet):
                 findings_counts[tag_pk] = findings_counts.get(tag_pk, 0) + item['count']
         
         # Bulk count components for these 30 tags only
+        # Count components per tag separately to avoid duplicates when image belongs to multiple tags
         components_counts = {}
         if tag_ids:
-            components_data = ComponentVersion.objects.filter(
-                images__repository_tags__pk__in=tag_ids
-            ).values('images__repository_tags__pk').annotate(
-                count=Count('pk')
-            )
-            for item in components_data:
-                tag_pk = item['images__repository_tags__pk']
-                components_counts[tag_pk] = components_counts.get(tag_pk, 0) + item['count']
+            # For each tag, count components from images that belong to that specific tag
+            for tag_pk in tag_ids:
+                # Get images that belong to this specific tag
+                images_for_tag = Image.objects.filter(
+                    repository_tags__pk=tag_pk
+                ).annotate(
+                    comp_count=Count('component_versions', distinct=False)
+                ).values('uuid', 'comp_count')
+                
+                # Sum components for this tag
+                total = sum(img['comp_count'] for img in images_for_tag)
+                components_counts[tag_pk] = total
         
         # Attach counts to tags
         for tag in sorted_tags:
@@ -1762,10 +1773,10 @@ class RepositoryTagListForRepositoryView(ListAPIView):
 
     def get_queryset(self):
         repository_uuid = self.kwargs['repository_uuid']
-        from .models import ComponentVersionVulnerability, ComponentVersion
+        from .models import ComponentVersionVulnerability, ComponentVersion, Image
         
         # Optimize queryset - use only lightweight prefetch for releases
-        # Count findings and components directly through ManyToMany relationships
+        # Count findings directly through ManyToMany relationships
         queryset = RepositoryTag.objects.filter(
             repository__uuid=repository_uuid
         ).prefetch_related(
@@ -1775,16 +1786,15 @@ class RepositoryTagListForRepositoryView(ListAPIView):
             total_findings=Count(
                 'images__component_versions__componentversionvulnerability',
                 distinct=False
-            ),
-            # Count components: RepositoryTag -> Image -> ComponentVersion
-            total_components=Count(
-                'images__component_versions',
-                distinct=False
             )
         )
         
         # Check if ordering by tag is requested
-        ordering = self.request.query_params.get('ordering', '')
+        # Use request.GET for Django request, request.query_params for DRF request
+        if hasattr(self.request, 'query_params'):
+            ordering = self.request.query_params.get('ordering', '')
+        else:
+            ordering = self.request.GET.get('ordering', '')
         if 'tag' in ordering:
             # Get all tags and sort them semantically
             tags = list(queryset)
@@ -1823,10 +1833,128 @@ class RepositoryTagListForRepositoryView(ListAPIView):
             reverse = ordering.startswith('-')
             tags.sort(key=version_key, reverse=reverse)
             
+            # Count components for sorted tags - count per tag separately to avoid duplicates
+            tag_ids = [tag.pk for tag in tags]
+            if tag_ids:
+                # For each tag, count components from images that belong to that specific tag
+                components_counts = {}
+                for tag_pk in tag_ids:
+                    # Get images that belong to this specific tag
+                    images_for_tag = Image.objects.filter(
+                        repository_tags__pk=tag_pk
+                    ).annotate(
+                        comp_count=Count('component_versions', distinct=False)
+                    ).values('uuid', 'comp_count')
+                    
+                    # Sum components for this tag
+                    total = sum(img['comp_count'] for img in images_for_tag)
+                    components_counts[tag_pk] = total
+                
+                # Attach component counts to tags
+                for tag in tags:
+                    tag.total_components = components_counts.get(tag.pk, 0)
+            
             # Return the sorted tags as a list (we'll handle pagination manually)
             return tags
         
         return queryset
+    
+    def list(self, request, *args, **kwargs):
+        queryset = self.get_queryset()
+        
+        # If queryset is a list (from tag ordering), handle pagination manually
+        if isinstance(queryset, list):
+            from .models import Image
+            from .pagination import CustomPageNumberPagination
+            
+            # Apply pagination manually
+            paginator = CustomPageNumberPagination()
+            page = paginator.paginate_queryset(queryset, request)
+            
+            if page is None:
+                # Pagination is disabled, but we need to limit results for performance
+                # Apply default pagination to avoid loading all tags into memory
+                page = queryset[:paginator.page_size] if isinstance(queryset, list) else list(queryset[:paginator.page_size])
+            
+            # Count components for page tags if not already counted using optimized bulk query
+            tag_ids = [tag.pk for tag in page]
+            if tag_ids:
+                # Check if components are already counted
+                if not all(hasattr(tag, 'total_components') for tag in page):
+                    # Count components per tag separately to avoid duplicates
+                    components_counts = {}
+                    for tag_pk in tag_ids:
+                        # Get images that belong to this specific tag
+                        images_for_tag = Image.objects.filter(
+                            repository_tags__pk=tag_pk
+                        ).annotate(
+                            comp_count=Count('component_versions', distinct=False)
+                        ).values('uuid', 'comp_count')
+                        
+                        # Sum components for this tag
+                        total = sum(img['comp_count'] for img in images_for_tag)
+                        components_counts[tag_pk] = total
+                    
+                    # Attach component counts to tags
+                    for tag in page:
+                        if not hasattr(tag, 'total_components'):
+                            tag.total_components = components_counts.get(tag.pk, 0)
+            
+            serializer = self.get_serializer(page, many=True)
+            return paginator.get_paginated_response(serializer.data)
+        
+        # For regular queryset, count components after pagination
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            # Count components for page tags - count per tag separately to avoid duplicates
+            tag_ids = [tag.pk for tag in page]
+            if tag_ids:
+                from .models import Image
+                # For each tag, count components from images that belong to that specific tag
+                components_counts = {}
+                for tag_pk in tag_ids:
+                    # Get images that belong to this specific tag
+                    images_for_tag = Image.objects.filter(
+                        repository_tags__pk=tag_pk
+                    ).annotate(
+                        comp_count=Count('component_versions', distinct=False)
+                    ).values('uuid', 'comp_count')
+                    
+                    # Sum components for this tag
+                    total = sum(img['comp_count'] for img in images_for_tag)
+                    components_counts[tag_pk] = total
+                
+                # Attach component counts to tags
+                for tag in page:
+                    tag.total_components = components_counts.get(tag.pk, 0)
+            
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+        
+        # No pagination - count components per tag separately to avoid duplicates
+        tag_ids = [tag.pk for tag in queryset]
+        if tag_ids:
+            from .models import Image
+            # For each tag, count components from images that belong to that specific tag
+            components_counts = {}
+            for tag_pk in tag_ids:
+                # Get images that belong to this specific tag
+                images_for_tag = Image.objects.filter(
+                    repository_tags__pk=tag_pk
+                ).annotate(
+                    comp_count=Count('component_versions', distinct=False)
+                ).values('uuid', 'comp_count')
+                
+                # Sum components for this tag
+                total = sum(img['comp_count'] for img in images_for_tag)
+                components_counts[tag_pk] = total
+            
+            # Attach component counts to tags
+            for tag in queryset:
+                tag.total_components = components_counts.get(tag.pk, 0)
+        
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
 
     def list(self, request, *args, **kwargs):
         queryset = self.get_queryset()

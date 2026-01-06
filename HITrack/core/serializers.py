@@ -608,11 +608,15 @@ class RepositoryTagListSerializer(serializers.ModelSerializer):
         if hasattr(obj, 'total_components'):
             return obj.total_components or 0
 
-        # Fallback: count using prefetched data (Django will use cache if prefetched)
+        # Fallback: sum all ComponentVersions from all images in this tag (including duplicates)
         total_components = 0
         # Use .all() which will use prefetched cache if available
         for image in obj.images.all():
-            total_components += image.component_versions.count()
+            # Use len() on prefetched data if available, otherwise count()
+            if hasattr(image, '_prefetched_objects_cache') and 'component_versions' in image._prefetched_objects_cache:
+                total_components += len(image.component_versions.all())
+            else:
+                total_components += image.component_versions.count()
         
         return total_components
 
