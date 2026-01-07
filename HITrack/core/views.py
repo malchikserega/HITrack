@@ -20,7 +20,7 @@ from .serializers import (
 )
 from django.db import models
 from .pagination import CustomPageNumberPagination
-from django.db.models import Q, Count
+from django.db.models import Q, Count, Prefetch, Case, When, BooleanField
 from django.utils import timezone
 from datetime import timedelta, datetime
 from io import BytesIO
@@ -713,8 +713,38 @@ class ImageViewSet(BaseViewSet):
         # Always apply search and filters, even for dropdown
         queryset = super().get_queryset()
         
+        # Optimize for list action - prevent N+1 queries and memory issues
+        if self.action == 'list':
+            # Annotate counts and check for large JSON fields without loading them
+            # This prevents loading sbom_data and grype_data into memory
+            queryset = queryset.annotate(
+                findings_count=Count(
+                    'component_versions__componentversionvulnerability',
+                    distinct=False
+                ),
+                unique_findings_count=Count(
+                    'component_versions__componentversionvulnerability__vulnerability',
+                    distinct=True
+                ),
+                components_count=Count(
+                    'component_versions',
+                    distinct=True
+                ),
+                has_sbom=Case(
+                    When(sbom_data__isnull=False, then=True),
+                    default=False,
+                    output_field=BooleanField()
+                ),
+                has_grype=Case(
+                    When(grype_data__isnull=False, then=True),
+                    default=False,
+                    output_field=BooleanField()
+                )
+            ).prefetch_related(
+                'repository_tags__repository'
+            ).defer('sbom_data', 'grype_data')  # Defer after annotation to avoid loading large JSON
         # Optimize for repository_info by prefetching repository_tags and their repositories
-        if self.action == 'retrieve':
+        elif self.action == 'retrieve':
             queryset = queryset.prefetch_related(
                 'repository_tags__repository'
             )
