@@ -444,11 +444,29 @@ class ImageListSerializer(serializers.ModelSerializer):
 
     @extend_schema_field(serializers.BooleanField())
     def get_has_sbom(self, obj):
-        return bool(obj.sbom_data)
+        # Use annotated field if available (from optimized queryset)
+        # This avoids loading large sbom_data JSON into memory
+        if hasattr(obj, 'has_sbom'):
+            return obj.has_sbom
+        # Fallback: check without loading full data (will trigger DB query if deferred)
+        try:
+            # If field is deferred, this will query DB, but only check existence
+            return obj.sbom_data is not None
+        except:
+            return False
 
     @extend_schema_field(serializers.BooleanField())
     def get_has_grype(self, obj):
-        return bool(obj.grype_data)
+        # Use annotated field if available (from optimized queryset)
+        # This avoids loading large grype_data JSON into memory
+        if hasattr(obj, 'has_grype'):
+            return obj.has_grype
+        # Fallback: check without loading full data (will trigger DB query if deferred)
+        try:
+            # If field is deferred, this will query DB, but only check existence
+            return obj.grype_data is not None
+        except:
+            return False
 
     @extend_schema_field(serializers.IntegerField())
     def get_findings(self, obj):
@@ -478,14 +496,12 @@ class ImageListSerializer(serializers.ModelSerializer):
     @extend_schema_field(serializers.DictField())
     def get_repository_info(self, obj):
         # Get repository and tag information for this image
-        # Use prefetched data if available
-        if hasattr(obj, 'repository_tags'):
-            tags = obj.repository_tags.all()
-        else:
-            tags = obj.repository_tags.all()
+        # Use prefetched data if available (prefetch_related in queryset)
+        tags = obj.repository_tags.all()
         
         if tags.exists():
             tag = tags.first()
+            # Repository should be prefetched via select_related in views
             return {
                 'repository_name': tag.repository.name,
                 'tag': tag.tag,
