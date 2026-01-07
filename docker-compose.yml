@@ -35,6 +35,7 @@ services:
 
   hitrack-api:
     image: hitrack-api
+    restart: always
     build:
       context: ./HITrack
     environment:
