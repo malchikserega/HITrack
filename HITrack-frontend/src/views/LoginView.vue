@@ -13,7 +13,7 @@
               max-height="200"
               contain
             ></v-img>
-            <h1 class="text-h2 font-weight-bold mb-2" :class="{ 'neon-text': themeStore.isRetrowave }">HITrack</h1>
+            <h1 class="text-h2 font-weight-bold mb-2">HITrack</h1>
           </div>
           
           <v-card class="elevation-8 login-card">
@@ -180,10 +180,6 @@ onMounted(async () => {
   background: #ffffff;
 }
 
-/* Retrowave theme specific background */
-.retrowave-theme .login {
-  background: linear-gradient(135deg, #0a0a0f 0%, #1a0a1f 100%) !important;
-}
 
 .main-logo {
   background: transparent !important;

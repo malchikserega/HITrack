@@ -67,10 +67,6 @@
       <canvas ref="matrixCanvasRef" id="matrix-canvas" style="width:100vw;height:100vh;display:block;"></canvas>
     </div>
 
-    <!-- Theme Indicator -->
-    <div v-if="showThemeIndicatorRef" class="theme-indicator">
-      RETROWAVE MODE
-    </div>
   </v-app>
 </template>
 
@@ -90,7 +86,6 @@ const themeStore = useThemeStore()
 
 const isAuthenticated = computed(() => authStore.isAuthenticated)
 const drawer = ref(false)
-const showThemeIndicatorRef = ref(false)
 
 const theme = useTheme()
 
@@ -163,25 +158,9 @@ function handleResize() {
   }
 }
 
-// Theme functionality
-let cleanupThemeListener: (() => void) | null = null
-
-const showThemeIndicator = () => {
-  showThemeIndicatorRef.value = true
-  setTimeout(() => {
-    showThemeIndicatorRef.value = false
-  }, 3000)
-}
-
 onMounted(async () => {
   // Initialize theme system
   themeStore.applyTheme()
-  cleanupThemeListener = themeStore.initKeyboardListener()
-  
-  // Watch for theme changes to show indicator
-  watch(() => themeStore.currentTheme, () => {
-    showThemeIndicator()
-  })
   
   watch([isMatrix, matrixAnimation], async ([matrix, anim]) => {
     await nextTick()
@@ -211,9 +190,6 @@ onMounted(async () => {
 onUnmounted(() => {
   stopMatrixRain()
   window.removeEventListener('resize', handleResize)
-  if (cleanupThemeListener) {
-    cleanupThemeListener()
-  }
 })
 
 const menuItems = [
@@ -287,42 +263,42 @@ body {
 }
 
 /* Override any other background colors for main theme */
-.v-application:not(.retrowave-theme):not(.v-theme--matrix) {
+.v-application:not(.v-theme--matrix) {
   background-color: #ffffff !important;
 }
 
-.v-application:not(.retrowave-theme):not(.v-theme--matrix) .v-main {
+.v-application:not(.v-theme--matrix) .v-main {
   background-color: #ffffff !important;
 }
 
-.v-application:not(.retrowave-theme):not(.v-theme--matrix) .v-main__wrap {
+.v-application:not(.v-theme--matrix) .v-main__wrap {
   background-color: #ffffff !important;
 }
 
 /* Fix tooltips and overlays for main theme - more specific selectors */
-.v-application:not(.retrowave-theme):not(.v-theme--matrix) .v-tooltip .v-overlay__content,
-.v-application:not(.retrowave-theme):not(.v-theme--matrix) .v-tooltip__content,
-.v-application:not(.retrowave-theme):not(.v-theme--matrix) .v-overlay__content[data-v-tooltip],
-.v-application:not(.retrowave-theme):not(.v-theme--matrix) .v-tooltip .v-overlay__content .v-tooltip__content {
+.v-application:not(.v-theme--matrix) .v-tooltip .v-overlay__content,
+.v-application:not(.v-theme--matrix) .v-tooltip__content,
+.v-application:not(.v-theme--matrix) .v-overlay__content[data-v-tooltip],
+.v-application:not(.v-theme--matrix) .v-tooltip .v-overlay__content .v-tooltip__content {
   background: #333333 !important;
   color: #ffffff !important;
   border: 1px solid #666666 !important;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3) !important;
 }
 
-.v-application:not(.retrowave-theme):not(.v-theme--matrix) .v-menu .v-overlay__content {
+.v-application:not(.v-theme--matrix) .v-menu .v-overlay__content {
   background: #ffffff !important;
   color: #000000 !important;
   border: 1px solid #e0e0e0 !important;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15) !important;
 }
 
-.v-application:not(.retrowave-theme):not(.v-theme--matrix) .v-dialog .v-card {
+.v-application:not(.v-theme--matrix) .v-dialog .v-card {
   background: #ffffff !important;
   color: #000000 !important;
 }
 
-.v-application:not(.retrowave-theme):not(.v-theme--matrix) .v-snackbar .v-snackbar__wrapper {
+.v-application:not(.v-theme--matrix) .v-snackbar .v-snackbar__wrapper {
   background: #333333 !important;
   color: #ffffff !important;
 }
@@ -338,7 +314,7 @@ body {
 }
 
 /* Ensure all overlay elements are visible in main theme */
-.v-application:not(.retrowave-theme):not(.v-theme--matrix) .v-overlay__content:not(.v-tooltip .v-overlay__content) {
+.v-application:not(.v-theme--matrix) .v-overlay__content:not(.v-tooltip .v-overlay__content) {
   background: #ffffff !important;
   color: #000000 !important;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15) !important;
@@ -666,43 +642,4 @@ body {
   background: #000000 !important;
 }
 
-/* Retrowave theme - fix tooltips and overlays */
-.retrowave-theme .v-tooltip .v-overlay__content {
-  background: #0a0a0f !important;
-  color: #00bfff !important;
-  border: 1px solid #00bfff !important;
-  box-shadow: 0 0 20px rgba(0, 191, 255, 0.5) !important;
-}
-
-.retrowave-theme .v-menu .v-overlay__content {
-  background: #0a0a0f !important;
-  color: #00bfff !important;
-  border: 1px solid #00bfff !important;
-  box-shadow: 0 0 20px rgba(0, 191, 255, 0.5) !important;
-}
-
-.retrowave-theme .v-dialog .v-card {
-  background: #0a0a0f !important;
-  color: #00bfff !important;
-  border: 1px solid #00bfff !important;
-}
-
-.retrowave-theme .v-snackbar .v-snackbar__wrapper {
-  background: #0a0a0f !important;
-  color: #00bfff !important;
-  border: 1px solid #00bfff !important;
-}
-
-.retrowave-theme .v-tooltip__content {
-  background: #0a0a0f !important;
-  color: #00bfff !important;
-  border: 1px solid #00bfff !important;
-}
-
-.retrowave-theme .v-overlay__content {
-  background: #0a0a0f !important;
-  color: #00bfff !important;
-  border: 1px solid #00bfff !important;
-  box-shadow: 0 0 20px rgba(0, 191, 255, 0.5) !important;
-}
 </style> 
