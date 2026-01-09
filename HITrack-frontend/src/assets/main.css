@@ -20,28 +20,28 @@ body {
 }
 
 /* Ensure all main theme elements have white background */
-.v-application:not(.retrowave-theme):not(.v-theme--matrix) {
+.v-application:not(.v-theme--matrix) {
   background-color: #ffffff !important;
 }
 
-.v-application:not(.retrowave-theme):not(.v-theme--matrix) .v-main {
+.v-application:not(.v-theme--matrix) .v-main {
   background-color: #ffffff !important;
 }
 
-.v-application:not(.retrowave-theme):not(.v-theme--matrix) .v-main__wrap {
+.v-application:not(.v-theme--matrix) .v-main__wrap {
   background-color: #ffffff !important;
 }
 
-.v-application:not(.retrowave-theme):not(.v-theme--matrix) .v-content {
+.v-application:not(.v-theme--matrix) .v-content {
   background-color: #ffffff !important;
 }
 
 /* Ensure cards and surfaces have white background in main theme */
-.v-application:not(.retrowave-theme):not(.v-theme--matrix) .v-card {
+.v-application:not(.v-theme--matrix) .v-card {
   background-color: #ffffff !important;
 }
 
-.v-application:not(.retrowave-theme):not(.v-theme--matrix) .v-sheet {
+.v-application:not(.v-theme--matrix) .v-sheet {
   background-color: #ffffff !important;
 }
 

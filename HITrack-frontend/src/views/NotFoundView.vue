@@ -3,89 +3,25 @@
     <v-container fluid class="text-center">
       <!-- Animated 404 -->
       <div class="error-container">
-        <div class="error-code" :class="{ 'neon-text': themeStore.isRetrowave }">
+        <div class="error-code">
           <span class="four">4</span>
           <span class="zero">0</span>
           <span class="four">4</span>
-        </div>
-        
-        <!-- Glitch Effect -->
-        <div class="glitch-overlay" v-if="themeStore.isRetrowave">
-          <div class="glitch-text">404</div>
-          <div class="glitch-text glitch-text-2">404</div>
-          <div class="glitch-text glitch-text-3">404</div>
-        </div>
-
-        <!-- Hacker Terminal Lines -->
-        <div class="terminal-lines" v-if="themeStore.isRetrowave">
-          <div class="terminal-line" v-for="(line, index) in terminalLines" :key="index" :style="{ '--delay': index * 0.1 + 's' }">
-            {{ line }}
-          </div>
-        </div>
-
-        <!-- Binary Rain -->
-        <div class="binary-rain" v-if="themeStore.isRetrowave">
-          <div class="binary-column" v-for="i in 15" :key="i" :style="getBinaryColumnStyle(i)">
-            <span v-for="j in 20" :key="j" class="binary-char">{{ Math.random() > 0.5 ? '1' : '0' }}</span>
-          </div>
         </div>
       </div>
 
       <!-- Main Message -->
       <div class="error-message">
-        <h1 class="text-h3 font-weight-bold mb-4" :class="{ 'neon-text': themeStore.isRetrowave }">
-          <span class="hacker-text" v-if="themeStore.isRetrowave">ACCESS DENIED</span>
-          <span class="enhanced-text" v-else>Page Not Found</span>
+        <h1 class="text-h3 font-weight-bold mb-4">
+          <span class="enhanced-text">Page Not Found</span>
         </h1>
-        <p class="text-h6 mb-6" :class="{ 'neon-subtitle': themeStore.isRetrowave }">
-          <span class="terminal-prompt" v-if="themeStore.isRetrowave">$</span> 
-          <span v-if="themeStore.isRetrowave">ERROR: 404 - RESOURCE NOT FOUND</span>
-          <span v-else>The page you're looking for doesn't exist or has been moved.</span>
+        <p class="text-h6 mb-6">
+          <span>The page you're looking for doesn't exist or has been moved.</span>
         </p>
-        <div class="hacker-status" v-if="themeStore.isRetrowave">
-          <div class="status-line">
-            <span class="status-label">STATUS:</span>
-            <span class="status-value error">CONNECTION TERMINATED</span>
-          </div>
-          <div class="status-line">
-            <span class="status-label">PROTOCOL:</span>
-            <span class="status-value">HTTP/1.1 404</span>
-          </div>
-          <div class="status-line">
-            <span class="status-label">SECURITY:</span>
-            <span class="status-value warning">UNAUTHORIZED ACCESS</span>
-          </div>
-        </div>
-      </div>
-
-      <!-- Animated Elements -->
-      <div class="animated-elements" v-if="themeStore.isRetrowave">
-        <div class="floating-particles">
-          <div class="particle" v-for="i in 30" :key="i" :style="getParticleStyle(i)"></div>
-        </div>
-        <div class="scan-lines"></div>
-        
-        <!-- Hacker Grid -->
-        <div class="hacker-grid">
-          <div class="grid-line" v-for="i in 20" :key="i" :style="getGridLineStyle(i)"></div>
-        </div>
-        
-        <!-- Circuit Board Pattern -->
-        <div class="circuit-board">
-          <div class="circuit-line" v-for="i in 8" :key="i" :style="getCircuitLineStyle(i)"></div>
-          <div class="circuit-node" v-for="i in 12" :key="i" :style="getCircuitNodeStyle(i)"></div>
-        </div>
-        
-        <!-- Data Streams -->
-        <div class="data-streams">
-          <div class="data-stream" v-for="i in 5" :key="i" :style="getDataStreamStyle(i)">
-            <span class="data-char" v-for="j in 10" :key="j">{{ getRandomChar() }}</span>
-          </div>
-        </div>
       </div>
 
       <!-- Enhanced Background Elements for Normal Theme -->
-      <div class="background-elements" v-if="!themeStore.isRetrowave && !themeStore.isMatrix">
+      <div class="background-elements" v-if="!themeStore.isMatrix">
         <!-- Geometric Shapes -->
         <div class="geometric-shapes">
           <div class="shape triangle" v-for="i in 8" :key="`triangle-${i}`" :style="getGeometricShapeStyle('triangle', i)"></div>
@@ -107,45 +43,6 @@
         <div class="subtle-grid"></div>
       </div>
 
-      <!-- Enhanced Retrowave 16-bit/8-bit Background Elements -->
-      <div class="retrowave-background" v-if="themeStore.isRetrowave">
-        <!-- Pixel Grid Background -->
-        <div class="pixel-grid"></div>
-        
-        <!-- Retro City Skyline -->
-        <div class="city-skyline">
-          <div class="building" v-for="i in 12" :key="`building-${i}`" :style="getBuildingStyle(i)"></div>
-        </div>
-        
-        <!-- Floating Pixels -->
-        <div class="floating-pixels">
-          <div class="pixel" v-for="i in 50" :key="`pixel-${i}`" :style="getPixelStyle(i)"></div>
-        </div>
-        
-        <!-- Retro Sun/Moon -->
-        <div class="retro-sun" :style="getRetroSunStyle()"></div>
-        
-        <!-- Neon Grid Lines -->
-        <div class="neon-grid">
-          <div class="grid-line" v-for="i in 8" :key="`neon-line-${i}`" :style="getNeonGridStyle(i)"></div>
-        </div>
-        
-        <!-- Retro Stars -->
-        <div class="retro-stars">
-          <div class="star" v-for="i in 30" :key="`star-${i}`" :style="getStarStyle(i)"></div>
-        </div>
-        
-        <!-- Pixel Mountains -->
-        <div class="pixel-mountains">
-          <div class="mountain" v-for="i in 5" :key="`mountain-${i}`" :style="getMountainStyle(i)"></div>
-        </div>
-        
-        <!-- Retro Clouds -->
-        <div class="retro-clouds">
-          <div class="cloud" v-for="i in 8" :key="`cloud-${i}`" :style="getCloudStyle(i)"></div>
-        </div>
-      </div>
-
       <!-- Action Buttons -->
       <div class="action-buttons">
         <v-btn
@@ -154,7 +51,6 @@
           prepend-icon="mdi-home"
           @click="goHome"
           class="mr-4 mb-2"
-          :class="{ 'retrowave-btn': themeStore.isRetrowave }"
         >
           Go Home
         </v-btn>
@@ -165,7 +61,6 @@
           prepend-icon="mdi-arrow-left"
           @click="goBack"
           class="mb-2"
-          :class="{ 'retrowave-btn': themeStore.isRetrowave }"
         >
           Go Back
         </v-btn>
@@ -216,22 +111,7 @@ const animationFrame = ref<number>()
 // Matrix rain characters
 const matrixChars = '01アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン'
 
-// Terminal lines for hacker effect
-const terminalLines = ref([
-  '> INITIALIZING SECURITY PROTOCOL...',
-  '> SCANNING FOR TARGET RESOURCE...',
-  '> ERROR: RESOURCE NOT FOUND',
-  '> ATTEMPTING TO RECONNECT...',
-  '> CONNECTION FAILED',
-  '> FALLBACK TO DEFAULT ROUTE...',
-  '> SYSTEM STATUS: OFFLINE',
-  '> SECURITY ALERT: UNAUTHORIZED ACCESS',
-  '> TERMINATING CONNECTION...',
-  '> RETURNING TO SAFE MODE...'
-])
 
-// Hacker characters for data streams
-const hackerChars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()_+-=[]{}|;:,.<>?'
 
 const goHome = () => {
   router.push('/')
@@ -239,21 +119,6 @@ const goHome = () => {
 
 const goBack = () => {
   router.back()
-}
-
-const getParticleStyle = (index: number) => {
-  const delay = Math.random() * 5
-  const duration = 3 + Math.random() * 4
-  const x = Math.random() * 100
-  const y = Math.random() * 100
-  
-  return {
-    '--delay': `${delay}s`,
-    '--duration': `${duration}s`,
-    '--x': `${x}%`,
-    '--y': `${y}%`,
-    '--size': `${2 + Math.random() * 4}px`
-  }
 }
 
 const getMatrixColumnStyle = (index: number) => {
@@ -269,71 +134,6 @@ const getMatrixColumnStyle = (index: number) => {
 
 const getMatrixChar = () => {
   return matrixChars[Math.floor(Math.random() * matrixChars.length)]
-}
-
-const getRandomChar = () => {
-  return hackerChars[Math.floor(Math.random() * hackerChars.length)]
-}
-
-const getBinaryColumnStyle = (index: number) => {
-  const delay = Math.random() * 8
-  const duration = 3 + Math.random() * 4
-  
-  return {
-    '--delay': `${delay}s`,
-    '--duration': `${duration}s`,
-    '--x': `${index * 6.67}%`
-  }
-}
-
-const getGridLineStyle = (index: number) => {
-  const isVertical = index % 2 === 0
-  const position = (index / 20) * 100
-  
-  return {
-    '--position': `${position}%`,
-    '--angle': isVertical ? '0deg' : '90deg',
-    '--delay': `${index * 0.1}s`
-  }
-}
-
-const getCircuitLineStyle = (index: number) => {
-  const startX = Math.random() * 100
-  const startY = Math.random() * 100
-  const endX = Math.random() * 100
-  const endY = Math.random() * 100
-  
-  return {
-    '--start-x': `${startX}%`,
-    '--start-y': `${startY}%`,
-    '--end-x': `${endX}%`,
-    '--end-y': `${endY}%`,
-    '--delay': `${index * 0.2}s`
-  }
-}
-
-const getCircuitNodeStyle = (index: number) => {
-  const x = Math.random() * 100
-  const y = Math.random() * 100
-  
-  return {
-    '--x': `${x}%`,
-    '--y': `${y}%`,
-    '--delay': `${index * 0.15}s`
-  }
-}
-
-const getDataStreamStyle = (index: number) => {
-  const startX = Math.random() * 100
-  const endX = Math.random() * 100
-  const duration = 2 + Math.random() * 3
-  
-  return {
-    '--start-x': `${startX}%`,
-    '--end-x': `${endX}%`,
-    '--duration': `${duration}s`,
-    '--delay': `${index * 0.5}s`
-  }
 }
 
 // New functions for enhanced background elements
@@ -385,115 +185,6 @@ const getWaveStyle = (index: number) => {
   }
 }
 
-// Retrowave 16-bit/8-bit background functions
-const getBuildingStyle = (index: number) => {
-  const width = 40 + Math.random() * 80
-  const height = 100 + Math.random() * 200
-  const x = (index * 8) + Math.random() * 5
-  const duration = 8 + Math.random() * 12
-  const delay = Math.random() * 3
-  
-  return {
-    '--width': `${width}px`,
-    '--height': `${height}px`,
-    '--x': `${x}%`,
-    '--duration': `${duration}s`,
-    '--delay': `${delay}s`
-  }
-}
-
-const getPixelStyle = (index: number) => {
-  const x = Math.random() * 100
-  const y = Math.random() * 100
-  const size = 2 + Math.random() * 6
-  const duration = 3 + Math.random() * 6
-  const delay = Math.random() * 4
-  
-  return {
-    '--x': `${x}%`,
-    '--y': `${y}%`,
-    '--size': `${size}px`,
-    '--duration': `${duration}s`,
-    '--delay': `${delay}s`
-  }
-}
-
-const getRetroSunStyle = () => {
-  const x = 20 + Math.random() * 60
-  const y = 10 + Math.random() * 20
-  const size = 60 + Math.random() * 40
-  const duration = 20 + Math.random() * 10
-  
-  return {
-    '--x': `${x}%`,
-    '--y': `${y}%`,
-    '--size': `${size}px`,
-    '--duration': `${duration}s`
-  }
-}
-
-const getNeonGridStyle = (index: number) => {
-  const isVertical = index % 2 === 0
-  const position = (index / 8) * 100
-  const duration = 4 + Math.random() * 6
-  const delay = Math.random() * 2
-  
-  return {
-    '--position': `${position}%`,
-    '--is-vertical': isVertical ? '1' : '0',
-    '--duration': `${duration}s`,
-    '--delay': `${delay}s`
-  }
-}
-
-const getStarStyle = (index: number) => {
-  const x = Math.random() * 100
-  const y = Math.random() * 100
-  const size = 1 + Math.random() * 3
-  const duration = 2 + Math.random() * 4
-  const delay = Math.random() * 3
-  
-  return {
-    '--x': `${x}%`,
-    '--y': `${y}%`,
-    '--size': `${size}px`,
-    '--duration': `${duration}s`,
-    '--delay': `${delay}s`
-  }
-}
-
-const getMountainStyle = (index: number) => {
-  const x = (index * 20) + Math.random() * 10
-  const height = 80 + Math.random() * 120
-  const width = 100 + Math.random() * 150
-  const duration = 15 + Math.random() * 10
-  const delay = Math.random() * 5
-  
-  return {
-    '--x': `${x}%`,
-    '--height': `${height}px`,
-    '--width': `${width}px`,
-    '--duration': `${duration}s`,
-    '--delay': `${delay}s`
-  }
-}
-
-const getCloudStyle = (index: number) => {
-  const x = Math.random() * 100
-  const y = 20 + Math.random() * 30
-  const size = 30 + Math.random() * 50
-  const duration = 20 + Math.random() * 15
-  const delay = Math.random() * 10
-  
-  return {
-    '--x': `${x}%`,
-    '--y': `${y}%`,
-    '--size': `${size}px`,
-    '--duration': `${duration}s`,
-    '--delay': `${delay}s`
-  }
-}
-
 // Animation loop
 const animate = () => {
   // Update any animations here if needed
@@ -521,14 +212,6 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-/* Retrowave theme specific background */
-.retrowave-theme .not-found {
-  background: 
-    radial-gradient(circle at 30% 20%, rgba(255, 0, 150, 0.3) 0%, transparent 50%),
-    radial-gradient(circle at 70% 80%, rgba(0, 255, 255, 0.2) 0%, transparent 50%),
-    radial-gradient(circle at 50% 50%, rgba(150, 0, 255, 0.1) 0%, transparent 50%),
-    linear-gradient(135deg, #0a0a0f 0%, #1a0a1f 50%, #0f0a1a 100%) !important;
-}
 
 /* Matrix theme specific background */
 .v-theme--matrix .not-found {
@@ -577,7 +260,6 @@ onUnmounted(() => {
   }
 }
 
-/* Glitch Effect for Retrowave */
 .glitch-overlay {
   position: absolute;
   top: 0;
@@ -995,7 +677,6 @@ onUnmounted(() => {
   z-index: 2;
 }
 
-/* Floating Particles for Retrowave */
 .floating-particles {
   position: absolute;
   top: 0;
@@ -1029,7 +710,6 @@ onUnmounted(() => {
   }
 }
 
-/* Scan Lines for Retrowave */
 .scan-lines {
   position: absolute;
   top: 0;
@@ -1062,27 +742,6 @@ onUnmounted(() => {
   z-index: 2;
 }
 
-.retrowave-btn {
-  background: linear-gradient(45deg, #00bfff 0%, #0066cc 50%, #00aaff 100%) !important;
-  color: #000000 !important;
-  font-weight: bold !important;
-  text-transform: uppercase !important;
-  letter-spacing: 1px !important;
-  box-shadow: 
-    0 0 25px rgba(0, 191, 255, 0.8),
-    0 0 50px rgba(0, 102, 204, 0.6),
-    inset 0 0 20px rgba(255, 255, 255, 0.2) !important;
-  border: 2px solid #00bfff !important;
-  transition: all 0.3s ease !important;
-}
-
-.retrowave-btn:hover {
-  transform: translateY(-3px) scale(1.02) !important;
-  box-shadow: 
-    0 0 40px rgba(0, 191, 255, 1),
-    0 0 80px rgba(0, 102, 204, 0.8),
-    inset 0 0 30px rgba(255, 255, 255, 0.3) !important;
-}
 
 /* Matrix Rain Effect */
 .matrix-rain {
@@ -1148,11 +807,6 @@ onUnmounted(() => {
   border: 1px solid #39FF14 !important;
 }
 
-.retrowave-theme .debug-info {
-  background: rgba(10, 10, 15, 0.9) !important;
-  color: #00bfff !important;
-  border: 1px solid #00bfff !important;
-}
 
 /* Responsive Design */
 @media (max-width: 768px) {
@@ -1521,380 +1175,4 @@ onUnmounted(() => {
   }
 }
 
-/* Enhanced Retrowave 16-bit/8-bit Background Elements */
-.retrowave-background {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  pointer-events: none;
-  z-index: 1;
-  overflow: hidden;
-}
-
-/* Pixel Grid Background */
-.pixel-grid {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background-image: 
-    linear-gradient(rgba(0, 255, 255, 0.1) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(0, 255, 255, 0.1) 1px, transparent 1px);
-  background-size: 20px 20px;
-  animation: pixel-grid-pulse 4s ease-in-out infinite;
-  opacity: 0.3;
-}
-
-@keyframes pixel-grid-pulse {
-  0%, 100% { opacity: 0.1; }
-  50% { opacity: 0.3; }
-}
-
-/* Retro City Skyline */
-.city-skyline {
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  height: 40%;
-  z-index: 2;
-}
-
-.building {
-  position: absolute;
-  bottom: 0;
-  left: var(--x);
-  width: var(--width);
-  height: var(--height);
-  background: linear-gradient(
-    180deg,
-    #ff00ff 0%,
-    #ff0080 25%,
-    #8000ff 50%,
-    #0080ff 75%,
-    #0000ff 100%
-  );
-  animation: building-glow var(--duration) ease-in-out infinite var(--delay);
-  box-shadow: 
-    0 0 20px rgba(255, 0, 255, 0.5),
-    inset 0 0 20px rgba(0, 255, 255, 0.3);
-  clip-path: polygon(0% 100%, 0% 0%, 100% 0%, 100% 100%, 90% 100%, 90% 20%, 80% 20%, 80% 40%, 70% 40%, 70% 60%, 60% 60%, 60% 80%, 50% 80%, 50% 100%);
-}
-
-@keyframes building-glow {
-  0%, 100% {
-    box-shadow: 
-      0 0 20px rgba(255, 0, 255, 0.5),
-      inset 0 0 20px rgba(0, 255, 255, 0.3);
-    filter: hue-rotate(0deg);
-  }
-  50% {
-    box-shadow: 
-      0 0 40px rgba(255, 0, 255, 0.8),
-      inset 0 0 40px rgba(0, 255, 255, 0.6);
-    filter: hue-rotate(30deg);
-  }
-}
-
-/* Floating Pixels */
-.floating-pixels {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 3;
-}
-
-.pixel {
-  position: absolute;
-  width: var(--size);
-  height: var(--size);
-  background: #00ffff;
-  animation: pixel-float var(--duration) ease-in-out infinite var(--delay);
-  left: var(--x);
-  top: var(--y);
-  box-shadow: 0 0 10px #00ffff;
-  image-rendering: pixelated;
-}
-
-@keyframes pixel-float {
-  0%, 100% {
-    transform: translateY(0) scale(1);
-    opacity: 0.8;
-    filter: hue-rotate(0deg);
-  }
-  25% {
-    transform: translateY(-20px) scale(1.2);
-    opacity: 1;
-    filter: hue-rotate(90deg);
-  }
-  50% {
-    transform: translateY(-40px) scale(0.8);
-    opacity: 0.6;
-    filter: hue-rotate(180deg);
-  }
-  75% {
-    transform: translateY(-20px) scale(1.1);
-    opacity: 0.9;
-    filter: hue-rotate(270deg);
-  }
-}
-
-/* Retro Sun/Moon */
-.retro-sun {
-  position: absolute;
-  left: var(--x);
-  top: var(--y);
-  width: var(--size);
-  height: var(--size);
-  background: radial-gradient(circle, #ffff00 0%, #ff8000 50%, #ff0080 100%);
-  border-radius: 50%;
-  animation: retro-sun-pulse var(--duration) ease-in-out infinite;
-  box-shadow: 
-    0 0 50px rgba(255, 255, 0, 0.8),
-    0 0 100px rgba(255, 128, 0, 0.6),
-    0 0 150px rgba(255, 0, 128, 0.4);
-  z-index: 2;
-}
-
-@keyframes retro-sun-pulse {
-  0%, 100% {
-    transform: scale(1);
-    filter: hue-rotate(0deg);
-  }
-  50% {
-    transform: scale(1.1);
-    filter: hue-rotate(180deg);
-  }
-}
-
-/* Neon Grid Lines */
-.neon-grid {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 1;
-}
-
-.neon-grid .grid-line {
-  position: absolute;
-  background: linear-gradient(90deg, transparent, #00ffff, transparent);
-  height: 2px;
-  width: 100%;
-  top: var(--position);
-  animation: neon-scan var(--duration) ease-in-out infinite var(--delay);
-  box-shadow: 0 0 10px #00ffff;
-}
-
-.neon-grid .grid-line:nth-child(even) {
-  transform: rotate(90deg);
-  width: 100vh;
-  height: 2px;
-  left: var(--position);
-  top: 0;
-}
-
-@keyframes neon-scan {
-  0%, 100% {
-    opacity: 0.2;
-    transform: scaleX(0);
-  }
-  50% {
-    opacity: 1;
-    transform: scaleX(1);
-  }
-}
-
-/* Retro Stars */
-.retro-stars {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 1;
-}
-
-.star {
-  position: absolute;
-  width: var(--size);
-  height: var(--size);
-  background: #ffffff;
-  left: var(--x);
-  top: var(--y);
-  animation: star-twinkle var(--duration) ease-in-out infinite var(--delay);
-  box-shadow: 0 0 5px #ffffff;
-  clip-path: polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 91%, 50% 70%, 21% 91%, 32% 57%, 2% 35%, 39% 35%);
-}
-
-@keyframes star-twinkle {
-  0%, 100% {
-    opacity: 0.3;
-    transform: scale(1);
-  }
-  50% {
-    opacity: 1;
-    transform: scale(1.5);
-  }
-}
-
-/* Pixel Mountains */
-.pixel-mountains {
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  height: 30%;
-  z-index: 1;
-}
-
-.mountain {
-  position: absolute;
-  bottom: 0;
-  left: var(--x);
-  width: var(--width);
-  height: var(--height);
-  background: linear-gradient(180deg, #8000ff 0%, #400080 100%);
-  animation: mountain-glow var(--duration) ease-in-out infinite var(--delay);
-  clip-path: polygon(0% 100%, 0% 60%, 20% 40%, 40% 50%, 60% 30%, 80% 45%, 100% 35%, 100% 100%);
-  box-shadow: 0 0 30px rgba(128, 0, 255, 0.5);
-}
-
-@keyframes mountain-glow {
-  0%, 100% {
-    box-shadow: 0 0 30px rgba(128, 0, 255, 0.5);
-    filter: hue-rotate(0deg);
-  }
-  50% {
-    box-shadow: 0 0 50px rgba(128, 0, 255, 0.8);
-    filter: hue-rotate(30deg);
-  }
-}
-
-/* Retro Clouds */
-.retro-clouds {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 40%;
-  z-index: 1;
-}
-
-.cloud {
-  position: absolute;
-  left: var(--x);
-  top: var(--y);
-  width: var(--size);
-  height: calc(var(--size) * 0.6);
-  background: linear-gradient(180deg, #ffffff 0%, #e0e0e0 100%);
-  animation: cloud-drift var(--duration) linear infinite var(--delay);
-  border-radius: 50px;
-  box-shadow: 0 0 20px rgba(255, 255, 255, 0.3);
-}
-
-.cloud::before {
-  content: '';
-  position: absolute;
-  top: -30%;
-  left: 10%;
-  width: 40%;
-  height: 60%;
-  background: inherit;
-  border-radius: 50px;
-}
-
-.cloud::after {
-  content: '';
-  position: absolute;
-  top: -20%;
-  right: 10%;
-  width: 50%;
-  height: 50%;
-  background: inherit;
-  border-radius: 50px;
-}
-
-@keyframes cloud-drift {
-  0% {
-    transform: translateX(-100px);
-    opacity: 0;
-  }
-  10% {
-    opacity: 1;
-  }
-  90% {
-    opacity: 1;
-  }
-  100% {
-    transform: translateX(calc(100vw + 100px));
-    opacity: 0;
-  }
-}
-
-/* Enhanced Retrowave Text Effects */
-.retrowave-theme .hacker-text {
-  font-family: 'Courier New', monospace;
-  letter-spacing: 3px;
-  animation: retrowave-glow 2s ease-in-out infinite alternate;
-  text-shadow: 
-    0 0 5px #ff00ff,
-    0 0 10px #ff00ff,
-    0 0 15px #ff00ff,
-    0 0 20px #ff00ff,
-    0 0 35px #ff00ff,
-    0 0 40px #ff00ff;
-}
-
-@keyframes retrowave-glow {
-  0% {
-    text-shadow: 
-      0 0 5px #ff00ff,
-      0 0 10px #ff00ff,
-      0 0 15px #ff00ff,
-      0 0 20px #ff00ff,
-      0 0 35px #ff00ff,
-      0 0 40px #ff00ff;
-    filter: hue-rotate(0deg);
-  }
-  100% {
-    text-shadow: 
-      0 0 10px #00ffff,
-      0 0 20px #00ffff,
-      0 0 30px #00ffff,
-      0 0 40px #00ffff,
-      0 0 50px #00ffff,
-      0 0 60px #00ffff;
-    filter: hue-rotate(180deg);
-  }
-}
-
-/* Enhanced Retrowave Error Code */
-.retrowave-theme .error-code {
-  background: linear-gradient(45deg, #ff00ff, #00ffff, #8000ff, #ff0080);
-  background-clip: text;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-size: 400% 400%;
-  animation: retrowave-gradient 3s ease-in-out infinite;
-  text-shadow: 
-    0 0 30px rgba(255, 0, 255, 0.8),
-    0 0 60px rgba(0, 255, 255, 0.6),
-    0 0 90px rgba(128, 0, 255, 0.4);
-}
-
-@keyframes retrowave-gradient {
-  0%, 100% {
-    background-position: 0% 50%;
-  }
-  50% {
-    background-position: 100% 50%;
-  }
-}
 </style>

@@ -728,10 +728,6 @@ onMounted(async () => {
   min-height: 100vh;
 }
 
-/* Retrowave theme specific background */
-.retrowave-theme .component-version-detail {
-  background: linear-gradient(135deg, #0a0a0f 0%, #1a0a1f 100%) !important;
-}
 
 .loading-container,
 .error-container {

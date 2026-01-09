@@ -716,10 +716,6 @@ export default defineComponent({
   min-height: 100vh;
 }
 
-/* Retrowave theme specific background */
-.retrowave-theme .task-management {
-  background: linear-gradient(135deg, #0a0a0f 0%, #1a0a1f 100%) !important;
-}
 /* Custom styles for better alignment */
 .v-data-table {
   border-radius: 8px;

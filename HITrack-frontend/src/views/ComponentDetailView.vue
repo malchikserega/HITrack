@@ -696,10 +696,6 @@ onMounted(async () => {
   min-height: 100vh;
 }
 
-/* Retrowave theme specific background */
-.retrowave-theme .component-detail {
-  background: linear-gradient(135deg, #0a0a0f 0%, #1a0a1f 100%) !important;
-}
 
 .component-stats {
   display: grid;
@@ -982,7 +978,7 @@ onMounted(async () => {
   opacity: 0.8;
 }
 
-/* Matrix/Retrowave theme overrides */
+/* Matrix theme overrides */
 .v-theme--matrix .v-dialog .v-card {
   background: #000000 !important;
   border: 2px solid #39FF14 !important;
