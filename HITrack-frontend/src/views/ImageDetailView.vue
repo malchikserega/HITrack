@@ -985,10 +985,6 @@ onMounted(fetchImage)
   min-height: 100vh;
 }
 
-/* Retrowave theme specific background */
-.retrowave-theme .image-detail {
-  background: linear-gradient(135deg, #0a0a0f 0%, #1a0a1f 100%) !important;
-}
 .main-info-card {
   border-radius: 12px;
   box-shadow: 0 2px 12px 0 rgba(60,60,60,0.07);

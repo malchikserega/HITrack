@@ -460,10 +460,6 @@ onMounted(async () => {
   min-height: 100vh;
 }
 
-/* Retrowave theme specific background */
-.retrowave-theme .images {
-  background: linear-gradient(135deg, #0a0a0f 0%, #1a0a1f 100%) !important;
-}
 .images-table-responsive {
   width: 100%;
   overflow-x: auto;
