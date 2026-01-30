@@ -30,6 +30,10 @@ from openpyxl import Workbook
 from django.shortcuts import render
 from packaging import version as packaging_version
 import re
+import logging
+from django.conf import settings
+
+logger = logging.getLogger(__name__)
 
 # Create your views here.
 
@@ -254,11 +258,11 @@ class RepositoryViewSet(BaseViewSet):
     @action(detail=False, methods=['get'])
     def get_acr_repos(self, request):
         """
-        Get repositories from Azure Container Registry with pagination.
-        Uses ACR's native pagination to efficiently fetch repositories.
+        Get repositories from container registry (ACR or Artifactory) with pagination.
+        Uses registry's native pagination. Pass provider='acr' or provider='jfrog'.
         """
         from .models import ContainerRegistry
-        from .utils.acr import get_repositories, get_bearer_token
+        from .utils.registry import get_repositories
 
         registry_uuid = request.query_params.get('registry_uuid')
         provider = request.query_params.get('provider', 'acr')
@@ -270,17 +274,17 @@ class RepositoryViewSet(BaseViewSet):
                 registry = ContainerRegistry.objects.get(uuid=registry_uuid)
             else:
                 registry = ContainerRegistry.objects.get(provider=provider)
-                
-            token = get_bearer_token(registry.api_url, registry.login, registry.password)
-            
-            # Get repositories with pagination
+            if not registry.api_url:
+                return Response(
+                    {"error": "Registry has no API URL configured"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            # Get repositories with pagination (ACR or Artifactory)
             repos, next_page = get_repositories(
-                registry.api_url,
-                token,
+                registry,
                 page_size=page_size,
                 last_repo=last_repo
             )
-            
             return Response({
                 "repositories": [
                     {
@@ -296,12 +300,14 @@ class RepositoryViewSet(BaseViewSet):
             })
         except ContainerRegistry.DoesNotExist:
             return Response(
-                {"error": f"Registry not found"},
+                {"error": "Registry not found"},
                 status=status.HTTP_404_NOT_FOUND
             )
         except Exception as e:
+            import traceback
+            logger.exception("get_acr_repos failed: %s", e)
             return Response(
-                {"error": str(e)},
+                {"error": str(e), "detail": traceback.format_exc() if settings.DEBUG else None},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
@@ -310,19 +316,26 @@ class RepositoryViewSet(BaseViewSet):
         repository = self.get_object()
         if repository.scan_status == 'in_process':
             return Response(
-                {'error': 'Repository is already being scanned'}, 
+                {'error': 'Repository is already being scanned'},
                 status=status.HTTP_409_CONFLICT
             )
-        
+        latest_only = request.data.get('latest_only', False) if request.data else False
+        if isinstance(latest_only, str):
+            latest_only = latest_only.lower() in ('true', '1', 'yes')
         repository.scan_status = 'pending'
         repository.save()
-        
+
         try:
             from .tasks import scan_repository_tags
-            scan_repository_tags.apply_async(args=[str(repository.uuid)], task_name="Scan Repository Tags")
+            scan_repository_tags.apply_async(
+                args=[str(repository.uuid)],
+                kwargs={'latest_only': latest_only},
+                task_name="Scan Repository Tags"
+            )
             return Response({
                 'status': 'success',
-                'message': 'Repository tags scan scheduled successfully'
+                'message': 'Repository tags scan scheduled successfully',
+                'latest_only': latest_only,
             })
         except Exception as e:
             repository.scan_status = 'error'
@@ -1580,6 +1593,27 @@ class ListACRRegistriesView(GenericAPIView):
         ]
         return Response({'registries': data})
 
+
+class ListRegistriesView(GenericAPIView):
+    """List container registries by provider (acr or jfrog). Used by frontend for ACR and Artifactory."""
+    permission_classes = [IsAuthenticated]
+    serializer_class = ListACRRegistriesResponseSerializer
+
+    def get(self, request):
+        provider = request.query_params.get('provider', 'acr')
+        if provider not in ('acr', 'jfrog'):
+            return Response({'registries': []})
+        registries = ContainerRegistry.objects.filter(provider=provider)
+        data = [
+            {
+                'uuid': str(r.uuid),
+                'name': r.name,
+                'api_url': r.api_url
+            }
+            for r in registries
+        ]
+        return Response({'registries': data})
+
 class StatsViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
     serializer_class = StatsResponseSerializer
@@ -1748,7 +1782,7 @@ class JobViewSet(viewsets.ViewSet):
             repositories = serializer.validated_data['repositories']
             registry_uuid = serializer.validated_data.get('registry_uuid')
 
-            # Get the registry by uuid or fallback to first acr
+            # Get the registry by uuid or fallback to first ACR (for backward compatibility)
             registry = None
             if registry_uuid:
                 registry = ContainerRegistry.objects.filter(uuid=registry_uuid).first()
@@ -1756,7 +1790,7 @@ class JobViewSet(viewsets.ViewSet):
                 registry = ContainerRegistry.objects.filter(provider='acr').first()
             if not registry:
                 return Response(
-                    {'error': 'No ACR registry found'},
+                    {'error': 'No registry found'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 

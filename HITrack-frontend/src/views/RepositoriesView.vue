@@ -198,6 +198,30 @@
           </v-card-actions>
         </v-card>
       </v-dialog>
+
+      <v-dialog v-model="scanDialog" max-width="420px" persistent>
+        <v-card title="Scan repository">
+          <v-card-text>
+            <span class="text-body-2">{{ repoToScan?.name }}</span>
+            <p class="text-body-2 mt-2 mb-0">
+              <strong>Scan all tags</strong> – discovers full history (can be slow for large repos).
+            </p>
+            <p class="text-body-2 mt-1 mb-0">
+              <strong>Scan only latest</strong> – one tag per image (prefer "latest"), faster and less history.
+            </p>
+          </v-card-text>
+          <v-card-actions>
+            <v-spacer></v-spacer>
+            <v-btn variant="text" @click="scanDialog = false">Cancel</v-btn>
+            <v-btn color="primary" variant="tonal" @click="runScan(true)">
+              Scan only latest
+            </v-btn>
+            <v-btn color="primary" variant="elevated" @click="runScan(false)">
+              Scan all tags
+            </v-btn>
+          </v-card-actions>
+        </v-card>
+      </v-dialog>
     </v-container>
   </div>
 </template>
@@ -434,7 +458,10 @@ const getScanTooltip = (repo: Repository) => {
   return 'Scan repository'
 }
 
-const onScan = async (repo: Repository) => {
+const scanDialog = ref(false)
+const repoToScan = ref<Repository | null>(null)
+
+const onScan = (repo: Repository) => {
   if (!repo.uuid) {
     notificationService.error('Cannot scan repository: missing UUID')
     return
@@ -443,9 +470,21 @@ const onScan = async (repo: Repository) => {
     notificationService.warning(getScanTooltip(repo))
     return
   }
+  repoToScan.value = repo
+  scanDialog.value = true
+}
+
+const runScan = async (latestOnly: boolean) => {
+  const repo = repoToScan.value
+  scanDialog.value = false
+  if (!repo?.uuid) return
   try {
-    await api.post(`repositories/${repo.uuid}/scan_tags/`)
-    notificationService.success('Repository scan started successfully')
+    await api.post(`repositories/${repo.uuid}/scan_tags/`, { latest_only: latestOnly })
+    notificationService.success(
+      latestOnly
+        ? 'Repository scan (latest only) started successfully'
+        : 'Repository scan started successfully'
+    )
     await fetchRepositories()
   } catch (error: any) {
     if (error.response?.status === 409) {
@@ -454,6 +493,8 @@ const onScan = async (repo: Repository) => {
       console.error('Error starting repository scan:', error)
       notificationService.error('Failed to start repository scan')
     }
+  } finally {
+    repoToScan.value = null
   }
 }
 

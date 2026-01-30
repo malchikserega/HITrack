@@ -200,7 +200,7 @@ const menuItems = [
   { title: 'Vulnerabilities', path: '/vulnerabilities' },
   { title: 'Releases', path: '/releases' },
   { title: 'Task Management', path: '/tasks' },
-  { title: 'Azure Container Registry', path: '/acr' },
+  { title: 'Container Registries', path: '/acr' },
   { title: 'Report Generator', path: '/reports' },
   { title: 'Component Matrix', path: '/component-matrix' }
 ]

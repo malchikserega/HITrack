@@ -107,7 +107,7 @@
                   color="primary"
                   :disabled="isScanDisabled()"
                   :loading="scanning"
-                  @click="onScanRepository"
+                  @click="openScanDialog"
                   class="ml-2"
                 />
               </div>
@@ -292,6 +292,32 @@
       </v-card>
     </v-dialog>
 
+    <!-- Scan Repository Dialog -->
+    <v-dialog v-model="showScanDialog" max-width="420px" persistent>
+      <v-card>
+        <v-card-title class="text-h6 font-weight-bold pa-4 pb-2">Scan repository</v-card-title>
+        <v-card-text class="pa-4 pt-0">
+          <span class="text-body-2">{{ repository?.name }}</span>
+          <p class="text-body-2 mt-2 mb-0">
+            <strong>Scan all tags</strong> – discovers full history (can be slow for large repos).
+          </p>
+          <p class="text-body-2 mt-1 mb-0">
+            <strong>Scan only latest</strong> – one tag per image (prefer "latest"), faster and less history.
+          </p>
+        </v-card-text>
+        <v-card-actions class="pa-4 pt-0">
+          <v-spacer></v-spacer>
+          <v-btn variant="text" @click="showScanDialog = false">Cancel</v-btn>
+          <v-btn color="primary" variant="tonal" @click="runScan(true)" :loading="scanning">
+            Scan only latest
+          </v-btn>
+          <v-btn color="primary" variant="elevated" @click="runScan(false)" :loading="scanning">
+            Scan all tags
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
     <!-- Delete Tag Confirmation Dialog -->
     <v-dialog 
       v-model="showDeleteDialog" 
@@ -409,6 +435,7 @@ const deletingTag = ref<string | null>(null)
 const showDeleteDialog = ref(false)
 const tagToDelete = ref<any>(null)
 const scanning = ref(false)
+const showScanDialog = ref(false)
 
 const tagNameRules = [
   (v: string) => !!v || 'Tag name is required',
@@ -843,7 +870,7 @@ const getScanTooltip = () => {
   return 'Scan repository for new tags'
 }
 
-const onScanRepository = async () => {
+const openScanDialog = () => {
   if (!repository.value?.uuid) {
     notificationService.error('Cannot scan repository: missing UUID')
     return
@@ -852,10 +879,20 @@ const onScanRepository = async () => {
     notificationService.warning(getScanTooltip())
     return
   }
+  showScanDialog.value = true
+}
+
+const runScan = async (latestOnly: boolean) => {
+  if (!repository.value?.uuid) return
+  showScanDialog.value = false
   scanning.value = true
   try {
-    await api.post(`repositories/${repository.value.uuid}/scan_tags/`)
-    notificationService.success('Repository scan started successfully')
+    await api.post(`repositories/${repository.value.uuid}/scan_tags/`, { latest_only: latestOnly })
+    notificationService.success(
+      latestOnly
+        ? 'Repository scan (latest only) started successfully'
+        : 'Repository scan started successfully'
+    )
     await fetchRepository()
     await fetchTags()
   } catch (error: any) {

@@ -4,6 +4,7 @@ from .views import (
     RepositoryViewSet, RepositoryTagViewSet, ImageViewSet,
     ComponentViewSet, ComponentVersionViewSet, VulnerabilityViewSet,
     StatsViewSet, JobViewSet, HasACRRegistryView, ListACRRegistriesView,
+    ListRegistriesView,
     RepositoryTagListForRepositoryView, ReportGeneratorView,
     ComponentMatrixView, ReleaseViewSet, VulnerabilityDetailsViewSet,
     TaskManagementViewSet, PeriodicTaskViewSet, TestTaskViewSet, TestViewSet
@@ -29,6 +30,7 @@ urlpatterns = [
     path('', include(router.urls)),
     path('has-acr-registry/', HasACRRegistryView.as_view(), name='has-acr-registry'),
     path('list-acr-registries/', ListACRRegistriesView.as_view(), name='list-acr-registries'),
+    path('registries/', ListRegistriesView.as_view(), name='list-registries'),
     path('repositories/<uuid:repository_uuid>/tags-list/', RepositoryTagListForRepositoryView.as_view(), name='repository-tags-list'),
     path('reports/generate/', ReportGeneratorView.as_view(), name='generate-report'),
     path('component-matrix/', ComponentMatrixView.as_view(), name='component-matrix'),

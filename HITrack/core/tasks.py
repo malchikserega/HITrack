@@ -43,7 +43,7 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
     import json
     import tempfile
     import os
-    from .utils.acr import get_bearer_token, get_acr_image_digest
+    from .utils.registry import get_bearer_token, get_image_digest
 
     logger.info(f"Starting SBOM generation for image {image_uuid}")
     
@@ -81,31 +81,41 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
             raise ValueError("Unsafe image reference")
 
         # Get registry token if available
+        registry = None
         token = None
         if image.repository_tags.exists():
             registry = image.repository_tags.first().repository.container_registry
             if registry:
-                token = get_bearer_token(registry.api_url, registry.login, registry.password)
+                token = get_bearer_token(registry)
 
         # Try to pull image
         try:
             logger.info(f"Pulling image {image_ref}")
             subprocess.run(["docker", "pull", image_ref], capture_output=True, check=True)
         except subprocess.CalledProcessError as e:
-            if token:
+            if token and registry:
                 # Try with registry authentication
                 registry_host = image_ref.split('/')[0]
                 logger.info(f"First pull failed, trying with registry authentication for {registry_host}")
-                
-                # Docker login
-                login_process = subprocess.Popen(
-                    ["docker", "login", registry_host, "-u", "00000000-0000-0000-0000-000000000000", "--password-stdin"],
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True
-                )
-                _, stderr = login_process.communicate(input=token)
+                # Artifactory uses username/password; ACR uses token with special username
+                if getattr(registry, 'provider', None) == 'jfrog':
+                    login_process = subprocess.Popen(
+                        ["docker", "login", registry_host, "-u", registry.login, "--password-stdin"],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True
+                    )
+                    _, stderr = login_process.communicate(input=registry.password)
+                else:
+                    login_process = subprocess.Popen(
+                        ["docker", "login", registry_host, "-u", "00000000-0000-0000-0000-000000000000", "--password-stdin"],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True
+                    )
+                    _, stderr = login_process.communicate(input=token)
                 
                 # Check if login failed
                 if login_process.returncode != 0:
@@ -258,7 +268,7 @@ def periodic_repository_scan():
     This task should be scheduled to run daily.
     """
     from .models import Repository, RepositoryTag, ContainerRegistry
-    from .utils.acr import get_tags, get_bearer_token, get_manifest, is_helm_chart
+    from .utils.registry import get_tags, get_bearer_token, get_manifest, is_helm_chart
     from datetime import datetime
 
     logger.info("Starting periodic repository scan")
@@ -276,16 +286,14 @@ def periodic_repository_scan():
                 logger.warning(f"No registry found for repository {repository.name}, skipping")
                 continue
 
-            token = get_bearer_token(registry.api_url, registry.login, registry.password)
-
-            # Get all tags from registry 
-            all_tags = list(get_tags(registry.api_url, token, repository.name, limit=10))
+            # Get all tags from registry (ACR or Artifactory)
+            all_tags = list(get_tags(registry, repository.name, limit=10))
             logger.info(f"Found {len(all_tags)} tags for repository {repository.name}")
 
             # Determine repository type if unknown
             if repository.repository_type in ('none', 'Unknown') and all_tags:
                 first_tag = all_tags[0]
-                manifest, _ = get_manifest(registry.api_url, token, repository.name, first_tag)
+                manifest, _ = get_manifest(registry, repository.name, first_tag)
                 if manifest:
                     if is_helm_chart(manifest):
                         repository.repository_type = 'helm'
@@ -356,7 +364,7 @@ def scan_repository(repository_name: str, repository_url: str, scan_option: str)
     Scan a repository for tags and determine its type (Helm or Docker).
     """
     from .models import Repository, RepositoryTag, ContainerRegistry
-    from .utils.acr import get_tags, get_manifest, is_helm_chart, get_bearer_token
+    from .utils.registry import get_tags, get_manifest, is_helm_chart, get_bearer_token
     from datetime import datetime
 
     logger.info(f"Starting repository scan for {repository_name}")
@@ -367,11 +375,13 @@ def scan_repository(repository_name: str, repository_url: str, scan_option: str)
         try:
             registry = ContainerRegistry.objects.get(api_url__contains=registry_name)
         except ContainerRegistry.DoesNotExist:
-            logger.warning(f"No ContainerRegistry found for {registry_name}, using default ACR")
-            registry = ContainerRegistry.objects.get(provider='acr')
-
-        # Get token for registry
-        token = get_bearer_token(registry.api_url, registry.login, registry.password)
+            # Fallback: try ACR then Artifactory so both registries are supported
+            try:
+                registry = ContainerRegistry.objects.get(provider='acr')
+                logger.warning(f"No ContainerRegistry found for {registry_name}, using default ACR")
+            except ContainerRegistry.DoesNotExist:
+                registry = ContainerRegistry.objects.get(provider='jfrog')
+                logger.warning(f"No ContainerRegistry found for {registry_name}, using default Artifactory")
 
         # Get or create repository
         repository, created = Repository.objects.get_or_create(
@@ -390,8 +400,8 @@ def scan_repository(repository_name: str, repository_url: str, scan_option: str)
             repository.status = True
             repository.save()
 
-        # Get all tags
-        all_tags = list(get_tags(registry.api_url, token, repository_name, limit=30))
+        # Get all tags (ACR or Artifactory)
+        all_tags = list(get_tags(registry, repository_name, limit=30))
         if scan_option == 'last':
             tags_to_scan = all_tags[-1:] if all_tags else []
         elif scan_option == 'last10':
@@ -404,7 +414,7 @@ def scan_repository(repository_name: str, repository_url: str, scan_option: str)
         # Check repository type using the first tag
         if tags_to_scan:
             first_tag = tags_to_scan[0]
-            manifest, _ = get_manifest(registry.api_url, token, repository_name, first_tag)
+            manifest, _ = get_manifest(registry, repository_name, first_tag)
             if manifest and is_helm_chart(manifest):
                 repository.repository_type = 'helm'
                 repository.save()
@@ -455,7 +465,7 @@ def process_all_tags():
     This task can be manually triggered.
     """
     from .models import Repository, RepositoryTag, Image
-    from .utils.acr import get_manifest, is_helm_chart, get_chart_digest, get_helm_images, get_bearer_token, get_acr_image_digest
+    from .utils.registry import get_manifest, is_helm_chart, get_chart_digest, get_helm_images, get_bearer_token, get_image_digest
 
     logger.info("Starting processing of all tags from active repositories")
 
@@ -469,20 +479,14 @@ def process_all_tags():
             repository_tags = RepositoryTag.objects.filter(repository=repository).select_related('repository')
             logger.info(f"Found {repository_tags.count()} tags for repository {repository.name}")
 
-            # Get registry token if available
-            token = None
-            if repository.container_registry:
-                token = get_bearer_token(
-                    repository.container_registry.api_url,
-                    repository.container_registry.login,
-                    repository.container_registry.password
-                )
+            # Get registry (for token and provider-specific digest)
+            registry = repository.container_registry
 
             processed_tags = []
             for repo_tag in repository_tags:
                 # For Docker images, just create the record
                 if repository.repository_type == 'docker':
-                    image_ref = f"{repository.url}:{repo_tag.tag}"
+                    image_ref = _repository_tag_image_ref(repository, repo_tag, registry)
                     image, created = Image.objects.get_or_create(
                         name=image_ref,
                         defaults={
@@ -493,12 +497,8 @@ def process_all_tags():
                     logger.info(f"{'Created' if created else 'Linked'} Docker image {image_ref}")
                 else:
                     # For Helm charts, get manifest to extract images and digest
-                    manifest, digest = get_manifest(
-                        repository.container_registry.api_url if repository.container_registry else None,
-                        token,
-                        repository.name,
-                        repo_tag.tag
-                    )
+                    img_name = getattr(repo_tag, 'image_path', None) or None
+                    manifest, digest = get_manifest(registry, repository.name, repo_tag.tag, image_name=img_name)
 
                     if not manifest:
                         logger.warning(f"Could not get manifest for {repository.name}:{repo_tag.tag}")
@@ -507,20 +507,9 @@ def process_all_tags():
                     if is_helm_chart(manifest):
                         chart_digest = get_chart_digest(manifest)
                         if chart_digest:
-                            for image_ref in get_helm_images(
-                                repository.container_registry.api_url if repository.container_registry else None,
-                                token,
-                                repository.name,
-                                chart_digest
-                            ):
-                                # Get image digest from ACR
-                                image_digest = None
-                                if repository.container_registry and repository.container_registry.provider == 'acr':
-                                    image_digest = get_acr_image_digest(
-                                        repository.container_registry.api_url,
-                                        token,
-                                        image_ref
-                                    )
+                            for image_ref in get_helm_images(registry, repository.name, chart_digest):
+                                # Get image digest (ACR or Artifactory)
+                                image_digest = get_image_digest(registry, image_ref) if registry else None
                                 
                                 # Create or get image with proper digest
                                 # image_ref from get_helm_images already contains name:tag, which should be unique
@@ -1540,16 +1529,70 @@ def monitor_mass_rescan_progress():
         }
 
 
-@celery_app.task(name="Scan Repository Tags")
-def scan_repository_tags(repository_uuid: str):
+def _repository_tag_image_ref(repository, repo_tag, registry=None):
+    """Build docker image reference. For Artifactory repo keys, use image_path and pull base (repo_key.host)."""
+    if registry and getattr(registry, 'provider', None) == 'jfrog' and getattr(repo_tag, 'image_path', None) and (repo_tag.image_path or '').strip():
+        from urllib.parse import urlparse
+        parsed = urlparse(registry.api_url or '')
+        host = parsed.netloc or ''
+        if not host and repository.url:
+            host = (repository.url or '').split('/')[0].split('://')[-1]
+        pull_base = f"{repository.name}.{host}" if host else (repository.url or repository.name)
+        return f"{pull_base}/{repo_tag.image_path}:{repo_tag.tag}"
+    return f"{repository.url}:{repo_tag.tag}"
+
+
+# Scan task: allow 1 hour for large Artifactory repos (catalog + many images/tags)
+SCAN_REPOSITORY_TAGS_TIME_LIMIT = 3600
+SCAN_REPOSITORY_TAGS_SOFT_LIMIT = 3540
+
+# When latest_only: max images to consider; pick one tag per image by highest version number
+SCAN_LATEST_ONLY_MAX_IMAGES = 500
+
+# Regex to extract leading semantic version (v1.2.3 or 1.2.3 or 2.0)
+_VERSION_PREFIX_RE = re.compile(r'^v?(\d+(?:\.\d+)*)', re.IGNORECASE)
+
+
+def _version_sort_key(tag: str):
+    """
+    Return a tuple suitable for sorting tags by version (higher = newer).
+    Parse v1.2.3 / 1.2.3 style; unparseable tags get (0,); literal 'latest' gets high fallback.
+    """
+    tag = (tag or '').strip()
+    if not tag:
+        return (0,)
+    if tag.lower() == 'latest':
+        return (999999,)  # prefer when no version-like tags exist
+    m = _VERSION_PREFIX_RE.match(tag)
+    if m:
+        parts = [int(x) for x in m.group(1).split('.')]
+        return tuple(parts)
+    return (0,)
+
+
+def _pick_latest_tag_by_version(tags):
+    """Given a list of tag names, return the one considered 'latest' by version number."""
+    if not tags:
+        return None
+    return max(tags, key=_version_sort_key)
+
+
+@celery_app.task(
+    name="Scan Repository Tags",
+    time_limit=SCAN_REPOSITORY_TAGS_TIME_LIMIT,
+    soft_time_limit=SCAN_REPOSITORY_TAGS_SOFT_LIMIT,
+)
+def scan_repository_tags(repository_uuid: str, latest_only: bool = False):
     """
     Task that scans a single repository for new tags.
+    For Artifactory repo keys: lists images via catalog, then tags per image.
+    When latest_only=True, only one tag per image is collected (highest version by number).
     """
     from .models import Repository, RepositoryTag, ContainerRegistry
-    from .utils.acr import get_tags, get_bearer_token, get_manifest, is_helm_chart
+    from .utils.registry import get_tags, get_catalog, get_manifest, is_helm_chart
     from datetime import datetime
 
-    logger.info(f"Starting repository tags scan for repository {repository_uuid}")
+    logger.info(f"Starting repository tags scan for repository {repository_uuid} (latest_only={latest_only})")
     
     try:
         repository = Repository.objects.select_related('container_registry').get(uuid=repository_uuid)
@@ -1558,7 +1601,7 @@ def scan_repository_tags(repository_uuid: str):
         repository.scan_status = 'in_process'
         repository.save()
 
-        # Get registry and token
+        # Get registry
         registry = repository.container_registry
         if not registry:
             logger.warning(f"No registry found for repository {repository.name}")
@@ -1566,55 +1609,96 @@ def scan_repository_tags(repository_uuid: str):
             repository.save()
             return
 
-        token = get_bearer_token(registry.api_url, registry.login, registry.password)
-
-        # Get all tags from registry 
-        all_tags = list(get_tags(registry.api_url, token, repository.name, limit=10))
-        logger.info(f"Found {len(all_tags)} tags for repository {repository.name}")
-
-        # Determine repository type if unknown
-        if repository.repository_type in ('none', 'Unknown') and all_tags:
-            first_tag = all_tags[0]
-            manifest, _ = get_manifest(registry.api_url, token, repository.name, first_tag)
-            if manifest:
-                if is_helm_chart(manifest):
-                    repository.repository_type = 'helm'
-                else:
-                    repository.repository_type = 'docker'
-                repository.save()
-
-        # Process each tag
-        for tag_name in all_tags:
+        all_tag_tuples = []  # (tag_name, image_path or None)
+        if registry.provider == 'jfrog':
+            # Artifactory repo key: list images from catalog, then tags per image
             try:
-                # Check if tag already exists
-                if not RepositoryTag.objects.filter(repository=repository, tag=tag_name).exists():
-                    # Get manifest for the tag
-                    manifest, digest = get_manifest(registry.api_url, token, repository.name, tag_name)
-                    if digest:
-                        digest = digest.replace('sha256:', '')
+                image_names, _ = get_catalog(registry, repository.name, page_size=500)
+            except Exception as e:
+                logger.error(f"Failed to get catalog for {repository.name}: {e}")
+                repository.scan_status = 'error'
+                repository.save()
+                return
+            if latest_only:
+                image_names = image_names[:SCAN_LATEST_ONLY_MAX_IMAGES]
+            logger.info(f"Found {len(image_names)} images in Artifactory repo {repository.name}" + (" (latest_only)" if latest_only else ""))
+            for image_name in image_names:
+                try:
+                    tags = list(get_tags(registry, repository.name, limit=100 if not latest_only else 50, image_name=image_name))
+                    if latest_only and tags:
+                        chosen = _pick_latest_tag_by_version(tags)
+                        all_tag_tuples.append((chosen, image_name))
                     else:
-                        digest = ''
-                    # Create new tag
-                    RepositoryTag.objects.create(
+                        for tag_name in tags:
+                            all_tag_tuples.append((tag_name, image_name))
+                except Exception as e:
+                    logger.warning(f"Failed to get tags for image {image_name}: {e}")
+            if all_tag_tuples and repository.repository_type in ('none', 'Unknown'):
+                repository.repository_type = 'docker'
+                repository.save()
+        else:
+            # ACR or single-image: tags for this repository name
+            all_tags = list(get_tags(registry, repository.name, limit=500))
+            if latest_only and all_tags:
+                chosen = _pick_latest_tag_by_version(all_tags)
+                all_tags = [chosen]
+            all_tag_tuples = [(t, None) for t in all_tags]
+            logger.info(f"Found {len(all_tags)} tags for repository {repository.name}" + (" (latest_only)" if latest_only else ""))
+            if repository.repository_type in ('none', 'Unknown') and all_tags:
+                first_tag = all_tags[0]
+                manifest, _ = get_manifest(registry, repository.name, first_tag)
+                if manifest:
+                    if is_helm_chart(manifest):
+                        repository.repository_type = 'helm'
+                    else:
+                        repository.repository_type = 'docker'
+                    repository.save()
+
+        # Process each (tag_name, image_path)
+        new_count = 0
+        new_tag_uuids = []
+        for tag_name, image_path in all_tag_tuples:
+            try:
+                image_path_val = (image_path or '').strip()
+                if not RepositoryTag.objects.filter(repository=repository, tag=tag_name, image_path=image_path_val).exists():
+                    digest = ''
+                    if registry.provider != 'jfrog' or not image_path_val:
+                        manifest, d = get_manifest(registry, repository.name, tag_name)
+                        if d:
+                            digest = (d or '').replace('sha256:', '')
+                    else:
+                        manifest, d = get_manifest(registry, repository.name, tag_name, image_name=image_path_val)
+                        if d:
+                            digest = (d or '').replace('sha256:', '')
+                    rt = RepositoryTag.objects.create(
                         repository=repository,
                         tag=tag_name,
-                        digest=digest
+                        digest=digest or None,
+                        image_path=image_path_val
                     )
-                    logger.info(f"Created new tag {tag_name} for repository {repository.name}")
+                    new_count += 1
+                    new_tag_uuids.append(str(rt.uuid))
+                    logger.info(f"Created tag {tag_name}" + (f" for image {image_path_val}" if image_path_val else ""))
             except Exception as e:
-                logger.error(f"Error processing tag {tag_name} for repository {repository.name}: {str(e)}")
+                logger.error(f"Error processing tag {tag_name}: {str(e)}")
                 continue
 
         # Update repository status
         repository.scan_status = 'success'
         repository.last_scanned = datetime.now()
         repository.save()
-        logger.info(f"Successfully completed repository tags scan for {repository.name}")
+        logger.info(f"Successfully completed repository tags scan for {repository.name} ({new_count} new tags)")
+
+        # Schedule processing (create Images, SBOM) for each new tag
+        if new_tag_uuids:
+            from .tasks import process_single_tag
+            for tag_uuid in new_tag_uuids:
+                process_single_tag.apply_async(args=[tag_uuid], task_name="Process Single Tag")
+            logger.info(f"Scheduled process_single_tag for {len(new_tag_uuids)} new tags")
         
-        # Calculate summary statistics
-        existing_tags_before = RepositoryTag.objects.filter(repository=repository).count()
-        new_tags_created = RepositoryTag.objects.filter(repository=repository, tag__in=all_tags).count()
-        tags_skipped = len(all_tags) - new_tags_created
+        existing_tags_before = RepositoryTag.objects.filter(repository=repository).count() - new_count
+        new_tags_created = new_count
+        tags_skipped = len(all_tag_tuples) - new_count
         
         return {
             "status": "success",
@@ -1624,7 +1708,7 @@ def scan_repository_tags(repository_uuid: str):
             "repository_url": repository.url,
             "repository_type": repository.repository_type,
             "summary": {
-                "total_tags_found": len(all_tags),
+                "total_tags_found": len(all_tag_tuples),
                 "new_tags_created": new_tags_created,
                 "existing_tags_before": existing_tags_before,
                 "tags_skipped": tags_skipped,
@@ -1688,7 +1772,7 @@ def process_single_tag(tag_uuid: str):
     After processing, trigger SBOM scan for all images linked to this tag.
     """
     from .models import RepositoryTag, Image
-    from .utils.acr import get_manifest, is_helm_chart, get_chart_digest, get_helm_images, get_bearer_token, get_acr_image_digest
+    from .utils.registry import get_manifest, is_helm_chart, get_chart_digest, get_helm_images, get_bearer_token, get_image_digest
     from .tasks import generate_sbom_and_create_components
 
     logger.info(f"Starting processing of tag {tag_uuid}")
@@ -1699,20 +1783,12 @@ def process_single_tag(tag_uuid: str):
         tag.processing_status = 'in_process'
         tag.save()
         repository = tag.repository
+        registry = repository.container_registry
         logger.info(f"Processing tag {tag.tag} from repository {repository.name}")
-
-        # Get registry token if available
-        token = None
-        if repository.container_registry:
-            token = get_bearer_token(
-                repository.container_registry.api_url,
-                repository.container_registry.login,
-                repository.container_registry.password
-            )
 
         # For Docker images, just create the record
         if repository.repository_type == 'docker':
-            image_ref = f"{repository.url}:{tag.tag}"
+            image_ref = _repository_tag_image_ref(repository, tag, registry)
             image, created = Image.objects.get_or_create(
                 name=image_ref,
                 defaults={
@@ -1723,12 +1799,8 @@ def process_single_tag(tag_uuid: str):
             logger.info(f"{'Created' if created else 'Linked'} Docker image {image_ref}")
         else:
             # For Helm charts, get manifest to extract images and digest
-            manifest, digest = get_manifest(
-                repository.container_registry.api_url if repository.container_registry else None,
-                token,
-                repository.name,
-                tag.tag
-            )
+            img_name = getattr(tag, 'image_path', None) or None
+            manifest, digest = get_manifest(registry, repository.name, tag.tag, image_name=img_name)
 
             if not manifest:
                 logger.warning(f"Could not get manifest for {repository.name}:{tag.tag}")
@@ -1739,20 +1811,9 @@ def process_single_tag(tag_uuid: str):
             if is_helm_chart(manifest):
                 chart_digest = get_chart_digest(manifest)
                 if chart_digest:
-                    for image_ref in get_helm_images(
-                        repository.container_registry.api_url if repository.container_registry else None,
-                        token,
-                        repository.name,
-                        chart_digest
-                    ):
-                        # Get image digest from ACR
-                        image_digest = None
-                        if repository.container_registry and repository.container_registry.provider == 'acr':
-                            image_digest = get_acr_image_digest(
-                                repository.container_registry.api_url,
-                                token,
-                                image_ref
-                            )
+                    for image_ref in get_helm_images(registry, repository.name, chart_digest):
+                        # Get image digest (ACR or Artifactory)
+                        image_digest = get_image_digest(registry, image_ref) if registry else None
                         
                         # Create or get image with proper digest
                         # image_ref from get_helm_images already contains name:tag, which should be unique

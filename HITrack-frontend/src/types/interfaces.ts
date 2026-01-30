@@ -165,6 +165,15 @@ export interface Stats {
   components: number
 }
 
+/** Container registry provider (ACR or Artifactory) */
+export type RegistryProvider = 'acr' | 'jfrog'
+
+export interface ContainerRegistry {
+  uuid: string
+  name: string
+  api_url: string
+}
+
 // Celery Task Interfaces
 export interface TaskResult {
   task_id: string;

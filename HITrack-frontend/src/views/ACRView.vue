@@ -3,19 +3,38 @@
     <v-container>
       <v-row>
         <v-col cols="12">
-          <h1 class="text-h4 mb-4 font-weight-black">Azure Container Registry</h1>
+          <h1 class="text-h4 mb-4 font-weight-black">Container Registries</h1>
           <v-select
-            v-if="acrRegistries.length > 1"
+            v-model="provider"
+            :items="providerOptions"
+            item-title="title"
+            item-value="value"
+            label="Registry type"
+            class="mb-4"
+            density="comfortable"
+            @update:model-value="onProviderChange"
+          />
+          <v-select
+            v-if="registries.length > 1"
             v-model="selectedRegistry"
-            :items="acrRegistries"
+            :items="registries"
             item-title="name"
             item-value="uuid"
-            label="Select ACR Registry"
+            :label="registrySelectLabel"
             class="mb-4"
             :disabled="isLoading"
           />
+          <v-chip
+            v-else-if="registries.length === 1 && selectedRegistry"
+            class="mb-4"
+            color="primary"
+            variant="tonal"
+            size="large"
+          >
+            {{ registries.find(r => r.uuid === selectedRegistry)?.name ?? 'Registry selected' }}
+          </v-chip>
           <v-btn 
-            v-if="acrRegistries.length"
+            v-if="registries.length"
             :disabled="!selectedRegistry || isLoading"
             color="primary" 
             @click="openDialog()" 
@@ -28,10 +47,10 @@
                 color="white"
               ></v-progress-circular>
             </template>
-            Add from ACR
+            {{ addFromButtonLabel }}
           </v-btn>
           <v-alert v-else type="warning" class="mb-4">
-            No Azure Container Registry found in database
+            {{ noRegistryMessage }}
           </v-alert>
         </v-col>
       </v-row>
@@ -43,7 +62,7 @@
       >
         <v-card class="dialog-card">
           <div class="dialog-header">
-            <span class="text-h5">Select Repositories</span>
+            <span class="text-h5">{{ dialogTitle }}</span>
             <v-btn
               icon="mdi-close"
               variant="text"
@@ -188,9 +207,15 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import api from '../plugins/axios'
 import { notificationService } from '../plugins/notifications'
-import type { Repository, PaginatedResponse } from '../types/interfaces'
+import type { Repository, ContainerRegistry, RegistryProvider } from '../types/interfaces'
 
-const acrRegistries = ref<{uuid: string, name: string, api_url: string}[]>([])
+const providerOptions: { title: string; value: RegistryProvider }[] = [
+  { title: 'Azure Container Registry', value: 'acr' },
+  { title: 'JFrog Artifactory', value: 'jfrog' }
+]
+
+const provider = ref<RegistryProvider>('acr')
+const registries = ref<ContainerRegistry[]>([])
 const selectedRegistry = ref<string | null>(null)
 
 const dialog = ref(false)
@@ -215,6 +240,23 @@ const repositoryHeaders = [
   { title: 'URL', key: 'url' },
 ]
 
+const registrySelectLabel = computed(() =>
+  provider.value === 'jfrog' ? 'Select Artifactory Registry' : 'Select ACR Registry'
+)
+const addFromButtonLabel = computed(() =>
+  provider.value === 'jfrog' ? 'Add from Artifactory' : 'Add from ACR'
+)
+const noRegistryMessage = computed(() =>
+  provider.value === 'jfrog'
+    ? 'No JFrog Artifactory registry found in database'
+    : 'No Azure Container Registry found in database'
+)
+const dialogTitle = computed(() =>
+  provider.value === 'jfrog'
+    ? 'Select Repositories (Artifactory)'
+    : 'Select Repositories (ACR)'
+)
+
 const filteredRepositories = computed(() => {
   if (!search.value) return repositories.value
   const searchLower = search.value.toLowerCase()
@@ -232,10 +274,10 @@ const loadRepositories = async (reset: boolean = false) => {
     isLoadingMore.value = true
   }
   try {
-    const registry = acrRegistries.value.find(r => r.uuid === selectedRegistry.value)
+    const registry = registries.value.find(r => r.uuid === selectedRegistry.value)
     const response = await api.get('repositories/get_acr_repos/', {
       params: {
-        provider: 'acr',
+        provider: provider.value,
         registry_uuid: registry?.uuid,
         page_size: pageSize,
         last: lastRepo.value
@@ -249,8 +291,9 @@ const loadRepositories = async (reset: boolean = false) => {
     lastRepo.value = response.data.pagination.next_page
     hasMore.value = !!lastRepo.value
     // Repositories loaded successfully
-  } catch (error) {
-    notificationService.error('Failed to fetch repositories')
+  } catch (error: any) {
+    const msg = error?.response?.data?.error ?? 'Failed to fetch repositories'
+    notificationService.error(msg)
   } finally {
     isLoading.value = false
     isLoadingMore.value = false
@@ -351,16 +394,28 @@ const toggleRepository = (repo: Repository) => {
   }
 }
 
-onMounted(async () => {
+const loadRegistries = async () => {
   try {
-    const resp = await api.get('acr/list/')
-    acrRegistries.value = resp.data.registries
-    if (acrRegistries.value.length === 1) {
-      selectedRegistry.value = acrRegistries.value[0].uuid
+    const resp = await api.get('registries/', { params: { provider: provider.value } })
+    registries.value = resp.data.registries ?? []
+    if (registries.value.length === 1) {
+      selectedRegistry.value = registries.value[0].uuid
+    } else {
+      selectedRegistry.value = null
     }
   } catch (e) {
-    acrRegistries.value = []
+    registries.value = []
+    selectedRegistry.value = null
   }
+}
+
+const onProviderChange = () => {
+  selectedRegistry.value = null
+  loadRegistries()
+}
+
+onMounted(() => {
+  loadRegistries()
 })
 </script>
 

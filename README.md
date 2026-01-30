@@ -95,6 +95,39 @@ docker compose logs
 docker compose logs hitrack-api
 ```
 
+## 🔧 Troubleshooting
+
+### Artifactory: listing and adding repositories
+
+Use the **Artifactory base URL** (no repo key) so HITrack can discover all Docker repos via the REST API, like your own script’s `GET /api/repositories`.
+
+- **Correct:** `https://repo.example.com/artifactory`  
+  → HITrack calls `GET .../api/repositories?packageType=docker` and shows all Docker repo keys (e.g. `a8n-docker`). You then select which repo keys to add.
+- **Wrong:** `https://repo.example.com/artifactory/a8n-docker`  
+  → That single-repo style is not used for the “list repos then select” flow.
+
+In **Admin → Container Registries**, set your JFrog registry **API URL** to the base only, e.g. `https://repo.com.int.zone/artifactory`. Use the same login/password (or API key) as in your script. After that, “Add from Artifactory” will list Docker repo keys and let you select which to include.
+
+### KeyError: 'fix' when running migrations
+
+This error occurs when a migration tries to remove the `fix` field from a model that doesn't have it in the migration state. The `fix` field lives on **ComponentVersionVulnerability** (the through model), not on **Vulnerability**.
+
+**Fix:**
+
+1. Find the migration that removes `fix`, for example:
+   ```bash
+   grep -r "RemoveField\|name=.fix" HITrack/core/migrations/
+   ```
+2. Open that migration file. If it contains something like:
+   `RemoveField(model_name='vulnerability', name='fix')` — that is wrong (Vulnerability never had `fix`).
+3. Either **delete that migration file** (if you want to keep the `fix` field), or change the operation to the correct model only if you intend to remove the field from the through model:  
+   `RemoveField(model_name='componentversionvulnerability', name='fix')`
+4. If the broken migration was already applied to the database, fake-rollback then migrate again:
+   ```bash
+   python manage.py migrate core 0001_initial --fake
+   python manage.py migrate
+   ```
+
 ## 📝 License
 
 This project is licensed under the **Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License** (CC BY-NC-SA 4.0).

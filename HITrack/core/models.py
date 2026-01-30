@@ -64,6 +64,8 @@ class RepositoryTag(models.Model):
     tag = models.CharField(max_length=255)
     digest = models.CharField(max_length=255, blank=True, null=True)
     repository = models.ForeignKey(Repository, on_delete=models.CASCADE, related_name='tags', to_field='uuid')
+    # For Artifactory repo keys: image path within the repo (e.g. com.ingrammicro.foo). Blank for ACR/single-image repos.
+    image_path = models.CharField(max_length=512, blank=True, default='')
     processing_status = models.CharField(
         max_length=32,
         choices=[
@@ -79,7 +81,7 @@ class RepositoryTag(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        unique_together = ['tag', 'repository']
+        unique_together = [['repository', 'tag', 'image_path']]
 
     def __str__(self):
         return f"{self.repository.name}:{self.tag}"
