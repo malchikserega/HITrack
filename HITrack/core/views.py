@@ -1412,6 +1412,22 @@ class VulnerabilityViewSet(BaseViewSet):
             'total_vulnerabilities': Vulnerability.objects.count()
         })
 
+    @action(detail=False, methods=['post'], url_path='cleanup-orphaned')
+    def cleanup_orphaned(self, request):
+        """
+        Delete vulnerabilities that have no associated component versions (and thus no images).
+        Use after deleting images to keep statistics accurate.
+        """
+        orphaned = Vulnerability.objects.annotate(
+            n=Count('component_versions')
+        ).filter(n=0)
+        count = orphaned.count()
+        orphaned.delete()
+        return Response({
+            'deleted': count,
+            'message': f'Removed {count} orphaned vulnerability(ies) with no linked components or images.'
+        })
+
     @action(detail=True, methods=['post'])
     def update_details(self, request, uuid=None):
         """

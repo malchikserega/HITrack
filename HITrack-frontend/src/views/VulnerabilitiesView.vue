@@ -5,7 +5,23 @@
         <v-col cols="12">
           <div class="d-flex align-center justify-space-between mb-4">
             <h1 class="text-h4 font-weight-black">Vulnerabilities</h1>
-            <div v-if="activeFilter" class="d-flex align-center">
+            <div class="d-flex align-center gap-2">
+              <v-tooltip text="Remove vulnerabilities that have no linked components or images (e.g. after deleting images)" location="bottom">
+                <template v-slot:activator="{ props }">
+                  <v-btn
+                    v-bind="props"
+                    color="secondary"
+                    variant="tonal"
+                    size="small"
+                    prepend-icon="mdi-broom"
+                    :loading="cleanupOrphanedLoading"
+                    @click="openCleanupOrphanedDialog"
+                  >
+                    Cleanup orphaned
+                  </v-btn>
+                </template>
+              </v-tooltip>
+              <div v-if="activeFilter" class="d-flex align-center">
               <v-chip 
                 :color="getFilterColor()" 
                 size="small" 
@@ -17,9 +33,25 @@
                 {{ activeFilter }}
               </v-chip>
             </div>
+            </div>
           </div>
         </v-col>
       </v-row>
+
+      <!-- Cleanup orphaned confirmation dialog -->
+      <v-dialog v-model="cleanupOrphanedDialog" max-width="420" persistent>
+        <v-card>
+          <v-card-title class="text-subtitle-1 font-weight-bold">Cleanup orphaned vulnerabilities</v-card-title>
+          <v-card-text>
+            Remove vulnerabilities that have no linked components or images (e.g. after deleting images). This will update statistics. This action cannot be undone.
+          </v-card-text>
+          <v-card-actions>
+            <v-spacer></v-spacer>
+            <v-btn variant="text" @click="cleanupOrphanedDialog = false" :disabled="cleanupOrphanedLoading">Cancel</v-btn>
+            <v-btn color="primary" @click="confirmCleanupOrphaned" :loading="cleanupOrphanedLoading">Remove orphaned</v-btn>
+          </v-card-actions>
+        </v-card>
+      </v-dialog>
 
       <v-row>
         <v-col cols="12">
@@ -298,6 +330,10 @@ const typeFilter = ref('')
 const fixableFilter = ref(false)
 const activeFilter = ref('')
 
+// Cleanup orphaned
+const cleanupOrphanedDialog = ref(false)
+const cleanupOrphanedLoading = ref(false)
+
 // Filter options
 const severityOptions = [
   { title: 'Critical', value: 'CRITICAL' },
@@ -326,6 +362,25 @@ const headers = [
   { title: 'Details', key: 'has_details', sortable: false },
   { title: 'Description', key: 'description', sortable: false }
 ] as const
+
+const openCleanupOrphanedDialog = () => {
+  cleanupOrphanedDialog.value = true
+}
+
+const confirmCleanupOrphaned = async () => {
+  cleanupOrphanedLoading.value = true
+  try {
+    const resp = await api.post<{ deleted: number; message: string }>('vulnerabilities/cleanup-orphaned/')
+    const deleted = resp.data?.deleted ?? 0
+    notificationService.success(resp.data?.message ?? `Removed ${deleted} orphaned vulnerability(ies).`)
+    cleanupOrphanedDialog.value = false
+    await fetchVulnerabilities()
+  } catch (e: any) {
+    notificationService.error(e?.response?.data?.error ?? 'Failed to cleanup orphaned vulnerabilities')
+  } finally {
+    cleanupOrphanedLoading.value = false
+  }
+}
 
 // Fetch vulnerabilities with optimized parameters
 const fetchVulnerabilities = async () => {
