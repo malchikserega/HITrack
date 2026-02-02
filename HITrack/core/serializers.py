@@ -657,10 +657,19 @@ class RepositoryTagListSerializer(serializers.ModelSerializer):
 class RepositorySerializer(serializers.ModelSerializer):
     tags = RepositoryTagSerializer(many=True, read_only=True)
     tag_count = serializers.SerializerMethodField()
+    # Write-only: set via partial_update; not stored on model by serializer (view sets M2M)
+    image_fallback_repository_uuids = serializers.ListField(
+        child=serializers.UUIDField(),
+        write_only=True,
+        required=False
+    )
 
     class Meta:
         model = Repository
-        fields = ['uuid', 'name', 'url', 'repository_type', 'tags', 'tag_count', 'created_at', 'updated_at']
+        fields = [
+            'uuid', 'name', 'url', 'repository_type', 'tags', 'tag_count',
+            'image_fallback_repository_uuids', 'created_at', 'updated_at'
+        ]
         read_only_fields = ['created_at', 'updated_at', 'uuid']
 
     @extend_schema_field(serializers.IntegerField())
@@ -673,18 +682,27 @@ class RepositoryDetailSerializer(serializers.ModelSerializer):
     tag_count = serializers.SerializerMethodField()
     scan_status = serializers.CharField(read_only=True)
     last_scanned = serializers.DateTimeField(read_only=True)
+    image_fallback_repositories = serializers.SerializerMethodField()
 
     class Meta:
         model = Repository
         fields = [
-            'uuid', 'name', 'url', 'repository_type', 'tag_count', 
-            'scan_status', 'last_scanned', 'created_at', 'updated_at'
+            'uuid', 'name', 'url', 'repository_type', 'tag_count',
+            'scan_status', 'last_scanned', 'image_fallback_repositories',
+            'created_at', 'updated_at'
         ]
         read_only_fields = ['created_at', 'updated_at', 'uuid']
 
     @extend_schema_field(serializers.IntegerField())
     def get_tag_count(self, obj):
         return obj.tags.count()
+
+    @extend_schema_field(serializers.ListField(child=serializers.DictField()))
+    def get_image_fallback_repositories(self, obj):
+        return [
+            {'uuid': str(r.uuid), 'name': r.name}
+            for r in obj.image_fallback_repositories.all()
+        ]
 
 
 class RepositoryListSerializer(serializers.ModelSerializer):

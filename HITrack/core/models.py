@@ -48,6 +48,14 @@ class Repository(models.Model):
         default='none'
     )
     container_registry = models.ForeignKey('ContainerRegistry', on_delete=models.CASCADE, related_name='repositories', blank=True, null=True, to_field='uuid')
+    # For Helm repos: Docker repos to try when resolving chart image refs fails (bad links in chart).
+    image_fallback_repositories = models.ManyToManyField(
+        'self',
+        symmetrical=False,
+        blank=True,
+        related_name='helm_repos_using_as_fallback',
+        help_text='Docker repositories to use when resolving Helm chart image refs fails.'
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

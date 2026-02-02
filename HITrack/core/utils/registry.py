@@ -20,12 +20,20 @@ def get_bearer_token(registry) -> str:
 
 
 def get_repositories(registry, page_size: int = 100, last_repo: str = None) -> Tuple[list, str]:
-    """List repositories with pagination. For jfrog uses Artifactory REST API (repo keys)."""
+    """
+    List repositories with pagination.
+    For jfrog: returns both Docker and Helm repo keys; each item is (name, url, package_type).
+    For acr: returns (name, url) per repo.
+    """
     token = get_bearer_token(registry)
     if registry.provider == 'jfrog':
         from .artifactory import get_repositories_rest
-        repos = get_repositories_rest(registry.api_url, token, package_type='docker')
-        return (repos, None)
+        docker_repos = get_repositories_rest(registry.api_url, token, package_type='docker')
+        helm_repos = get_repositories_rest(registry.api_url, token, package_type='helm')
+        # Tag each with package_type: (repo_key, repo_url, 'docker'|'helm')
+        combined = [(r[0], r[1], 'docker') for r in docker_repos]
+        combined.extend([(r[0], r[1], 'helm') for r in helm_repos])
+        return (combined, None)
     from .acr import get_repositories as acr_get_repos
     return acr_get_repos(registry.api_url, token, page_size=page_size, last_repo=last_repo)
 
@@ -68,6 +76,27 @@ def get_manifest(registry, repo: str, tag: str, image_name: str = None) -> Tuple
     return acr_get_manifest(registry.api_url, token, repo, tag)
 
 
+def image_ref_repo_key(registry_base_url: str, image_ref: str) -> Optional[str]:
+    """
+    Return the first path segment of image_ref after the registry base (e.g. repo key).
+    E.g. base 'repo.com/artifactory', ref 'repo.com/artifactory/a8n-helm-21-public-local/loyalty-program:1.0'
+    -> 'a8n-helm-21-public-local'. Returns None if base not in ref.
+    """
+    if not registry_base_url or not image_ref:
+        return None
+    base = registry_base_url.strip().rstrip('/')
+    if base.startswith('http://') or base.startswith('https://'):
+        base = base.split('://', 1)[1]
+    if base not in image_ref:
+        return None
+    rest = image_ref.split(base, 1)[-1].lstrip('/')
+    if ':' in rest:
+        rest = rest.rsplit(':', 1)[0]
+    if not rest:
+        return None
+    return rest.split('/')[0]
+
+
 def get_image_digest(registry, image_ref: str) -> Optional[str]:
     """Get image digest from the registry (ACR or Artifactory)."""
     if not registry:
@@ -79,6 +108,27 @@ def get_image_digest(registry, image_ref: str) -> Optional[str]:
     return get_acr_image_digest(registry.api_url, get_bearer_token(registry), image_ref)
 
 
+def build_fallback_image_ref(fallback_repository, image_ref: str) -> Optional[str]:
+    """
+    Build a candidate image ref for a fallback Docker repository from the original ref.
+    image_ref is e.g. 'bad-registry.io/namespace/image:tag'; we use path and tag with fallback repo base.
+    """
+    if not fallback_repository or not fallback_repository.url:
+        return None
+    if ":" in image_ref:
+        path_part, tag = image_ref.rsplit(":", 1)
+    else:
+        path_part, tag = image_ref, "latest"
+    parts = path_part.split("/")
+    path_without_host = "/".join(parts[1:]) if len(parts) > 1 else path_part
+    if not path_without_host:
+        path_without_host = path_part
+    base = fallback_repository.url.strip().rstrip("/")
+    if base.startswith("http://") or base.startswith("https://"):
+        base = base.split("://", 1)[1]
+    return f"{base}/{path_without_host}:{tag}"
+
+
 def get_helm_images(registry, repo: str, digest: str) -> List[str]:
     """Extract image references from a Helm chart blob."""
     token = get_bearer_token(registry)
@@ -88,3 +138,38 @@ def get_helm_images(registry, repo: str, digest: str) -> List[str]:
         return art_get_helm_images(api_url, token, repo, digest)
     from .acr import get_helm_images as acr_get_helm_images
     return acr_get_helm_images(api_url, token, repo, digest)
+
+
+def get_helm_chart_versions(registry, repo_key: str) -> list:
+    """
+    List chart versions from a native Helm repo in Artifactory (index.yaml).
+    Returns list of (version, chart_name) for use in scan_repository_tags.
+    """
+    if registry.provider != 'jfrog':
+        return []
+    from .artifactory import get_helm_index
+    token = get_bearer_token(registry)
+    entries = get_helm_index(registry.api_url, token, repo_key)
+    return [(e["version"], e["chart"]) for e in entries]
+
+
+def get_helm_chart_url(registry, repo_key: str, chart_name: str, version: str) -> Optional[str]:
+    """Get the .tgz URL for a chart version from Artifactory Helm repo index."""
+    if registry.provider != 'jfrog':
+        return None
+    from .artifactory import get_helm_index
+    token = get_bearer_token(registry)
+    entries = get_helm_index(registry.api_url, token, repo_key)
+    for e in entries:
+        if e["chart"] == chart_name and e["version"] == version:
+            return e.get("url")
+    return None
+
+
+def get_helm_images_from_native_chart(registry, chart_url: str) -> List[str]:
+    """Download Helm chart .tgz from URL and extract image refs (for native Helm repos)."""
+    if registry.provider != 'jfrog':
+        return []
+    from .artifactory import get_helm_images_from_native_chart as art_native
+    token = get_bearer_token(registry)
+    return art_native(registry.api_url, token, chart_url)

@@ -465,12 +465,28 @@ def process_all_tags():
     This task can be manually triggered.
     """
     from .models import Repository, RepositoryTag, Image
-    from .utils.registry import get_manifest, is_helm_chart, get_chart_digest, get_helm_images, get_bearer_token, get_image_digest
+    from .utils.registry import (
+        get_manifest,
+        is_helm_chart,
+        get_chart_digest,
+        get_helm_images,
+        get_helm_chart_url,
+        get_helm_images_from_native_chart,
+        get_bearer_token,
+        get_image_digest,
+        build_fallback_image_ref,
+        image_ref_repo_key,
+    )
 
     logger.info("Starting processing of all tags from active repositories")
 
     results = []
-    active_repositories = Repository.objects.filter(status=True).select_related('container_registry')
+    active_repositories = Repository.objects.filter(status=True).select_related(
+        'container_registry'
+    ).prefetch_related(
+        'image_fallback_repositories',
+        'image_fallback_repositories__container_registry',
+    )
     logger.info(f"Found {active_repositories.count()} active repositories")
 
     for repository in active_repositories:
@@ -496,65 +512,86 @@ def process_all_tags():
                     image.repository_tags.add(repo_tag)
                     logger.info(f"{'Created' if created else 'Linked'} Docker image {image_ref}")
                 else:
-                    # For Helm charts, get manifest to extract images and digest
-                    img_name = getattr(repo_tag, 'image_path', None) or None
-                    manifest, digest = get_manifest(registry, repository.name, repo_tag.tag, image_name=img_name)
+                    # For Helm: native Helm (Artifactory) or OCI manifest
+                    image_refs = []
+                    if repository.repository_type == 'helm' and registry.provider == 'jfrog':
+                        chart_name = (getattr(repo_tag, 'image_path', None) or '').strip()
+                        chart_url = get_helm_chart_url(registry, repository.name, chart_name, repo_tag.tag)
+                        if chart_url:
+                            image_refs = get_helm_images_from_native_chart(registry, chart_url)
+                    else:
+                        img_name = getattr(repo_tag, 'image_path', None) or None
+                        manifest, digest = get_manifest(registry, repository.name, repo_tag.tag, image_name=img_name)
+                        if not manifest:
+                            logger.warning(f"Could not get manifest for {repository.name}:{repo_tag.tag}")
+                            continue
+                        if is_helm_chart(manifest):
+                            chart_digest = get_chart_digest(manifest)
+                            if chart_digest:
+                                image_refs = list(get_helm_images(registry, repository.name, chart_digest))
 
-                    if not manifest:
-                        logger.warning(f"Could not get manifest for {repository.name}:{repo_tag.tag}")
-                        continue
-
-                    if is_helm_chart(manifest):
-                        chart_digest = get_chart_digest(manifest)
-                        if chart_digest:
-                            for image_ref in get_helm_images(registry, repository.name, chart_digest):
-                                # Get image digest (ACR or Artifactory)
-                                image_digest = get_image_digest(registry, image_ref) if registry else None
-                                
-                                # Create or get image with proper digest
-                                # image_ref from get_helm_images already contains name:tag, which should be unique
-                                # Use name+digest combination for unique identification when digest is available
-                                # If digest is not available, use name only (since image_ref already contains tag)
-                                artifact_ref = f"{repository.url}:{repo_tag.tag}"
-                                if image_digest:
-                                    # Try to find image by name and digest (same name but different digest = different image)
-                                    image = Image.objects.filter(name=image_ref, digest=image_digest).first()
-                                    if image:
-                                        created = False
-                                    else:
-                                        # Check if image with same name but different digest exists
-                                        existing_image = Image.objects.filter(name=image_ref).exclude(digest=image_digest).first()
-                                        if existing_image:
-                                            # Same name but different digest - create new image
-                                            image = Image.objects.create(
-                                                name=image_ref,
-                                                digest=image_digest,
-                                                artifact_reference=artifact_ref
-                                            )
-                                            created = True
-                                        else:
-                                            # No existing image with this name, create new one
-                                            image = Image.objects.create(
-                                                name=image_ref,
-                                                digest=image_digest,
-                                                artifact_reference=artifact_ref
-                                            )
-                                            created = True
-                                else:
-                                    # If no digest, use name only (image_ref already contains name:tag which is unique)
-                                    # But check if image already exists with this name
-                                    image = Image.objects.filter(name=image_ref).first()
-                                    if image:
-                                        created = False
-                                    else:
-                                        image = Image.objects.create(
-                                            name=image_ref,
-                                            digest=None,
-                                            artifact_reference=artifact_ref
+                    for image_ref in image_refs:
+                        # Get image digest; for Helm skip primary when ref doesn't contain registry base or points at Helm repo
+                        image_digest = None
+                        if registry and repository.repository_type == 'helm':
+                            ref_repo_key = image_ref_repo_key(registry.api_url or '', image_ref)
+                            if ref_repo_key == repository.name:
+                                pass
+                            elif ref_repo_key is not None:
+                                image_digest = get_image_digest(registry, image_ref)
+                        elif registry:
+                            image_digest = get_image_digest(registry, image_ref)
+                        if image_digest is None and repository.repository_type == 'helm':
+                            for fb_repo in repository.image_fallback_repositories.filter(
+                                repository_type='docker',
+                                container_registry__isnull=False
+                            ).select_related('container_registry'):
+                                if not fb_repo.container_registry:
+                                    continue
+                                candidate_ref = build_fallback_image_ref(fb_repo, image_ref)
+                                if candidate_ref:
+                                    image_digest = get_image_digest(fb_repo.container_registry, candidate_ref)
+                                    if image_digest:
+                                        logger.info(
+                                            "Resolved Helm image %s via fallback repo %s as %s",
+                                            image_ref, fb_repo.name, candidate_ref
                                         )
-                                        created = True
-                                image.repository_tags.add(repo_tag)
-                                logger.info(f"{'Created' if created else 'Linked'} Helm image {image_ref} with digest {image_digest}")
+                                        break
+                        # Create or get image with proper digest
+                        artifact_ref = f"{repository.url}:{repo_tag.tag}"
+                        if image_digest:
+                            image = Image.objects.filter(name=image_ref, digest=image_digest).first()
+                            if image:
+                                created = False
+                            else:
+                                existing_image = Image.objects.filter(name=image_ref).exclude(digest=image_digest).first()
+                                if existing_image:
+                                    image = Image.objects.create(
+                                        name=image_ref,
+                                        digest=image_digest,
+                                        artifact_reference=artifact_ref
+                                    )
+                                    created = True
+                                else:
+                                    image = Image.objects.create(
+                                        name=image_ref,
+                                        digest=image_digest,
+                                        artifact_reference=artifact_ref
+                                    )
+                                    created = True
+                        else:
+                            image = Image.objects.filter(name=image_ref).first()
+                            if image:
+                                created = False
+                            else:
+                                image = Image.objects.create(
+                                    name=image_ref,
+                                    digest=None,
+                                    artifact_reference=artifact_ref
+                                )
+                                created = True
+                        image.repository_tags.add(repo_tag)
+                        logger.info(f"{'Created' if created else 'Linked'} Helm image {image_ref} with digest {image_digest}")
 
                 processed_tags.append(repo_tag.tag)
 
@@ -1589,7 +1626,13 @@ def scan_repository_tags(repository_uuid: str, latest_only: bool = False):
     When latest_only=True, only one tag per image is collected (highest version by number).
     """
     from .models import Repository, RepositoryTag, ContainerRegistry
-    from .utils.registry import get_tags, get_catalog, get_manifest, is_helm_chart
+    from .utils.registry import (
+        get_tags,
+        get_catalog,
+        get_manifest,
+        get_helm_chart_versions,
+        is_helm_chart,
+    )
     from datetime import datetime
 
     logger.info(f"Starting repository tags scan for repository {repository_uuid} (latest_only={latest_only})")
@@ -1611,31 +1654,50 @@ def scan_repository_tags(repository_uuid: str, latest_only: bool = False):
 
         all_tag_tuples = []  # (tag_name, image_path or None)
         if registry.provider == 'jfrog':
-            # Artifactory repo key: list images from catalog, then tags per image
-            try:
-                image_names, _ = get_catalog(registry, repository.name, page_size=500)
-            except Exception as e:
-                logger.error(f"Failed to get catalog for {repository.name}: {e}")
-                repository.scan_status = 'error'
-                repository.save()
-                return
-            if latest_only:
-                image_names = image_names[:SCAN_LATEST_ONLY_MAX_IMAGES]
-            logger.info(f"Found {len(image_names)} images in Artifactory repo {repository.name}" + (" (latest_only)" if latest_only else ""))
-            for image_name in image_names:
+            if repository.repository_type == 'helm':
+                # Native Helm repo: list chart versions from index.yaml
                 try:
-                    tags = list(get_tags(registry, repository.name, limit=100 if not latest_only else 50, image_name=image_name))
-                    if latest_only and tags:
-                        chosen = _pick_latest_tag_by_version(tags)
-                        all_tag_tuples.append((chosen, image_name))
-                    else:
-                        for tag_name in tags:
-                            all_tag_tuples.append((tag_name, image_name))
+                    helm_entries = get_helm_chart_versions(registry, repository.name)
                 except Exception as e:
-                    logger.warning(f"Failed to get tags for image {image_name}: {e}")
-            if all_tag_tuples and repository.repository_type in ('none', 'Unknown'):
-                repository.repository_type = 'docker'
-                repository.save()
+                    logger.error(f"Failed to get Helm index for {repository.name}: {e}")
+                    repository.scan_status = 'error'
+                    repository.save()
+                    return
+                if latest_only and helm_entries:
+                    # One tag per chart: pick highest version by chart name
+                    by_chart = {}
+                    for ver, chart in helm_entries:
+                        if chart not in by_chart or _version_sort_key(ver) > _version_sort_key(by_chart[chart]):
+                            by_chart[chart] = ver
+                    helm_entries = [(by_chart[c], c) for c in by_chart]
+                all_tag_tuples = [(ver, chart) for ver, chart in helm_entries]
+                logger.info(f"Found {len(all_tag_tuples)} Helm chart versions in {repository.name}" + (" (latest_only)" if latest_only else ""))
+            else:
+                # Docker/OCI repo: list images from catalog, then tags per image
+                try:
+                    image_names, _ = get_catalog(registry, repository.name, page_size=500)
+                except Exception as e:
+                    logger.error(f"Failed to get catalog for {repository.name}: {e}")
+                    repository.scan_status = 'error'
+                    repository.save()
+                    return
+                if latest_only:
+                    image_names = image_names[:SCAN_LATEST_ONLY_MAX_IMAGES]
+                logger.info(f"Found {len(image_names)} images in Artifactory repo {repository.name}" + (" (latest_only)" if latest_only else ""))
+                for image_name in image_names:
+                    try:
+                        tags = list(get_tags(registry, repository.name, limit=100 if not latest_only else 50, image_name=image_name))
+                        if latest_only and tags:
+                            chosen = _pick_latest_tag_by_version(tags)
+                            all_tag_tuples.append((chosen, image_name))
+                        else:
+                            for tag_name in tags:
+                                all_tag_tuples.append((tag_name, image_name))
+                    except Exception as e:
+                        logger.warning(f"Failed to get tags for image {image_name}: {e}")
+                if all_tag_tuples and repository.repository_type in ('none', 'Unknown'):
+                    repository.repository_type = 'docker'
+                    repository.save()
         else:
             # ACR or single-image: tags for this repository name
             all_tags = list(get_tags(registry, repository.name, limit=500))
@@ -1662,14 +1724,16 @@ def scan_repository_tags(repository_uuid: str, latest_only: bool = False):
                 image_path_val = (image_path or '').strip()
                 if not RepositoryTag.objects.filter(repository=repository, tag=tag_name, image_path=image_path_val).exists():
                     digest = ''
-                    if registry.provider != 'jfrog' or not image_path_val:
-                        manifest, d = get_manifest(registry, repository.name, tag_name)
-                        if d:
-                            digest = (d or '').replace('sha256:', '')
-                    else:
-                        manifest, d = get_manifest(registry, repository.name, tag_name, image_name=image_path_val)
-                        if d:
-                            digest = (d or '').replace('sha256:', '')
+                    # Native Helm repos (packageType=helm) have no Docker manifest; skip digest
+                    if not (repository.repository_type == 'helm' and registry.provider == 'jfrog'):
+                        if registry.provider != 'jfrog' or not image_path_val:
+                            manifest, d = get_manifest(registry, repository.name, tag_name)
+                            if d:
+                                digest = (d or '').replace('sha256:', '')
+                        else:
+                            manifest, d = get_manifest(registry, repository.name, tag_name, image_name=image_path_val)
+                            if d:
+                                digest = (d or '').replace('sha256:', '')
                     rt = RepositoryTag.objects.create(
                         repository=repository,
                         tag=tag_name,
@@ -1772,13 +1836,29 @@ def process_single_tag(tag_uuid: str):
     After processing, trigger SBOM scan for all images linked to this tag.
     """
     from .models import RepositoryTag, Image
-    from .utils.registry import get_manifest, is_helm_chart, get_chart_digest, get_helm_images, get_bearer_token, get_image_digest
+    from .utils.registry import (
+        get_manifest,
+        is_helm_chart,
+        get_chart_digest,
+        get_helm_images,
+        get_helm_chart_url,
+        get_helm_images_from_native_chart,
+        get_bearer_token,
+        get_image_digest,
+        build_fallback_image_ref,
+        image_ref_repo_key,
+    )
     from .tasks import generate_sbom_and_create_components
 
     logger.info(f"Starting processing of tag {tag_uuid}")
 
     try:
-        tag = RepositoryTag.objects.select_related('repository', 'repository__container_registry').get(uuid=tag_uuid)
+        tag = RepositoryTag.objects.select_related(
+            'repository', 'repository__container_registry'
+        ).prefetch_related(
+            'repository__image_fallback_repositories',
+            'repository__image_fallback_repositories__container_registry',
+        ).get(uuid=tag_uuid)
         # Set status to in_process
         tag.processing_status = 'in_process'
         tag.save()
@@ -1798,67 +1878,99 @@ def process_single_tag(tag_uuid: str):
             image.repository_tags.add(tag)
             logger.info(f"{'Created' if created else 'Linked'} Docker image {image_ref}")
         else:
-            # For Helm charts, get manifest to extract images and digest
-            img_name = getattr(tag, 'image_path', None) or None
-            manifest, digest = get_manifest(registry, repository.name, tag.tag, image_name=img_name)
+            # For Helm charts: native Helm (Artifactory index.yaml) or OCI manifest (Docker/ACR)
+            image_refs = []
+            chart_digest = None
 
-            if not manifest:
-                logger.warning(f"Could not get manifest for {repository.name}:{tag.tag}")
-                tag.processing_status = 'error'
-                tag.save()
-                return
+            if repository.repository_type == 'helm' and registry.provider == 'jfrog':
+                # Native Helm repo: do not call get_manifest (Helm repos don't expose Docker API).
+                chart_name = (getattr(tag, 'image_path', None) or '').strip()
+                chart_url = get_helm_chart_url(registry, repository.name, chart_name, tag.tag)
+                if chart_url:
+                    image_refs = get_helm_images_from_native_chart(registry, chart_url)
+                else:
+                    logger.warning(f"Could not get chart URL for {repository.name} {chart_name}@{tag.tag}")
+            else:
+                img_name = getattr(tag, 'image_path', None) or None
+                manifest, digest = get_manifest(registry, repository.name, tag.tag, image_name=img_name)
+                if manifest and is_helm_chart(manifest):
+                    chart_digest = get_chart_digest(manifest)
+                    if chart_digest:
+                        image_refs = list(get_helm_images(registry, repository.name, chart_digest))
+                elif not manifest:
+                    logger.warning(f"Could not get manifest for {repository.name}:{tag.tag}")
+                    tag.processing_status = 'error'
+                    tag.save()
+                    return
 
-            if is_helm_chart(manifest):
-                chart_digest = get_chart_digest(manifest)
-                if chart_digest:
-                    for image_ref in get_helm_images(registry, repository.name, chart_digest):
-                        # Get image digest (ACR or Artifactory)
-                        image_digest = get_image_digest(registry, image_ref) if registry else None
-                        
-                        # Create or get image with proper digest
-                        # image_ref from get_helm_images already contains name:tag, which should be unique
-                        # Use name+digest combination for unique identification when digest is available
-                        # If digest is not available, use name only (since image_ref already contains tag)
-                        artifact_ref = f"{repository.url}:{tag.tag}"
-                        if image_digest:
-                            # Try to find image by name and digest (same name but different digest = different image)
-                            image = Image.objects.filter(name=image_ref, digest=image_digest).first()
-                            if image:
-                                created = False
-                            else:
-                                # Check if image with same name but different digest exists
-                                existing_image = Image.objects.filter(name=image_ref).exclude(digest=image_digest).first()
-                                if existing_image:
-                                    # Same name but different digest - create new image
-                                    image = Image.objects.create(
-                                        name=image_ref,
-                                        digest=image_digest,
-                                        artifact_reference=artifact_ref
-                                    )
-                                    created = True
-                                else:
-                                    # No existing image with this name, create new one
-                                    image = Image.objects.create(
-                                        name=image_ref,
-                                        digest=image_digest,
-                                        artifact_reference=artifact_ref
-                                    )
-                                    created = True
-                        else:
-                            # If no digest, use name only (image_ref already contains name:tag which is unique)
-                            # But check if image already exists with this name
-                            image = Image.objects.filter(name=image_ref).first()
-                            if image:
-                                created = False
-                            else:
-                                image = Image.objects.create(
-                                    name=image_ref,
-                                    digest=None,
-                                    artifact_reference=artifact_ref
+            for image_ref in image_refs:
+                # Get image digest (ACR or Artifactory). For Helm: skip primary when ref doesn't
+                # contain our registry base (e.g. a8n-docker.repo.com.int.zone/...) or when ref
+                # points at this Helm repo (Helm repos don't expose Docker API).
+                image_digest = None
+                if registry and repository.repository_type == 'helm':
+                    ref_repo_key = image_ref_repo_key(registry.api_url or '', image_ref)
+                    if ref_repo_key == repository.name:
+                        pass  # ref points at Helm repo; use fallback only
+                    elif ref_repo_key is not None:
+                        # ref contains our registry base (e.g. repo.com/artifactory/docker-repo/...); try primary
+                        image_digest = get_image_digest(registry, image_ref)
+                    # else: ref is different host (e.g. a8n-docker.repo.com.int.zone/...); skip primary, use fallback
+                elif registry:
+                    image_digest = get_image_digest(registry, image_ref)
+                if image_digest is None and repository.repository_type == 'helm':
+                    fallback_repos = list(
+                        repository.image_fallback_repositories.filter(
+                            repository_type='docker',
+                            container_registry__isnull=False
+                        ).select_related('container_registry')
+                    )
+                    for fb_repo in fallback_repos:
+                        if not fb_repo.container_registry:
+                            continue
+                        candidate_ref = build_fallback_image_ref(fb_repo, image_ref)
+                        if candidate_ref:
+                            image_digest = get_image_digest(fb_repo.container_registry, candidate_ref)
+                            if image_digest:
+                                logger.info(
+                                    "Resolved Helm image %s via fallback repo %s as %s",
+                                    image_ref, fb_repo.name, candidate_ref
                                 )
-                                created = True
-                        image.repository_tags.add(tag)
-                        logger.info(f"{'Created' if created else 'Linked'} Helm image {image_ref} with digest {image_digest}")
+                                break
+                artifact_ref = f"{repository.url}:{tag.tag}"
+                if image_digest:
+                    image = Image.objects.filter(name=image_ref, digest=image_digest).first()
+                    if image:
+                        created = False
+                    else:
+                        existing_image = Image.objects.filter(name=image_ref).exclude(digest=image_digest).first()
+                        if existing_image:
+                            image = Image.objects.create(
+                                name=image_ref,
+                                digest=image_digest,
+                                artifact_reference=artifact_ref
+                            )
+                            created = True
+                        else:
+                            image = Image.objects.create(
+                                name=image_ref,
+                                digest=image_digest,
+                                artifact_reference=artifact_ref
+                            )
+                            created = True
+                else:
+                    image = Image.objects.filter(name=image_ref).first()
+                    if image:
+                        created = False
+                    else:
+                        image = Image.objects.create(
+                            name=image_ref,
+                            digest=None,
+                            artifact_reference=artifact_ref
+                        )
+                        created = True
+                image.repository_tags.add(tag)
+                logger.info(f"{'Created' if created else 'Linked'} Helm image {image_ref} with digest {image_digest}")
 
         # Set status to success
         tag.processing_status = 'success'

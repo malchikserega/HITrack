@@ -13,10 +13,11 @@ import logging
 import re
 import subprocess
 import tempfile
-from typing import Generator, List, Optional, Tuple
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
 # Third-party imports
 import requests
+import yaml
 
 # Configure logging
 logging.basicConfig(
@@ -324,6 +325,118 @@ def get_chart_digest(manifest: dict) -> Optional[str]:
     return None
 
 
+def get_helm_index(api_url: str, token: str, repo_key: str) -> List[Dict[str, Any]]:
+    """
+    Fetch index.yaml from a native Helm repository in Artifactory and return
+    chart version entries. Used when repository_type is 'helm' (packageType=helm).
+
+    Args:
+        api_url: Artifactory base URL (e.g. https://repo.example.com/artifactory)
+        token: Basic auth token
+        repo_key: Helm repo key (e.g. helm-local)
+
+    Returns:
+        List of {"chart": chart_name, "version": version, "url": full_tgz_url}.
+        URL is normalized to a full URL for downloading the chart.
+    """
+    base = _normalize_base_url(api_url)
+    index_url = f"{base}/{repo_key}/index.yaml"
+    headers = _auth_headers(token)
+    try:
+        response = requests.get(index_url, headers=headers, timeout=30)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        logger.warning("Failed to fetch Helm index for %s: %s", repo_key, e)
+        return []
+
+    try:
+        data = yaml.safe_load(response.text)
+    except yaml.YAMLError as e:
+        logger.warning("Invalid YAML in Helm index for %s: %s", repo_key, e)
+        return []
+
+    if not data or not isinstance(data.get("entries"), dict):
+        return []
+
+    result = []
+    repo_base = f"{base}/{repo_key}".rstrip("/")
+    for chart_name, versions in data["entries"].items():
+        if not isinstance(versions, list):
+            continue
+        for entry in versions:
+            if not isinstance(entry, dict):
+                continue
+            version = entry.get("version")
+            urls = entry.get("urls") or entry.get("url")
+            if not version:
+                continue
+            if isinstance(urls, list) and urls:
+                url_path = urls[0]
+            elif isinstance(urls, str):
+                url_path = urls
+            else:
+                continue
+            if url_path.startswith("http://") or url_path.startswith("https://"):
+                full_url = url_path
+            else:
+                # Artifactory index may use local://path/to/chart.tgz; strip scheme to get repo-relative path
+                if url_path.lower().startswith("local://"):
+                    url_path = url_path[7:].lstrip("/")
+                full_url = f"{repo_base}/{url_path.lstrip('/')}"
+            result.append({"chart": chart_name, "version": version, "url": full_url})
+    return result
+
+
+def get_helm_images_from_native_chart(
+    api_url: str, token: str, chart_url: str
+) -> List[str]:
+    """
+    Download a Helm chart .tgz from the given URL and extract image references
+    using helm template. Used for native Helm repos (not OCI).
+
+    Args:
+        api_url: Unused; kept for signature consistency
+        token: Basic auth token (for authenticated download)
+        chart_url: Full URL to the chart .tgz file
+
+    Returns:
+        List of image references (name:tag) found in the chart templates.
+    """
+    del api_url  # chart_url is already full
+    headers = _auth_headers(token)
+    try:
+        response = requests.get(chart_url, headers=headers, timeout=60)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        logger.error("Failed to download Helm chart from %s: %s", chart_url, e)
+        return []
+
+    fname = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".tgz", delete=False) as f:
+            f.write(response.content)
+            f.flush()
+            fname = f.name
+        rendered = subprocess.run(
+            ["helm", "template", "scan", fname, "--skip-tests"],
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=120,
+        ).stdout
+        return sorted(set(IMG_RE.findall(rendered)))
+    except (subprocess.SubprocessError, OSError) as e:
+        logger.error("Failed to run helm template on chart %s: %s", chart_url, e)
+        return []
+    finally:
+        import os
+        if fname and os.path.exists(fname):
+            try:
+                os.unlink(fname)
+            except Exception:
+                pass
+
+
 def get_helm_images(api_url: str, token: str, repo: str, digest: str) -> List[str]:
     """
     Extract container image references from a Helm chart blob.
@@ -360,35 +473,41 @@ def get_helm_images(api_url: str, token: str, repo: str, digest: str) -> List[st
 def get_artifactory_image_digest(registry_url: str, token: str, image_ref: str) -> Optional[str]:
     """
     Get image digest from Artifactory Docker registry.
+    Artifactory Docker API is at /api/docker/<repo-key>/v2/<image>/manifests/<tag>.
     Falls back to Docker inspect if API fails (e.g. for public pulls).
 
     Args:
-        registry_url: Artifactory registry base URL
+        registry_url: Artifactory registry base URL (e.g. https://repo.com.int.zone/artifactory)
         token: Basic auth token (base64 login:password)
-        image_ref: Full image reference (e.g. 'company.jfrog.io/docker-local/myimage:tag')
+        image_ref: Full image reference (e.g. 'repo.com.int.zone/artifactory/a8n-docker-local/a8n-db:21.0.192')
 
     Returns:
         str: Image digest or None if not found
     """
     try:
         registry = registry_url.split('://')[-1].rstrip('/') if '://' in registry_url else registry_url.rstrip('/')
-        # image_ref may be "host/path/image:tag" or "host/repo/image:tag"
         if registry not in image_ref:
             logger.warning(f"Registry {registry} not in image_ref {image_ref}")
             return None
         rest = image_ref.split(registry, 1)[-1].lstrip('/')
         if ':' not in rest:
             return None
-        repository, tag = rest.rsplit(':', 1)
+        path_part, tag = rest.rsplit(':', 1)
+        parts = path_part.split('/')
+        if not parts:
+            return None
+        # First segment is Docker repo key (e.g. a8n-docker-local), rest is image path (e.g. a8n-db)
+        repo_key = parts[0]
+        image_name = '/'.join(parts[1:]) if len(parts) > 1 else parts[0]
 
         headers = {
             **_auth_headers(token),
             'Accept': 'application/vnd.docker.distribution.manifest.v2+json'
         }
-        base = _normalize_base_url(registry_url)
-        if not base.startswith('http'):
-            base = 'https://' + base
-        url = f"{base}/v2/{repository}/manifests/{tag}"
+        docker_base = _docker_api_base(registry_url, repo_key)
+        if not docker_base.startswith('http'):
+            docker_base = 'https://' + docker_base
+        url = f"{docker_base}/v2/{image_name}/manifests/{tag}"
         response = requests.get(url, headers=headers)
         response.raise_for_status()
 

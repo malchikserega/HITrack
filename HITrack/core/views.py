@@ -47,7 +47,7 @@ class BaseViewSet(viewsets.ModelViewSet):
 
 class RepositoryViewSet(BaseViewSet):
     queryset = Repository.objects.all()
-    filterset_fields = ['name']
+    filterset_fields = ['name', 'repository_type']
     search_fields = ['name', 'url']
     ordering_fields = ['name', 'created_at', 'updated_at']
 
@@ -57,6 +57,26 @@ class RepositoryViewSet(BaseViewSet):
         elif self.action == 'retrieve':
             return RepositoryDetailSerializer
         return RepositorySerializer
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if self.action == 'retrieve':
+            qs = qs.prefetch_related('image_fallback_repositories')
+        return qs
+
+    def partial_update(self, request, *args, **kwargs):
+        """Allow updating image_fallback_repository_uuids (for Helm repos)."""
+        instance = self.get_object()
+        uuids = request.data.get('image_fallback_repository_uuids')
+        if uuids is not None:
+            if not isinstance(uuids, list):
+                return Response(
+                    {'image_fallback_repository_uuids': 'Must be a list of repository UUIDs.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            valid = Repository.objects.filter(uuid__in=uuids, repository_type='docker').values_list('uuid', flat=True)
+            instance.image_fallback_repositories.set(valid)
+        return super().partial_update(request, *args, **kwargs)
 
     @action(detail=True, methods=['get'])
     def tags(self, request, uuid=None):
@@ -289,7 +309,8 @@ class RepositoryViewSet(BaseViewSet):
                 "repositories": [
                     {
                         "name": repo[0],
-                        "url": repo[1]
+                        "url": repo[1],
+                        **({"package_type": repo[2]} if len(repo) >= 3 else {})
                     }
                     for repo in repos
                 ],
@@ -1796,12 +1817,16 @@ class JobViewSet(viewsets.ViewSet):
 
             results = []
             for repo_data in repositories:
+                # Use repository_type from payload (e.g. docker/helm from JFrog) or default 'none'
+                repo_type = repo_data.get('repository_type') or repo_data.get('package_type') or 'none'
+                if repo_type not in ('docker', 'helm', 'none', 'Unknown'):
+                    repo_type = 'none'
                 repository, created = Repository.objects.get_or_create(
                     url=repo_data['repository_url'],
                     name=repo_data['repository_name'],
                     defaults={
                         'status': True,
-                        'repository_type': 'none',
+                        'repository_type': repo_type,
                         'container_registry': registry
                     }
                 )

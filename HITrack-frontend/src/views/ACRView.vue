@@ -105,6 +105,16 @@
                           <v-list-item-title class="text-subtitle-1 font-weight-medium">
                             {{ repo.name }}
                             <v-chip
+                              v-if="repo.package_type"
+                              size="x-small"
+                              :color="repo.package_type === 'helm' ? 'purple-lighten-1' : 'light-blue-lighten-1'"
+                              variant="tonal"
+                              class="ml-2"
+                              density="compact"
+                            >
+                              {{ repo.package_type === 'helm' ? 'Helm' : 'Docker' }}
+                            </v-chip>
+                            <v-chip
                               size="x-small"
                               color="light-blue-lighten-1"
                               variant="outlined"
@@ -354,7 +364,8 @@ const submitJob = async () => {
     const jobData = selectedRepositories.value
       .map((repo: any) => ({
         repository_url: repo.url,
-        repository_name: repo.name
+        repository_name: repo.name,
+        ...(repo.package_type ? { repository_type: repo.package_type } : {})
       }))
 
     const response = await api.post('jobs/add-repositories/', {

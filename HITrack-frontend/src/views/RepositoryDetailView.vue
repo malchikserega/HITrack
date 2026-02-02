@@ -18,6 +18,43 @@
           <v-chip class="mr-2">Tags: {{ repository?.tag_count }}</v-chip>
           <v-chip class="mr-2">URL: {{ repository?.url }}</v-chip>
         </div>
+        <!-- Helm: Image fallback Docker repositories (when chart image refs fail) -->
+        <v-row v-if="repository?.repository_type === 'helm'" class="mt-4">
+          <v-col cols="12">
+            <v-card variant="outlined" class="pa-4">
+              <v-card-title class="text-subtitle-1 font-weight-bold pb-2">
+                Image fallback repositories
+              </v-card-title>
+              <v-card-subtitle class="text-caption pb-3">
+                When chart image refs fail to resolve, try these Docker repositories to download the same image.
+              </v-card-subtitle>
+              <v-select
+                v-model="selectedFallbackRepoUuids"
+                :items="dockerReposForFallback"
+                item-title="name"
+                item-value="uuid"
+                label="Docker repositories"
+                multiple
+                chips
+                closable-chips
+                density="comfortable"
+                variant="outlined"
+                hide-details
+                class="mb-3"
+                :loading="dockerReposLoading"
+              />
+              <v-btn
+                color="primary"
+                size="small"
+                :loading="savingFallback"
+                :disabled="savingFallback || fallbackUnchanged"
+                @click="saveFallbackRepositories"
+              >
+                Save fallback list
+              </v-btn>
+            </v-card>
+          </v-col>
+        </v-row>
       </v-col>
     </v-row>
     <v-row>
@@ -436,6 +473,11 @@ const showDeleteDialog = ref(false)
 const tagToDelete = ref<any>(null)
 const scanning = ref(false)
 const showScanDialog = ref(false)
+// Helm: image fallback Docker repositories
+const dockerReposForFallback = ref<{ uuid: string; name: string }[]>([])
+const dockerReposLoading = ref(false)
+const selectedFallbackRepoUuids = ref<string[]>([])
+const savingFallback = ref(false)
 
 const tagNameRules = [
   (v: string) => !!v || 'Tag name is required',
@@ -709,9 +751,47 @@ const fetchRepository = async () => {
   try {
     const resp = await api.get(`repositories/${route.params.uuid}/`)
     repository.value = resp.data
+    if (resp.data?.repository_type === 'helm') {
+      selectedFallbackRepoUuids.value = (resp.data.image_fallback_repositories || []).map((r: { uuid: string }) => r.uuid)
+      loadDockerRepos()
+    }
   } finally {
     repositoryLoading.value = false
     loading.value = false
+  }
+}
+
+const loadDockerRepos = async () => {
+  dockerReposLoading.value = true
+  try {
+    const resp = await api.get('repositories/', { params: { repository_type: 'docker', page_size: 500 } })
+    dockerReposForFallback.value = (resp.data?.results || resp.data || []).map((r: any) => ({ uuid: r.uuid, name: r.name }))
+  } catch (e: any) {
+    notificationService.error(e?.response?.data?.error || 'Failed to load Docker repositories')
+  } finally {
+    dockerReposLoading.value = false
+  }
+}
+
+const fallbackUnchanged = computed(() => {
+  const current = (repository.value?.image_fallback_repositories || []).map((r: { uuid: string }) => r.uuid).sort().join(',')
+  const selected = [...selectedFallbackRepoUuids.value].sort().join(',')
+  return current === selected
+})
+
+const saveFallbackRepositories = async () => {
+  if (!repository.value?.uuid) return
+  savingFallback.value = true
+  try {
+    await api.patch(`repositories/${repository.value.uuid}/`, {
+      image_fallback_repository_uuids: selectedFallbackRepoUuids.value
+    })
+    notificationService.success('Fallback repositories saved')
+    await fetchRepository()
+  } catch (e: any) {
+    notificationService.error(e?.response?.data?.error || 'Failed to save fallback list')
+  } finally {
+    savingFallback.value = false
   }
 }
 
