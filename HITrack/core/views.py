@@ -20,7 +20,7 @@ from .serializers import (
 )
 from django.db import models
 from .pagination import CustomPageNumberPagination
-from django.db.models import Q, Count, Prefetch, Case, When, BooleanField
+from django.db.models import Q, Count, Prefetch, Case, When, Value, BooleanField, IntegerField
 from django.utils import timezone
 from datetime import timedelta, datetime
 from io import BytesIO
@@ -1394,6 +1394,29 @@ class VulnerabilityViewSet(BaseViewSet):
                 )
         
         return queryset
+
+    def filter_queryset(self, queryset):
+        ordering = self.request.query_params.get('ordering')
+        if ordering in ('severity', '-severity'):
+            # Apply filter and search backends first (skip OrderingFilter)
+            for backend in self.filter_backends:
+                if backend == filters.OrderingFilter:
+                    continue
+                queryset = backend().filter_queryset(self.request, queryset, self)
+            # Custom severity order: Critical=0, High=1, Medium=2, Low=3, Unknown=4 (not alphabetical)
+            severity_order = Case(
+                When(severity='CRITICAL', then=Value(0)),
+                When(severity='HIGH', then=Value(1)),
+                When(severity='MEDIUM', then=Value(2)),
+                When(severity='LOW', then=Value(3)),
+                When(severity='UNKNOWN', then=Value(4)),
+                default=Value(5),
+                output_field=IntegerField()
+            )
+            queryset = queryset.annotate(_severity_order=severity_order)
+            queryset = queryset.order_by('-_severity_order' if ordering == '-severity' else '_severity_order')
+            return queryset
+        return super().filter_queryset(queryset)
 
     def get_serializer_class(self):
         if self.action == 'list':

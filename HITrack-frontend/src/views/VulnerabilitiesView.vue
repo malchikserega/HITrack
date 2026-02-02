@@ -139,20 +139,21 @@
             </v-card-text>
           </v-card>
 
-          <!-- Vulnerabilities Table -->
+          <!-- Vulnerabilities Table (server-side: sort and pagination are applied on the API) -->
           <v-card>
-            <v-data-table
+            <v-data-table-server
               :headers="headers"
               :items="vulnerabilities"
+              :items-length="total"
               :loading="loading"
               :items-per-page="itemsPerPage"
               :page="currentPage"
-              :sort-by="sortBy"
-              :sort-desc="sortDesc"
+              v-model:sort-by="sortBy"
               hide-default-footer
               class="elevation-1"
               hover
               density="comfortable"
+              @update:options="onTableOptionsUpdate"
               @click:row="onVulnerabilityRowClick"
               :no-data-text="searchQuery ? 'No vulnerabilities found matching your search' : 'No vulnerabilities found'"
             >
@@ -267,7 +268,7 @@
                   </div>
                 </div>
               </template>
-            </v-data-table>
+            </v-data-table-server>
 
             <!-- Pagination -->
             <div class="d-flex align-center justify-end mt-4 gap-4 pa-4">
@@ -304,7 +305,8 @@ import { notificationService } from '../plugins/notifications'
 import { debounce } from '../utils/debounce'
 import { getVulnerabilityTypeColor, getSeverityColor, getEpssColor, getEpssSourceColor, getEpssSourceIcon, getEpssSourceDisplay } from '../utils/colors'
 import type { Vulnerability, PaginatedResponse } from '../types/interfaces'
-import type { DataTableSortItem } from 'vuetify'
+
+interface SortItem { key: string; order: 'asc' | 'desc' }
 
 const router = useRouter()
 const route = useRoute()
@@ -319,9 +321,8 @@ const currentPage = ref(1)
 const itemsPerPage = ref(20)
 const pageCount = computed(() => Math.ceil(total.value / itemsPerPage.value))
 
-// Sorting state
-const sortBy = ref<readonly DataTableSortItem[]>([])
-const sortDesc = ref<boolean[]>([])
+// Sorting state (server-side)
+const sortBy = ref<SortItem[]>([])
 
 // Search and filter state
 const searchQuery = ref('')
@@ -392,11 +393,10 @@ const fetchVulnerabilities = async () => {
       page_size: itemsPerPage.value
     }
 
-    // Add sorting
-    const sortField = sortBy.value[0]
-    const sortDescValue = sortDesc.value[0]
-    if (sortField) {
-      params.ordering = `${sortDescValue ? '-' : ''}${sortField}`
+    // Add sorting (server-side)
+    const s = sortBy.value[0]
+    if (s?.key) {
+      params.ordering = s.order === 'desc' ? `-${s.key}` : s.key
     }
 
     // Add search and filters
@@ -470,6 +470,14 @@ const onItemsPerPageChange = (val: number) => {
   fetchVulnerabilities()
 }
 
+// Server table: when user changes sort/page/itemsPerPage in the table, we refetch
+const onTableOptionsUpdate = (options: { page: number; itemsPerPage: number; sortBy: SortItem[] }) => {
+  currentPage.value = options.page
+  itemsPerPage.value = options.itemsPerPage
+  sortBy.value = options.sortBy?.length ? options.sortBy : []
+  fetchVulnerabilities()
+}
+
 // Helper function to get description with fallback to CVE Details
 const getDescriptionWithFallback = (item: Vulnerability): string => {
   // First try to get the main description
@@ -506,13 +514,8 @@ const onFilterChange = () => {
 
 // Color utilities imported from utils/colors.ts
 
-// Watchers
-watch([
-  currentPage,
-  itemsPerPage,
-  sortBy,
-  sortDesc
-], fetchVulnerabilities)
+// Watchers (pagination controls update page/itemsPerPage and trigger fetch)
+watch([currentPage, itemsPerPage], fetchVulnerabilities)
 
 watch(searchQuery, () => {
   currentPage.value = 1
