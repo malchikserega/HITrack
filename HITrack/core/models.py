@@ -48,6 +48,8 @@ class Repository(models.Model):
         default='none'
     )
     container_registry = models.ForeignKey('ContainerRegistry', on_delete=models.CASCADE, related_name='repositories', blank=True, null=True, to_field='uuid')
+    # For JFrog: the Artifactory repo key (e.g. a8n-docker-local). Empty for ACR.
+    repo_key = models.CharField(max_length=255, blank=True, default='')
     # For Helm repos: Docker repos to try when resolving chart image refs fails (bad links in chart).
     image_fallback_repositories = models.ManyToManyField(
         'self',

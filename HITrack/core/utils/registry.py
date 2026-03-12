@@ -129,6 +129,48 @@ def build_fallback_image_ref(fallback_repository, image_ref: str) -> Optional[st
     return f"{base}/{path_without_host}:{tag}"
 
 
+def get_repo_images(registry, repo_key: str, package_type: str = 'docker') -> list:
+    """
+    List individual images/charts inside a JFrog repo key.
+    Returns list of (full_name, url, package_type, repo_key) tuples where
+    full_name = 'repo_key/image_name'.
+    """
+    if registry.provider != 'jfrog':
+        return []
+    token = get_bearer_token(registry)
+
+    if package_type == 'helm':
+        from .artifactory import get_helm_index
+        entries = get_helm_index(registry.api_url, token, repo_key)
+        seen = set()
+        result = []
+        for e in entries:
+            chart = e["chart"]
+            if chart not in seen:
+                seen.add(chart)
+                base = registry.api_url.rstrip('/')
+                result.append((
+                    f"{repo_key}/{chart}",
+                    f"{base}/{repo_key}/{chart}",
+                    'helm',
+                    repo_key,
+                ))
+        return result
+
+    from .artifactory import get_catalog as art_get_catalog
+    image_names, _ = art_get_catalog(registry.api_url, token, repo_key, page_size=1000)
+    base = registry.api_url.rstrip('/')
+    return [
+        (
+            f"{repo_key}/{img}",
+            f"{base}/{repo_key}/{img}",
+            'docker',
+            repo_key,
+        )
+        for img in image_names
+    ]
+
+
 def get_helm_images(registry, repo: str, digest: str) -> List[str]:
     """Extract image references from a Helm chart blob."""
     token = get_bearer_token(registry)

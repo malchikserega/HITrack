@@ -595,10 +595,11 @@ class RepositoryTagListSerializer(serializers.ModelSerializer):
     findings = serializers.SerializerMethodField()
     components = serializers.SerializerMethodField()
     releases = serializers.SerializerMethodField()
+    image_names = serializers.SerializerMethodField()
 
     class Meta:
         model = RepositoryTag
-        fields = ['uuid', 'tag', 'created_at', 'updated_at', 'processing_status', 'findings', 'components', 'releases']
+        fields = ['uuid', 'tag', 'image_path', 'image_names', 'created_at', 'updated_at', 'processing_status', 'findings', 'components', 'releases']
         read_only_fields = ['created_at', 'updated_at', 'uuid']
 
     @extend_schema_field(serializers.IntegerField())
@@ -636,6 +637,17 @@ class RepositoryTagListSerializer(serializers.ModelSerializer):
         
         return total_components
 
+    @extend_schema_field(serializers.ListField(child=serializers.CharField()))
+    def get_image_names(self, obj):
+        """Distinct image names (Image.name) for this tag; use prefetched images to avoid N+1."""
+        names = []
+        seen = set()
+        for image in obj.images.all():
+            if image.name and image.name not in seen:
+                seen.add(image.name)
+                names.append(image.name)
+        return names
+
     def get_releases(self, obj):
         releases = []
         # Use prefetched releases if available
@@ -667,7 +679,7 @@ class RepositorySerializer(serializers.ModelSerializer):
     class Meta:
         model = Repository
         fields = [
-            'uuid', 'name', 'url', 'repository_type', 'tags', 'tag_count',
+            'uuid', 'name', 'url', 'repo_key', 'repository_type', 'tags', 'tag_count',
             'image_fallback_repository_uuids', 'created_at', 'updated_at'
         ]
         read_only_fields = ['created_at', 'updated_at', 'uuid']
@@ -687,7 +699,7 @@ class RepositoryDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = Repository
         fields = [
-            'uuid', 'name', 'url', 'repository_type', 'tag_count',
+            'uuid', 'name', 'url', 'repo_key', 'repository_type', 'tag_count',
             'scan_status', 'last_scanned', 'image_fallback_repositories',
             'created_at', 'updated_at'
         ]
@@ -710,7 +722,7 @@ class RepositoryListSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Repository
-        fields = ['uuid', 'name', 'url', 'repository_type', 'tag_count', 'created_at', 'updated_at']
+        fields = ['uuid', 'name', 'url', 'repo_key', 'repository_type', 'scan_status', 'tag_count', 'created_at', 'updated_at']
         read_only_fields = ['uuid', 'created_at', 'updated_at']
 
     @extend_schema_field(serializers.IntegerField())

@@ -515,13 +515,23 @@ def process_all_tags():
                     # For Helm: native Helm (Artifactory) or OCI manifest
                     image_refs = []
                     if repository.repository_type == 'helm' and registry.provider == 'jfrog':
-                        chart_name = (getattr(repo_tag, 'image_path', None) or '').strip()
-                        chart_url = get_helm_chart_url(registry, repository.name, chart_name, repo_tag.tag)
+                        if repository.repo_key:
+                            rk = repository.repo_key
+                            chart_name = repository.name[len(rk) + 1:] if repository.name.startswith(rk + '/') else repository.name
+                        else:
+                            chart_name = (getattr(repo_tag, 'image_path', None) or '').strip()
+                        helm_repo_key = repository.repo_key or repository.name
+                        chart_url = get_helm_chart_url(registry, helm_repo_key, chart_name, repo_tag.tag)
                         if chart_url:
                             image_refs = get_helm_images_from_native_chart(registry, chart_url)
                     else:
-                        img_name = getattr(repo_tag, 'image_path', None) or None
-                        manifest, digest = get_manifest(registry, repository.name, repo_tag.tag, image_name=img_name)
+                        if repository.repo_key:
+                            rk = repository.repo_key
+                            img_name = repository.name[len(rk) + 1:] if repository.name.startswith(rk + '/') else repository.name
+                        else:
+                            img_name = getattr(repo_tag, 'image_path', None) or None
+                        repo_for_manifest = repository.repo_key or repository.name
+                        manifest, digest = get_manifest(registry, repo_for_manifest, repo_tag.tag, image_name=img_name)
                         if not manifest:
                             logger.warning(f"Could not get manifest for {repository.name}:{repo_tag.tag}")
                             continue
@@ -535,7 +545,8 @@ def process_all_tags():
                         image_digest = None
                         if registry and repository.repository_type == 'helm':
                             ref_repo_key = image_ref_repo_key(registry.api_url or '', image_ref)
-                            if ref_repo_key == repository.name:
+                            helm_key = repository.repo_key or repository.name
+                            if ref_repo_key == helm_key:
                                 pass
                             elif ref_repo_key is not None:
                                 image_digest = get_image_digest(registry, image_ref)
@@ -1567,15 +1578,27 @@ def monitor_mass_rescan_progress():
 
 
 def _repository_tag_image_ref(repository, repo_tag, registry=None):
-    """Build docker image reference. For Artifactory repo keys, use image_path and pull base (repo_key.host)."""
-    if registry and getattr(registry, 'provider', None) == 'jfrog' and getattr(repo_tag, 'image_path', None) and (repo_tag.image_path or '').strip():
+    """Build docker image reference. For Artifactory, use repo_key (or legacy image_path) and pull base."""
+    if registry and getattr(registry, 'provider', None) == 'jfrog':
         from urllib.parse import urlparse
         parsed = urlparse(registry.api_url or '')
         host = parsed.netloc or ''
         if not host and repository.url:
             host = (repository.url or '').split('/')[0].split('://')[-1]
-        pull_base = f"{repository.name}.{host}" if host else (repository.url or repository.name)
-        return f"{pull_base}/{repo_tag.image_path}:{repo_tag.tag}"
+
+        # New unified model: repo_key is set, name = repo_key/image_name
+        if repository.repo_key:
+            rk = repository.repo_key
+            image_name = repository.name[len(rk) + 1:] if repository.name.startswith(rk + '/') else repository.name
+            pull_base = f"{rk}.{host}" if host else (repository.url or repository.name)
+            return f"{pull_base}/{image_name}:{repo_tag.tag}"
+
+        # Legacy collection model: image_path on tag
+        image_path = (getattr(repo_tag, 'image_path', None) or '').strip()
+        if image_path:
+            pull_base = f"{repository.name}.{host}" if host else (repository.url or repository.name)
+            return f"{pull_base}/{image_path}:{repo_tag.tag}"
+
     return f"{repository.url}:{repo_tag.tag}"
 
 
@@ -1653,9 +1676,50 @@ def scan_repository_tags(repository_uuid: str, latest_only: bool = False):
             return
 
         all_tag_tuples = []  # (tag_name, image_path or None)
-        if registry.provider == 'jfrog':
+        jfrog_new_style = registry.provider == 'jfrog' and repository.repo_key
+
+        if registry.provider == 'jfrog' and jfrog_new_style:
+            # ---- Unified per-component repo (repo_key set) ----
+            # repo.name = 'repo_key/image_name'; extract image_name
+            rk = repository.repo_key
+            image_name = repository.name[len(rk) + 1:] if repository.name.startswith(rk + '/') else repository.name
+
             if repository.repository_type == 'helm':
-                # Native Helm repo: list chart versions from index.yaml
+                try:
+                    helm_entries = get_helm_chart_versions(registry, rk)
+                except Exception as e:
+                    logger.error(f"Failed to get Helm index for {repository.name}: {e}")
+                    repository.scan_status = 'error'
+                    repository.save()
+                    return
+                # Filter for this specific chart only
+                helm_entries = [(ver, chart) for ver, chart in helm_entries if chart == image_name]
+                if latest_only and helm_entries:
+                    best_ver = max(helm_entries, key=lambda x: _version_sort_key(x[0]))[0]
+                    helm_entries = [(best_ver, image_name)]
+                all_tag_tuples = [(ver, None) for ver, _chart in helm_entries]
+                logger.info(f"Found {len(all_tag_tuples)} Helm chart versions for {repository.name}" + (" (latest_only)" if latest_only else ""))
+            else:
+                # Docker: single image within repo key
+                try:
+                    tags = list(get_tags(registry, rk, limit=100 if not latest_only else 50, image_name=image_name))
+                except Exception as e:
+                    logger.error(f"Failed to get tags for {repository.name}: {e}")
+                    repository.scan_status = 'error'
+                    repository.save()
+                    return
+                if latest_only and tags:
+                    chosen = _pick_latest_tag_by_version(tags)
+                    tags = [chosen]
+                all_tag_tuples = [(t, None) for t in tags]
+                logger.info(f"Found {len(all_tag_tuples)} tags for {repository.name}" + (" (latest_only)" if latest_only else ""))
+                if all_tag_tuples and repository.repository_type in ('none', 'Unknown'):
+                    repository.repository_type = 'docker'
+                    repository.save()
+
+        elif registry.provider == 'jfrog':
+            # ---- Legacy collection-style repo (no repo_key) ----
+            if repository.repository_type == 'helm':
                 try:
                     helm_entries = get_helm_chart_versions(registry, repository.name)
                 except Exception as e:
@@ -1664,7 +1728,6 @@ def scan_repository_tags(repository_uuid: str, latest_only: bool = False):
                     repository.save()
                     return
                 if latest_only and helm_entries:
-                    # One tag per chart: pick highest version by chart name
                     by_chart = {}
                     for ver, chart in helm_entries:
                         if chart not in by_chart or _version_sort_key(ver) > _version_sort_key(by_chart[chart]):
@@ -1673,7 +1736,6 @@ def scan_repository_tags(repository_uuid: str, latest_only: bool = False):
                 all_tag_tuples = [(ver, chart) for ver, chart in helm_entries]
                 logger.info(f"Found {len(all_tag_tuples)} Helm chart versions in {repository.name}" + (" (latest_only)" if latest_only else ""))
             else:
-                # Docker/OCI repo: list images from catalog, then tags per image
                 try:
                     image_names, _ = get_catalog(registry, repository.name, page_size=500)
                 except Exception as e:
@@ -1684,17 +1746,17 @@ def scan_repository_tags(repository_uuid: str, latest_only: bool = False):
                 if latest_only:
                     image_names = image_names[:SCAN_LATEST_ONLY_MAX_IMAGES]
                 logger.info(f"Found {len(image_names)} images in Artifactory repo {repository.name}" + (" (latest_only)" if latest_only else ""))
-                for image_name in image_names:
+                for img in image_names:
                     try:
-                        tags = list(get_tags(registry, repository.name, limit=100 if not latest_only else 50, image_name=image_name))
+                        tags = list(get_tags(registry, repository.name, limit=100 if not latest_only else 50, image_name=img))
                         if latest_only and tags:
                             chosen = _pick_latest_tag_by_version(tags)
-                            all_tag_tuples.append((chosen, image_name))
+                            all_tag_tuples.append((chosen, img))
                         else:
                             for tag_name in tags:
-                                all_tag_tuples.append((tag_name, image_name))
+                                all_tag_tuples.append((tag_name, img))
                     except Exception as e:
-                        logger.warning(f"Failed to get tags for image {image_name}: {e}")
+                        logger.warning(f"Failed to get tags for image {img}: {e}")
                 if all_tag_tuples and repository.repository_type in ('none', 'Unknown'):
                     repository.repository_type = 'docker'
                     repository.save()
@@ -1726,7 +1788,14 @@ def scan_repository_tags(repository_uuid: str, latest_only: bool = False):
                     digest = ''
                     # Native Helm repos (packageType=helm) have no Docker manifest; skip digest
                     if not (repository.repository_type == 'helm' and registry.provider == 'jfrog'):
-                        if registry.provider != 'jfrog' or not image_path_val:
+                        if jfrog_new_style:
+                            # Per-component repo: use repo_key + image_name for manifest
+                            rk = repository.repo_key
+                            img = repository.name[len(rk) + 1:] if repository.name.startswith(rk + '/') else repository.name
+                            manifest, d = get_manifest(registry, rk, tag_name, image_name=img)
+                            if d:
+                                digest = (d or '').replace('sha256:', '')
+                        elif registry.provider != 'jfrog' or not image_path_val:
                             manifest, d = get_manifest(registry, repository.name, tag_name)
                             if d:
                                 digest = (d or '').replace('sha256:', '')
@@ -1884,15 +1953,25 @@ def process_single_tag(tag_uuid: str):
 
             if repository.repository_type == 'helm' and registry.provider == 'jfrog':
                 # Native Helm repo: do not call get_manifest (Helm repos don't expose Docker API).
-                chart_name = (getattr(tag, 'image_path', None) or '').strip()
-                chart_url = get_helm_chart_url(registry, repository.name, chart_name, tag.tag)
+                if repository.repo_key:
+                    rk = repository.repo_key
+                    chart_name = repository.name[len(rk) + 1:] if repository.name.startswith(rk + '/') else repository.name
+                else:
+                    chart_name = (getattr(tag, 'image_path', None) or '').strip()
+                helm_repo_key = repository.repo_key or repository.name
+                chart_url = get_helm_chart_url(registry, helm_repo_key, chart_name, tag.tag)
                 if chart_url:
                     image_refs = get_helm_images_from_native_chart(registry, chart_url)
                 else:
                     logger.warning(f"Could not get chart URL for {repository.name} {chart_name}@{tag.tag}")
             else:
-                img_name = getattr(tag, 'image_path', None) or None
-                manifest, digest = get_manifest(registry, repository.name, tag.tag, image_name=img_name)
+                if repository.repo_key:
+                    rk = repository.repo_key
+                    img_name = repository.name[len(rk) + 1:] if repository.name.startswith(rk + '/') else repository.name
+                else:
+                    img_name = getattr(tag, 'image_path', None) or None
+                repo_for_manifest = repository.repo_key or repository.name
+                manifest, digest = get_manifest(registry, repo_for_manifest, tag.tag, image_name=img_name)
                 if manifest and is_helm_chart(manifest):
                     chart_digest = get_chart_digest(manifest)
                     if chart_digest:
@@ -1910,7 +1989,8 @@ def process_single_tag(tag_uuid: str):
                 image_digest = None
                 if registry and repository.repository_type == 'helm':
                     ref_repo_key = image_ref_repo_key(registry.api_url or '', image_ref)
-                    if ref_repo_key == repository.name:
+                    helm_key = repository.repo_key or repository.name
+                    if ref_repo_key == helm_key:
                         pass  # ref points at Helm repo; use fallback only
                     elif ref_repo_key is not None:
                         # ref contains our registry base (e.g. repo.com/artifactory/docker-repo/...); try primary

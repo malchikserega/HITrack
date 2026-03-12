@@ -69,14 +69,16 @@
               @click="dialog = false"
             ></v-btn>
           </div>
-          <v-stepper v-model="currentStep" :items="steps" class="wizard-stepper">
-            <!-- Step 1: Repository Selection -->
+          <v-stepper v-model="currentStep" :items="activeSteps" class="wizard-stepper">
+
+            <!-- JFrog Step 1: Select Repo Key -->
             <template v-slot:item.1>
               <v-card flat class="step-card">
                 <v-card-text class="step-content">
+                  <!-- ACR: multi-select repos; JFrog: single-select repo key -->
                   <v-text-field
                     v-model="search"
-                    label="Search repositories"
+                    :label="isJfrog ? 'Search repo keys' : 'Search repositories'"
                     prepend-inner-icon="mdi-magnify"
                     variant="outlined"
                     clearable
@@ -88,19 +90,31 @@
                       <template v-if="repositories.length > 0">
                         <v-list-item
                           v-for="repo in filteredRepositories"
-                          :key="repo.uuid || repo.url"
+                          :key="repo.url"
                           :value="repo"
                           class="repository-item"
-                          @click="toggleRepository(repo)"
+                          @click="isJfrog ? selectRepoKey(repo) : toggleRepository(repo)"
+                          :active="isJfrog && selectedRepoKey?.url === repo.url"
                         >
                           <template v-slot:prepend>
+                            <!-- ACR: checkboxes for multi-select -->
                             <v-checkbox
+                              v-if="!isJfrog"
                               v-model="selectedRepositories"
                               :value="repo"
                               hide-details
                               class="mr-2"
                               @click.stop
                             ></v-checkbox>
+                            <!-- JFrog: radio-style single-select -->
+                            <v-radio-group
+                              v-else
+                              :model-value="selectedRepoKey?.url"
+                              hide-details
+                              class="mr-2"
+                            >
+                              <v-radio :value="repo.url" @click.stop="selectRepoKey(repo)" />
+                            </v-radio-group>
                           </template>
                           <v-list-item-title class="text-subtitle-1 font-weight-medium">
                             {{ repo.name }}
@@ -125,26 +139,16 @@
                             </v-chip>
                           </v-list-item-title>
                         </v-list-item>
-                        <!-- Loading indicator for infinite scroll -->
                         <div v-if="isLoadingMore" class="text-center py-4">
-                          <v-progress-circular
-                            indeterminate
-                            color="primary"
-                            size="24"
-                          ></v-progress-circular>
+                          <v-progress-circular indeterminate color="primary" size="24"></v-progress-circular>
                         </div>
-                        <!-- Observer target for infinite scroll -->
                         <div ref="observerTarget" class="observer-target"></div>
                       </template>
                       <template v-else>
                         <v-list-item>
                           <v-list-item-title class="text-center py-4">
-                            <v-progress-circular
-                              indeterminate
-                              color="primary"
-                              class="mb-2"
-                            ></v-progress-circular>
-                            <div>Loading repositories...</div>
+                            <v-progress-circular indeterminate color="primary" class="mb-2"></v-progress-circular>
+                            <div>Loading...</div>
                           </v-list-item-title>
                         </v-list-item>
                       </template>
@@ -154,14 +158,76 @@
               </v-card>
             </template>
 
-            <!-- Step 2: Summary and Confirmation -->
-            <template v-slot:item.2>
+            <!-- JFrog Step 2: Select Components within repo key -->
+            <template v-if="isJfrog" v-slot:item.2>
+              <v-card flat class="step-card">
+                <v-card-text class="step-content">
+                  <div class="d-flex align-center mb-4">
+                    <v-text-field
+                      v-model="componentSearch"
+                      label="Search components"
+                      prepend-inner-icon="mdi-magnify"
+                      variant="outlined"
+                      clearable
+                      @click:clear="componentSearch = ''"
+                      class="flex-grow-1 mr-4"
+                    ></v-text-field>
+                    <v-btn
+                      size="small"
+                      variant="tonal"
+                      @click="toggleSelectAllComponents"
+                    >
+                      {{ allComponentsSelected ? 'Deselect all' : 'Select all' }}
+                    </v-btn>
+                  </div>
+                  <div class="scrollable-content">
+                    <v-list class="repository-list" v-if="!componentsLoading">
+                      <v-list-item
+                        v-for="comp in filteredComponents"
+                        :key="comp.url"
+                        class="repository-item"
+                        @click="toggleComponent(comp)"
+                      >
+                        <template v-slot:prepend>
+                          <v-checkbox
+                            v-model="selectedComponents"
+                            :value="comp"
+                            hide-details
+                            class="mr-2"
+                            @click.stop
+                          ></v-checkbox>
+                        </template>
+                        <v-list-item-title class="text-subtitle-1 font-weight-medium">
+                          {{ comp.name }}
+                          <v-chip
+                            size="x-small"
+                            :color="comp.package_type === 'helm' ? 'purple-lighten-1' : 'light-blue-lighten-1'"
+                            variant="tonal"
+                            class="ml-2"
+                            density="compact"
+                          >
+                            {{ comp.package_type === 'helm' ? 'Helm' : 'Docker' }}
+                          </v-chip>
+                        </v-list-item-title>
+                      </v-list-item>
+                    </v-list>
+                    <div v-else class="text-center py-8">
+                      <v-progress-circular indeterminate color="primary" size="36" class="mb-3"></v-progress-circular>
+                      <div>Loading components from {{ selectedRepoKey?.name }}...</div>
+                    </div>
+                  </div>
+                </v-card-text>
+              </v-card>
+            </template>
+
+            <!-- Summary step (step 2 for ACR, step 3 for JFrog) -->
+            <template v-slot:[summarySlot]>
               <v-card flat class="summary-auto-card">
                 <v-card-text class="summary-auto-content">
                   <v-list class="summary-list">
                     <v-list-item
-                      v-for="repo in selectedRepositories"
-                      :key="repo.uuid || repo.url"
+                      v-for="repo in itemsToSubmit"
+                      :key="repo.url"
                       class="summary-item"
                     >
                       <template v-slot:prepend>
@@ -180,7 +246,7 @@
             <template v-slot:actions>
               <div class="stepper-actions">
                 <v-btn
-                  :disabled="currentStep == 1"
+                  :disabled="currentStep === 1"
                   variant="text"
                   @click="currentStep--"
                 >
@@ -188,9 +254,10 @@
                 </v-btn>
                 <v-spacer></v-spacer>
                 <v-btn
-                  v-if="currentStep < 2"
+                  v-if="currentStep < totalSteps"
                   variant="text"
                   color="primary"
+                  :disabled="!canAdvance"
                   @click="nextStep"
                 >
                   Next
@@ -199,8 +266,9 @@
                   v-else
                   variant="text"
                   color="primary"
-                  @click="submitJob"
+                  :disabled="itemsToSubmit.length === 0"
                   :loading="submitting"
+                  @click="submitJob"
                 >
                   Submit
                 </v-btn>
@@ -217,7 +285,14 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import api from '../plugins/axios'
 import { notificationService } from '../plugins/notifications'
-import type { Repository, ContainerRegistry, RegistryProvider } from '../types/interfaces'
+import type { ContainerRegistry, RegistryProvider } from '../types/interfaces'
+
+interface RepoItem {
+  name: string
+  url: string
+  package_type?: string
+  repo_key?: string
+}
 
 const providerOptions: { title: string; value: RegistryProvider }[] = [
   { title: 'Azure Container Registry', value: 'acr' },
@@ -227,12 +302,23 @@ const providerOptions: { title: string; value: RegistryProvider }[] = [
 const provider = ref<RegistryProvider>('acr')
 const registries = ref<ContainerRegistry[]>([])
 const selectedRegistry = ref<string | null>(null)
+const isJfrog = computed(() => provider.value === 'jfrog')
 
 const dialog = ref(false)
 const currentStep = ref(1)
+
+// Step 1: repo keys (JFrog) or repos (ACR)
 const search = ref('')
-const repositories = ref<Repository[]>([])
-const selectedRepositories = ref<Repository[]>([])
+const repositories = ref<RepoItem[]>([])
+const selectedRepositories = ref<RepoItem[]>([])
+const selectedRepoKey = ref<RepoItem | null>(null)
+
+// Step 2 (JFrog only): components within a repo key
+const componentSearch = ref('')
+const components = ref<RepoItem[]>([])
+const selectedComponents = ref<RepoItem[]>([])
+const componentsLoading = ref(false)
+
 const submitting = ref(false)
 const isLoading = ref(false)
 const hasMore = ref(true)
@@ -240,40 +326,72 @@ const isLoadingMore = ref(false)
 const pageSize = 100
 const lastRepo = ref<string | null>(null)
 
-const steps = [
-  { title: 'Select Repositories', description: 'Select the repositories' },
-  { title: 'Summary', description: 'Submit repositories' }
-]
+const activeSteps = computed(() => {
+  if (isJfrog.value) {
+    return [
+      { title: 'Select Repo Key', description: 'Pick an Artifactory repository' },
+      { title: 'Select Components', description: 'Choose images / charts' },
+      { title: 'Summary', description: 'Confirm and submit' },
+    ]
+  }
+  return [
+    { title: 'Select Repositories', description: 'Select the repositories' },
+    { title: 'Summary', description: 'Submit repositories' },
+  ]
+})
 
-const repositoryHeaders = [
-  { title: 'Name', key: 'name' },
-  { title: 'URL', key: 'url' },
-]
+const totalSteps = computed(() => activeSteps.value.length)
+const summarySlot = computed(() => `item.${totalSteps.value}`)
+
+const itemsToSubmit = computed<RepoItem[]>(() => {
+  if (isJfrog.value) return selectedComponents.value
+  return selectedRepositories.value
+})
+
+const canAdvance = computed(() => {
+  if (isJfrog.value) {
+    if (currentStep.value === 1) return !!selectedRepoKey.value
+    if (currentStep.value === 2) return selectedComponents.value.length > 0
+  } else {
+    if (currentStep.value === 1) return selectedRepositories.value.length > 0
+  }
+  return true
+})
 
 const registrySelectLabel = computed(() =>
-  provider.value === 'jfrog' ? 'Select Artifactory Registry' : 'Select ACR Registry'
+  isJfrog.value ? 'Select Artifactory Registry' : 'Select ACR Registry'
 )
 const addFromButtonLabel = computed(() =>
-  provider.value === 'jfrog' ? 'Add from Artifactory' : 'Add from ACR'
+  isJfrog.value ? 'Add from Artifactory' : 'Add from ACR'
 )
 const noRegistryMessage = computed(() =>
-  provider.value === 'jfrog'
+  isJfrog.value
     ? 'No JFrog Artifactory registry found in database'
     : 'No Azure Container Registry found in database'
 )
 const dialogTitle = computed(() =>
-  provider.value === 'jfrog'
-    ? 'Select Repositories (Artifactory)'
-    : 'Select Repositories (ACR)'
+  isJfrog.value
+    ? 'Add Repositories (Artifactory)'
+    : 'Add Repositories (ACR)'
 )
 
 const filteredRepositories = computed(() => {
   if (!search.value) return repositories.value
-  const searchLower = search.value.toLowerCase()
-  return repositories.value.filter(repo => 
-    repo.name.toLowerCase().includes(searchLower) || repo.url.toLowerCase().includes(searchLower)
-  )
+  const s = search.value.toLowerCase()
+  return repositories.value.filter(r => r.name.toLowerCase().includes(s) || r.url.toLowerCase().includes(s))
 })
+
+const filteredComponents = computed(() => {
+  if (!componentSearch.value) return components.value
+  const s = componentSearch.value.toLowerCase()
+  return components.value.filter(c => c.name.toLowerCase().includes(s))
+})
+
+const allComponentsSelected = computed(() =>
+  components.value.length > 0 && selectedComponents.value.length === components.value.length
+)
+
+// ---- Data loading ----
 
 const loadRepositories = async (reset: boolean = false) => {
   if (!selectedRegistry.value) return
@@ -300,7 +418,6 @@ const loadRepositories = async (reset: boolean = false) => {
     }
     lastRepo.value = response.data.pagination.next_page
     hasMore.value = !!lastRepo.value
-    // Repositories loaded successfully
   } catch (error: any) {
     const msg = error?.response?.data?.error ?? 'Failed to fetch repositories'
     notificationService.error(msg)
@@ -310,12 +427,42 @@ const loadRepositories = async (reset: boolean = false) => {
   }
 }
 
+const loadComponents = async () => {
+  if (!selectedRepoKey.value || !selectedRegistry.value) return
+  componentsLoading.value = true
+  components.value = []
+  selectedComponents.value = []
+  try {
+    const registry = registries.value.find(r => r.uuid === selectedRegistry.value)
+    const response = await api.get('repositories/get_acr_repos/', {
+      params: {
+        provider: 'jfrog',
+        registry_uuid: registry?.uuid,
+        repo_key: selectedRepoKey.value.name,
+        package_type: selectedRepoKey.value.package_type || 'docker',
+      }
+    })
+    components.value = response.data.repositories
+    selectedComponents.value = [...components.value]
+  } catch (error: any) {
+    const msg = error?.response?.data?.error ?? 'Failed to load components'
+    notificationService.error(msg)
+  } finally {
+    componentsLoading.value = false
+  }
+}
+
 const openDialog = async () => {
   if (!selectedRegistry.value) return
   await loadRepositories(true)
   dialog.value = true
   currentStep.value = 1
   selectedRepositories.value = []
+  selectedRepoKey.value = null
+  components.value = []
+  selectedComponents.value = []
+  componentSearch.value = ''
+  search.value = ''
 }
 
 const loadMore = async () => {
@@ -324,7 +471,6 @@ const loadMore = async () => {
   }
 }
 
-// Add intersection observer for infinite scroll
 const observerTarget = ref<HTMLElement | null>(null)
 
 onMounted(() => {
@@ -334,74 +480,84 @@ onMounted(() => {
         loadMore()
       }
     },
-    { 
-      threshold: 0.1,
-      rootMargin: '100px'
-    }
+    { threshold: 0.1, rootMargin: '100px' }
   )
-
-  // Watch for changes in the observer target
   watch(observerTarget, (newTarget) => {
-    if (newTarget) {
-      observer.observe(newTarget)
-    }
+    if (newTarget) observer.observe(newTarget)
   })
-
   return () => {
-    if (observerTarget.value) {
-      observer.unobserve(observerTarget.value)
-    }
+    if (observerTarget.value) observer.unobserve(observerTarget.value)
   }
 })
 
-const nextStep = () => {
+// ---- Actions ----
+
+const selectRepoKey = (repo: RepoItem) => {
+  selectedRepoKey.value = repo
+}
+
+const toggleRepository = (repo: RepoItem) => {
+  const idx = selectedRepositories.value.findIndex(r => r.url === repo.url)
+  if (idx === -1) selectedRepositories.value.push(repo)
+  else selectedRepositories.value.splice(idx, 1)
+}
+
+const toggleComponent = (comp: RepoItem) => {
+  const idx = selectedComponents.value.findIndex(c => c.url === comp.url)
+  if (idx === -1) selectedComponents.value.push(comp)
+  else selectedComponents.value.splice(idx, 1)
+}
+
+const toggleSelectAllComponents = () => {
+  if (allComponentsSelected.value) {
+    selectedComponents.value = []
+  } else {
+    selectedComponents.value = [...components.value]
+  }
+}
+
+const nextStep = async () => {
+  if (isJfrog.value && currentStep.value === 1) {
+    currentStep.value = 2
+    await loadComponents()
+    return
+  }
   currentStep.value++
 }
 
 const submitJob = async () => {
   submitting.value = true
   try {
-    const jobData = selectedRepositories.value
-      .map((repo: any) => ({
-        repository_url: repo.url,
-        repository_name: repo.name,
-        ...(repo.package_type ? { repository_type: repo.package_type } : {})
-      }))
+    const jobData = itemsToSubmit.value.map((repo: RepoItem) => ({
+      repository_url: repo.url,
+      repository_name: repo.name,
+      ...(repo.package_type ? { repository_type: repo.package_type } : {}),
+      ...(repo.repo_key ? { repo_key: repo.repo_key } : {}),
+    }))
 
     const response = await api.post('jobs/add-repositories/', {
       repositories: jobData,
       registry_uuid: selectedRegistry.value
     })
-    // Job created successfully
-    
+
     const newRepos = response.data.results.filter((r: any) => r.created)
     const existingRepos = response.data.results.filter((r: any) => !r.created)
-    
+
     if (newRepos.length > 0) {
-      const newRepoNames = newRepos.map((r: any) => r.repository_name || r.repository).join(', ')
-      notificationService.success(`Added new repositories: ${newRepoNames}`, 10000)
+      const names = newRepos.map((r: any) => r.repository_name || r.repository).join(', ')
+      notificationService.success(`Added new repositories: ${names}`, 10000)
     }
-    
     if (existingRepos.length > 0) {
-      const existingRepoNames = existingRepos.map((r: any) => r.repository_name || r.repository).join(', ')
-      notificationService.info(`Skipped existing repositories: ${existingRepoNames}`, 10000)
+      const names = existingRepos.map((r: any) => r.repository_name || r.repository).join(', ')
+      notificationService.info(`Skipped existing repositories: ${names}`, 10000)
     }
-    
+
     dialog.value = false
   } catch (error) {
     console.error('Error adding repositories:', error)
     notificationService.error('Failed to add repositories')
   } finally {
     submitting.value = false
-  }
-}
-
-const toggleRepository = (repo: Repository) => {
-  const index = selectedRepositories.value.findIndex((r: Repository) => r.url === repo.url)
-  if (index === -1) {
-    selectedRepositories.value.push(repo)
-  } else {
-    selectedRepositories.value.splice(index, 1)
   }
 }
 
@@ -436,7 +592,6 @@ onMounted(() => {
   background: #ffffff;
   min-height: 100vh;
 }
-
 
 .dialog-card {
   width: 1000px;
@@ -551,11 +706,6 @@ onMounted(() => {
 .summary-auto-content {
   padding: 24px;
 }
-/* Make stepper actions static for summary step */
-.summary-auto-card + .stepper-actions {
-  position: static !important;
-  margin-top: 0;
-}
 
 .summary-list {
   background: transparent;
@@ -577,4 +727,4 @@ onMounted(() => {
 .summary-item:last-child {
   border-bottom: none;
 }
-</style> 
+</style>

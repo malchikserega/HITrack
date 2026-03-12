@@ -22,6 +22,8 @@ export interface RepositoryFallbackItem {
 export interface Repository extends BaseEntity {
   name: string
   url: string
+  /** For JFrog: the Artifactory repo key (e.g. a8n-docker-local). Empty for ACR. */
+  repo_key?: string
   tag_count: number
   repository_type: 'docker' | 'helm' | 'none'
   scan_status: 'pending' | 'in_process' | 'success' | 'error' | 'none'

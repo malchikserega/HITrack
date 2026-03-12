@@ -191,6 +191,25 @@
               </div>
             </div>
           </template>
+          <template #item.name="{ item }">
+            <div class="d-flex flex-wrap align-center gap-1">
+              <template v-if="item.image_path">
+                <v-chip size="x-small" variant="tonal" color="primary">{{ item.image_path }}</v-chip>
+              </template>
+              <template v-if="item.image_names && item.image_names.length">
+                <v-chip
+                  v-for="(imgName, idx) in item.image_names"
+                  :key="idx"
+                  size="x-small"
+                  variant="outlined"
+                  color="secondary"
+                >
+                  {{ imgName }}
+                </v-chip>
+              </template>
+              <span v-if="!item.image_path && (!item.image_names || !item.image_names.length)" class="text-caption text-grey">—</span>
+            </div>
+          </template>
           <template #item.processing_status="{ item }">
             <v-chip
               size="x-small"
@@ -442,6 +461,7 @@ const chartsLoading = ref(true)
 
 const headers = [
   { title: 'Tag', key: 'tag', sortable: false },
+  { title: 'Name', key: 'name', sortable: false },
   { title: 'Status', key: 'processing_status', sortable: false },
   { title: 'Vulnerabilities', key: 'findings', sortable: false },
   { title: 'Components', key: 'components', sortable: false },
