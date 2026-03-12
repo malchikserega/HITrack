@@ -6,17 +6,29 @@ as scanning sources with a single interface.
 
 from typing import Generator, List, Optional, Tuple
 
+from django.core.cache import cache
+
 # Re-use manifest helpers from ACR (same for OCI/Docker)
 from .acr import is_helm_chart, get_chart_digest
 
+_TOKEN_TTL = 270  # ACR tokens are valid ~300s; refresh 30s early
+
 
 def get_bearer_token(registry) -> str:
-    """Get auth token for the given registry (ACR Bearer or Artifactory Basic)."""
+    """Get auth token for the given registry (ACR Bearer or Artifactory Basic).
+    ACR tokens are cached in Redis to avoid repeated HTTP token requests."""
     if registry.provider == 'jfrog':
         from .artifactory import get_bearer_token as art_get_token
         return art_get_token(registry.api_url, registry.login, registry.password)
+
+    cache_key = f'acr_token:{registry.pk}'
+    token = cache.get(cache_key)
+    if token:
+        return token
     from .acr import get_bearer_token as acr_get_token
-    return acr_get_token(registry.api_url, registry.login, registry.password)
+    token = acr_get_token(registry.api_url, registry.login, registry.password)
+    cache.set(cache_key, token, _TOKEN_TTL)
+    return token
 
 
 def get_repositories(registry, page_size: int = 100, last_repo: str = None) -> Tuple[list, str]:

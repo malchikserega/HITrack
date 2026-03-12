@@ -64,6 +64,10 @@ class Repository(models.Model):
     class Meta:
         verbose_name_plural = "Repositories"
         unique_together = ('name', 'url')
+        indexes = [
+            models.Index(fields=['scan_status']),
+            models.Index(fields=['repository_type']),
+        ]
 
     def __str__(self):
         return self.name
@@ -92,6 +96,9 @@ class RepositoryTag(models.Model):
 
     class Meta:
         unique_together = [['repository', 'tag', 'image_path']]
+        indexes = [
+            models.Index(fields=['processing_status']),
+        ]
 
     def __str__(self):
         return f"{self.repository.name}:{self.tag}"
@@ -118,6 +125,11 @@ class Image(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['scan_status']),
+        ]
 
     def __str__(self):
         return f"{self.name}"
@@ -183,6 +195,9 @@ class Vulnerability(models.Model):
         unique_together = ['vulnerability_id']
         verbose_name = 'Vulnerability'
         verbose_name_plural = 'Vulnerabilities'
+        indexes = [
+            models.Index(fields=['severity']),
+        ]
 
     def __str__(self):
         return f"{self.vulnerability_id} ({self.severity})"
@@ -262,6 +277,10 @@ class ComponentVersionVulnerability(models.Model):
         unique_together = ['component_version', 'vulnerability']
         verbose_name = 'Component Version Vulnerability Link'
         verbose_name_plural = 'Component Version Vulnerability Links'
+        indexes = [
+            models.Index(fields=['vulnerability', 'component_version']),
+        ]
+
     def __str__(self):
         return f"{self.component_version} <-> {self.vulnerability}"
 

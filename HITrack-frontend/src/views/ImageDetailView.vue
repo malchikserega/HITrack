@@ -768,9 +768,11 @@ const fetchImage = async () => {
   error.value = ''
   try {
     const uuid = route.params.uuid
-    const response = await api.get(`/images/${uuid}/`)
-    image.value = response.data
-    await fetchComponents() // fetch components only after image is loaded
+    const [imageResp] = await Promise.all([
+      api.get(`/images/${uuid}/`),
+      fetchComponents()
+    ])
+    image.value = imageResp.data
   } catch (e: any) {
     error.value = e?.response?.data?.detail || 'Failed to load image details.'
   } finally {
@@ -798,16 +800,15 @@ const componentHeaders = [
 ] as const
 
 const fetchComponents = async () => {
-  if (!image.value || !image.value.uuid) {
+  const imageUuid = image.value?.uuid || route.params.uuid
+  if (!imageUuid) {
     return;
   }
   componentsLoading.value = true
   try {
-    // Get the first sort field and direction
     const sortField = componentsSortBy.value[0]
     const sortDesc = componentsSortDesc.value[0]
     
-    // Build ordering parameter
     let ordering = undefined
     if (sortField) {
       const prefix = sortDesc ? '-' : ''
@@ -815,7 +816,7 @@ const fetchComponents = async () => {
     }
 
     const params = {
-      images: image.value.uuid,
+      images: imageUuid,
       page: componentsPage.value,
       page_size: componentsPerPage.value,
       ordering,

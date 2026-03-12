@@ -22,6 +22,8 @@ from django.db import models
 from .pagination import CustomPageNumberPagination
 from django.db.models import Q, Count, Prefetch, Case, When, Value, BooleanField, IntegerField
 from django.utils import timezone
+from django.utils.decorators import method_decorator
+from django.views.decorators.cache import cache_page
 from datetime import timedelta, datetime
 from io import BytesIO
 from rest_framework.views import APIView
@@ -60,8 +62,10 @@ class RepositoryViewSet(BaseViewSet):
 
     def get_queryset(self):
         qs = super().get_queryset()
-        if self.action == 'retrieve':
-            qs = qs.prefetch_related('image_fallback_repositories')
+        if self.action == 'list':
+            qs = qs.annotate(tag_count=Count('tags'))
+        elif self.action == 'retrieve':
+            qs = qs.prefetch_related('image_fallback_repositories').annotate(tag_count=Count('tags'))
         return qs
 
     def partial_update(self, request, *args, **kwargs):
@@ -78,10 +82,21 @@ class RepositoryViewSet(BaseViewSet):
             instance.image_fallback_repositories.set(valid)
         return super().partial_update(request, *args, **kwargs)
 
+    @action(detail=False, methods=['get'])
+    def names(self, request):
+        """Lightweight endpoint returning only uuid and name for dropdowns."""
+        qs = self.get_queryset()
+        repo_type = request.query_params.get('repository_type')
+        if repo_type:
+            qs = qs.filter(repository_type=repo_type)
+        return Response(list(qs.values('uuid', 'name').order_by('name')))
+
     @action(detail=True, methods=['get'])
     def tags(self, request, uuid=None):
         repository = self.get_object()
-        tags = repository.tags.all()
+        tags = repository.tags.prefetch_related(
+            'images', 'releases__release'
+        ).all()
         serializer = RepositoryTagSerializer(tags, many=True)
         return Response(serializer.data)
 
@@ -799,11 +814,10 @@ class ImageViewSet(BaseViewSet):
             ).prefetch_related(
                 'repository_tags__repository'
             ).defer('sbom_data', 'grype_data')  # Defer after annotation to avoid loading large JSON
-        # Optimize for repository_info by prefetching repository_tags and their repositories
         elif self.action == 'retrieve':
             queryset = queryset.prefetch_related(
                 'repository_tags__repository'
-            )
+            ).defer('sbom_data', 'grype_data')
         
         return queryset
 
@@ -848,7 +862,7 @@ class ImageViewSet(BaseViewSet):
         # Get all vulnerabilities linked to this image through component versions
         vulnerabilities = Vulnerability.objects.filter(
             component_versions__images=image
-        ).distinct()
+        ).select_related('details').distinct()
 
         # Search
         search = request.query_params.get('search')
@@ -884,18 +898,23 @@ class ImageViewSet(BaseViewSet):
         paginator = CustomPageNumberPagination()
         page = paginator.paginate_queryset(vulnerabilities, request)
         
-        # Serialize with fix information from ComponentVersionVulnerability
+        # Bulk-fetch fix info for all vulns on this page in one query
+        page_vuln_ids = [v.pk for v in page]
+        cvv_qs = ComponentVersionVulnerability.objects.filter(
+            vulnerability__pk__in=page_vuln_ids,
+            component_version__images=image
+        ).values('vulnerability__pk', 'fixable', 'fix')
+        fix_map = {}
+        for row in cvv_qs:
+            fix_map.setdefault(row['vulnerability__pk'], row)
+
         vuln_data = []
         for vuln in page:
             vuln_dict = VulnerabilitySerializer(vuln).data
-            # Get fix information from ComponentVersionVulnerability
-            cvv = ComponentVersionVulnerability.objects.filter(
-                vulnerability=vuln,
-                component_version__images=image
-            ).first()
-            if cvv:
-                vuln_dict['fixable'] = cvv.fixable
-                vuln_dict['fix'] = cvv.fix
+            cvv_row = fix_map.get(vuln.pk)
+            if cvv_row:
+                vuln_dict['fixable'] = cvv_row['fixable']
+                vuln_dict['fix'] = cvv_row['fix']
             else:
                 vuln_dict['fixable'] = False
                 vuln_dict['fix'] = ''
@@ -1061,6 +1080,15 @@ class ComponentViewSet(viewsets.ReadOnlyModelViewSet):
     pagination_class = CustomPageNumberPagination
     lookup_field = 'uuid'
 
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if self.action == 'retrieve':
+            qs = qs.annotate(
+                _total_images=Count('versions__images', distinct=True),
+                _versions_count=Count('versions', distinct=True)
+            )
+        return qs
+
     def get_serializer_class(self):
         if self.action == 'list':
             return ComponentListSerializer
@@ -1075,6 +1103,10 @@ class ComponentViewSet(viewsets.ReadOnlyModelViewSet):
             vulnerabilities_count=Count('vulnerabilities', distinct=True),
             images_count=Count('images', distinct=True)
         ).all().order_by('-version')
+        page = self.paginate_queryset(versions)
+        if page is not None:
+            serializer = ComponentVersionOptimizedSerializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
         serializer = ComponentVersionOptimizedSerializer(versions, many=True)
         return Response(serializer.data)
 
@@ -1085,14 +1117,15 @@ class ComponentViewSet(viewsets.ReadOnlyModelViewSet):
         """
         component = self.get_object()
         
-        # Get all component locations for this component
         locations = ComponentLocation.objects.filter(
             component_version__component=component
-        ).select_related('component_version', 'image')
-        
-        # Group by component version and image
+        ).select_related('component_version', 'image').order_by('path', 'created_at')
+
+        page = self.paginate_queryset(locations)
+        items = page if page is not None else locations
+
         location_data = []
-        for location in locations:
+        for location in items:
             location_data.append({
                 'component_version': {
                     'uuid': str(location.component_version.uuid),
@@ -1110,13 +1143,16 @@ class ComponentViewSet(viewsets.ReadOnlyModelViewSet):
                 'evidence_type': location.evidence_type,
                 'annotations': location.annotations
             })
-        
-        return Response({
+
+        payload = {
             'component_uuid': str(component.uuid),
             'component_name': component.name,
             'component_type': component.type,
             'locations': location_data
-        })
+        }
+        if page is not None:
+            return self.get_paginated_response(payload)
+        return Response(payload)
 
     @action(detail=True, methods=['get'])
     def vulnerabilities(self, request, uuid=None):
@@ -1125,13 +1161,14 @@ class ComponentViewSet(viewsets.ReadOnlyModelViewSet):
         """
         component = self.get_object()
         
-        # Get all vulnerabilities through component versions with optimized queries
         vulnerabilities = Vulnerability.objects.filter(
             component_versions__component=component
-        ).select_related('details').prefetch_related(
-            'component_versions__component'
-        ).distinct()
-        
+        ).select_related('details').distinct().order_by('-created_at')
+
+        page = self.paginate_queryset(vulnerabilities)
+        if page is not None:
+            serializer = VulnerabilitySerializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
         serializer = VulnerabilitySerializer(vulnerabilities, many=True)
         return Response(serializer.data)
 
@@ -1145,11 +1182,15 @@ class ComponentVersionViewSet(BaseViewSet):
     def get_queryset(self):
         qs = super().get_queryset()
         if self.action == 'retrieve':
-            # Ultra-optimized for detail view - only essential data, no heavy prefetch
             qs = qs.select_related('component').annotate(
                 vulnerabilities_count=Count('vulnerabilities', distinct=True),
                 images_count=Count('images', distinct=True),
                 locations_count=Count('locations', distinct=True)
+            )
+        elif self.action == 'list':
+            qs = qs.select_related('component').annotate(
+                vulnerabilities_count=Count('vulnerabilities', distinct=True),
+                images_count=Count('images', distinct=True)
             )
         else:
             qs = qs.annotate(vulnerabilities_count=Count('vulnerabilities', distinct=True))
@@ -1297,34 +1338,40 @@ class ReleaseViewSet(BaseViewSet):
     def with_stats(self, request):
         """Get all releases with repository tag counts and vulnerability stats"""
         releases = Release.objects.annotate(
-            tag_count=Count('repository_tags')
-        ).prefetch_related('repository_tags')
-        
+            tag_count=Count('repository_tags', distinct=True)
+        )
+
+        vuln_counts = (
+            Vulnerability.objects.filter(
+                component_versions__images__repository_tags__releases__release__in=releases,
+                severity__in=['CRITICAL', 'HIGH']
+            )
+            .values('component_versions__images__repository_tags__releases__release', 'severity')
+            .annotate(cnt=Count('pk', distinct=True))
+        )
+
+        stats_map = {}
+        for row in vuln_counts:
+            rel_pk = row['component_versions__images__repository_tags__releases__release']
+            sev = row['severity']
+            stats_map.setdefault(rel_pk, {'CRITICAL': 0, 'HIGH': 0})[sev] = row['cnt']
+
         release_data = []
         for release in releases:
-            # Get vulnerability stats for this release through RepositoryTagRelease
-            critical_vulns = Vulnerability.objects.filter(
-                component_versions__images__repository_tags__releases__release=release,
-                severity='CRITICAL'
-            ).distinct().count()
-            
-            high_vulns = Vulnerability.objects.filter(
-                component_versions__images__repository_tags__releases__release=release,
-                severity='HIGH'
-            ).distinct().count()
-            
+            counts = stats_map.get(release.pk, {})
             release_data.append({
                 'uuid': str(release.uuid),
                 'name': release.name,
                 'description': release.description,
                 'tag_count': release.tag_count,
-                'critical_vulnerabilities': critical_vulns,
-                'high_vulnerabilities': high_vulns,
+                'critical_vulnerabilities': counts.get('CRITICAL', 0),
+                'high_vulnerabilities': counts.get('HIGH', 0),
                 'created_at': release.created_at
             })
         
         return Response(release_data)
 
+    @method_decorator(cache_page(300))
     @action(detail=False, methods=['get'])
     def names(self, request):
         """Get only release names and UUIDs for validation purposes"""
@@ -1370,9 +1417,8 @@ class VulnerabilityViewSet(BaseViewSet):
     ordering_fields = ['vulnerability_id', 'severity', 'epss', 'created_at', 'updated_at']
 
     def get_queryset(self):
-        queryset = Vulnerability.objects.all()
+        queryset = Vulnerability.objects.select_related('details').all()
 
-        
         # Add filters for exploit information
         exploit_available = self.request.query_params.get('exploit_available', None)
         if exploit_available is not None:
@@ -1445,6 +1491,7 @@ class VulnerabilityViewSet(BaseViewSet):
             return VulnerabilityListSerializer
         return VulnerabilitySerializer
 
+    @method_decorator(cache_page(60))
     @action(detail=False, methods=['get'])
     def severity_stats(self, request):
         """Return statistics about vulnerabilities grouped by severity."""
@@ -1709,6 +1756,7 @@ class StatsViewSet(viewsets.ViewSet):
         }
         return Response(data)
 
+    @method_decorator(cache_page(60))
     @action(detail=False, methods=['get'])
     def dashboard_metrics(self, request):
         """Get comprehensive dashboard metrics with optimized queries"""

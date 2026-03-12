@@ -660,9 +660,7 @@ export default defineComponent({
     }, { deep: true })
 
     onMounted(() => {
-      loadTasks()
-      loadStatistics()
-      loadPeriodicTasks()
+      Promise.all([loadTasks(), loadStatistics(), loadPeriodicTasks()])
     })
 
 

@@ -359,14 +359,24 @@ const navigateToImageDetail = (image: Image) => {
   router.push({ name: 'image-detail', params: { uuid: image.uuid } })
 }
 
-const fetchTagName = async () => {
+const fetchTagData = async () => {
   try {
-    const resp = await api.get(`repository-tags/${tagUuid.value}/`)
+    const resp = await api.get(`/repository-tags/${tagUuid.value}/`)
     tagName.value = resp.data.tag
+    tagReleases.value = resp.data.releases || []
+
+    const assignedReleaseUuids = tagReleases.value.map((r: any) => r.uuid)
+    availableReleases.value = availableReleases.value.filter(
+      (release: any) => !assignedReleaseUuids.includes(release.uuid)
+    )
   } catch (error) {
+    console.error('Error fetching tag data:', error)
     tagName.value = ''
+    tagReleases.value = []
   }
 }
+
+const fetchTagName = async () => fetchTagData()
 
 // Release management functions
 const fetchReleases = async () => {
@@ -375,7 +385,6 @@ const fetchReleases = async () => {
     const response = await api.get('/releases/')
     const allReleases = response.data.results || response.data
     
-    // If we have tag releases, filter out already assigned ones
     if (tagReleases.value.length > 0) {
       const assignedReleaseUuids = tagReleases.value.map((r: any) => r.uuid)
       availableReleases.value = allReleases.filter(
@@ -392,21 +401,7 @@ const fetchReleases = async () => {
   }
 }
 
-const fetchTagReleases = async () => {
-  try {
-    const response = await api.get(`/repository-tags/${tagUuid.value}/`)
-    tagReleases.value = response.data.releases || []
-    
-    // Update available releases to exclude already assigned ones
-    const assignedReleaseUuids = tagReleases.value.map((r: any) => r.uuid)
-    availableReleases.value = availableReleases.value.filter(
-      (release: any) => !assignedReleaseUuids.includes(release.uuid)
-    )
-  } catch (error) {
-    console.error('Error fetching tag releases:', error)
-    tagReleases.value = []
-  }
-}
+const fetchTagReleases = async () => fetchTagData()
 
 const addToRelease = async () => {
   if (!selectedRelease.value) return

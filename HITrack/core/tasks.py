@@ -32,6 +32,19 @@ DOCKER_IMAGE_REGEX = re.compile(r'^[a-zA-Z0-9._/-]+(:[a-zA-Z0-9._-]+)?$')
 def is_safe_image_ref(image_ref: str) -> bool:
     return bool(DOCKER_IMAGE_REGEX.match(image_ref)) and len(image_ref) < 200
 
+
+_PKG_VERSION_CACHE_TTL = 3600  # 1 hour
+
+def _get_cached_latest_version(package_type: str, package_name: str) -> str | None:
+    """Check Redis cache for a previously fetched latest package version."""
+    from django.core.cache import cache
+    return cache.get(f'pkg_ver:{package_type}:{package_name}')
+
+
+def _set_cached_latest_version(package_type: str, package_name: str, version: str):
+    from django.core.cache import cache
+    cache.set(f'pkg_ver:{package_type}:{package_name}', version, _PKG_VERSION_CACHE_TTL)
+
 @celery_app.task(bind=True, max_retries=1, name="Generate SBOM and Create Components")
 def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="docker"):
     """
@@ -312,11 +325,11 @@ def periodic_repository_scan():
             new_tags = [tag for tag in tags_to_scan if tag not in existing_tags]
             logger.info(f"Found {len(new_tags)} new tags for repository {repository.name}")
 
-            # Create new tags
-            for tag in new_tags:
-                RepositoryTag.objects.create(
-                    repository=repository,
-                    tag=tag
+            # Create new tags in bulk
+            if new_tags:
+                RepositoryTag.objects.bulk_create(
+                    [RepositoryTag(repository=repository, tag=tag) for tag in new_tags],
+                    ignore_conflicts=True
                 )
 
             # Update repository last scanned timestamp
@@ -420,12 +433,19 @@ def scan_repository(repository_name: str, repository_url: str, scan_option: str)
                 repository.save()
                 logger.info(f"Repository {repository_name} identified as Helm chart")
 
-        # Create tags
-        for tag_name in tags_to_scan:
-            RepositoryTag.objects.get_or_create(
-                tag=tag_name,
-                repository=repository
+        # Create tags in bulk (skip existing)
+        if tags_to_scan:
+            existing_tags = set(
+                RepositoryTag.objects.filter(
+                    repository=repository, tag__in=tags_to_scan
+                ).values_list('tag', flat=True)
             )
+            new_tag_objs = [
+                RepositoryTag(tag=t, repository=repository)
+                for t in tags_to_scan if t not in existing_tags
+            ]
+            if new_tag_objs:
+                RepositoryTag.objects.bulk_create(new_tag_objs, ignore_conflicts=True)
 
         repository.last_scanned = datetime.now()
         repository.save()
@@ -921,14 +941,16 @@ def update_components_latest_versions(image_uuid: str):
     start_time = time.time()
 
     try:
-        image = Image.objects.prefetch_related('component_versions').get(uuid=image_uuid)
-        component_versions = image.component_versions.all()
-        logger.info(f"Found {component_versions.count()} component versions to process")
+        image = Image.objects.prefetch_related(
+            'component_versions__component'
+        ).get(uuid=image_uuid)
+        component_versions = list(image.component_versions.all())
+        logger.info(f"Found {len(component_versions)} component versions to process")
         updated_count = 0
+        versions_to_update = []
         for component_version in component_versions:
             try:
                 now = timezone.now()
-                # Skip update if already updated within the last 4 days
                 if (
                     component_version.latest_version_updated_at and
                     (now - component_version.latest_version_updated_at).days <= 4
@@ -955,51 +977,55 @@ def update_components_latest_versions(image_uuid: str):
                 if DEBUG_LOGGING:
                     logger.debug(f"Processing PURL: {component_version.purl}")
                     logger.debug(f"Package type: {package_type}, Package name: {package_name}")
-                latest_version = None
-                if package_type == "pypi":
-                    url = f"https://pypi.org/pypi/{package_name}/json"
-                    r = requests.get(url, timeout=5)
-                    if r.ok:
-                        latest_version = r.json()["info"]["version"]
-                elif package_type == "npm":
-                    url = f"https://registry.npmjs.org/{package_name}"
-                    r = requests.get(url, timeout=5)
-                    if r.ok:
-                        latest_version = r.json()["dist-tags"]["latest"]
-                elif package_type == "nuget":
-                    url = f"https://api.nuget.org/v3-flatcontainer/{package_name}/index.json"
-                    r = requests.get(url, timeout=5)
-                    if r.ok:
-                        versions = r.json().get("versions", [])
-                        latest_version = versions[-1] if versions else None
-                elif package_type == "deb":
-                    try:
-                        output = subprocess.check_output(["apt-cache", "policy", package_name], text=True, timeout=5)
-                        for line in output.splitlines():
-                            if "Candidate:" in line:
-                                latest_version = line.split(":")[1].strip()
-                                break
-                    except Exception:
-                        continue
-                elif package_type == "golang":
-                    if package_name == "stdlib":
-                        url = "https://golang.org/dl/?mode=json"
+                # Check Redis cache before making HTTP calls
+                latest_version = _get_cached_latest_version(package_type, package_name)
+                if latest_version is None:
+                    if package_type == "pypi":
+                        url = f"https://pypi.org/pypi/{package_name}/json"
                         r = requests.get(url, timeout=5)
                         if r.ok:
-                            versions = r.json()
-                            stable_versions = [v['version'] for v in versions if not v['version'].endswith('beta') and not v['version'].endswith('rc')]
-                            if stable_versions:
-                                latest_version = max(stable_versions).replace('go', '')
-                    else:
-                        url = f"https://proxy.golang.org/{package_name}/@latest"
+                            latest_version = r.json()["info"]["version"]
+                    elif package_type == "npm":
+                        url = f"https://registry.npmjs.org/{package_name}"
                         r = requests.get(url, timeout=5)
                         if r.ok:
-                            data = r.json()
-                            latest_version = data.get('Version', '').replace('v', '')
+                            latest_version = r.json()["dist-tags"]["latest"]
+                    elif package_type == "nuget":
+                        url = f"https://api.nuget.org/v3-flatcontainer/{package_name}/index.json"
+                        r = requests.get(url, timeout=5)
+                        if r.ok:
+                            versions = r.json().get("versions", [])
+                            latest_version = versions[-1] if versions else None
+                    elif package_type == "deb":
+                        try:
+                            output = subprocess.check_output(["apt-cache", "policy", package_name], text=True, timeout=5)
+                            for line in output.splitlines():
+                                if "Candidate:" in line:
+                                    latest_version = line.split(":")[1].strip()
+                                    break
+                        except Exception:
+                            continue
+                    elif package_type == "golang":
+                        if package_name == "stdlib":
+                            url = "https://golang.org/dl/?mode=json"
+                            r = requests.get(url, timeout=5)
+                            if r.ok:
+                                versions = r.json()
+                                stable_versions = [v['version'] for v in versions if not v['version'].endswith('beta') and not v['version'].endswith('rc')]
+                                if stable_versions:
+                                    latest_version = max(stable_versions).replace('go', '')
+                        else:
+                            url = f"https://proxy.golang.org/{package_name}/@latest"
+                            r = requests.get(url, timeout=5)
+                            if r.ok:
+                                data = r.json()
+                                latest_version = data.get('Version', '').replace('v', '')
+                    if latest_version:
+                        _set_cached_latest_version(package_type, package_name, latest_version)
                 if latest_version:
                     component_version.latest_version = latest_version
                     component_version.latest_version_updated_at = now
-                    component_version.save()
+                    versions_to_update.append(component_version)
                     updated_count += 1
                     logger.info(
                         f"Updated latest version for {component_version.component.name}:{component_version.version} to {latest_version} (updated_at={now})"
@@ -1009,6 +1035,12 @@ def update_components_latest_versions(image_uuid: str):
                     f"Error processing component version {component_version.component.name}:{component_version.version}: {str(e)}"
                 )
                 continue
+        if versions_to_update:
+            ComponentVersion.objects.bulk_update(
+                versions_to_update,
+                ['latest_version', 'latest_version_updated_at'],
+                batch_size=200
+            )
         total_time = time.time() - start_time
         logger.info(f"Latest versions update completed in {total_time:.2f} seconds")
         logger.info(f"Updated latest versions for {updated_count} component versions")
@@ -1124,6 +1156,9 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
                 version__in=[nv.version for nv in new_versions]
             ).select_related('component')})
 
+        # Pre-load component versions already linked to this image to avoid per-match EXISTS queries
+        _linked_cv_pks = set(image.component_versions.values_list('pk', flat=True))
+
         # Process each match
         for match in matches:
             vulnerability_data = match.get('vulnerability', {})
@@ -1210,9 +1245,10 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
                     updated = True
                 if updated:
                     component_version_obj.save()
-                # Link image to component version
-                if not component_version_obj.images.filter(pk=image.pk).exists():
+                # Link image to component version (use in-memory set to skip DB check)
+                if component_version_obj.pk not in _linked_cv_pks:
                     component_version_obj.images.add(image)
+                    _linked_cv_pks.add(component_version_obj.pk)
                     logger.info(f"Linked component version {component_version} to image {image.name}")
                 
                 # Process component locations
@@ -2622,11 +2658,12 @@ def update_vulnerability_details_bulk(vulnerability_uuids: List[str], batch_size
                 
                 # Update database with transaction for atomicity
                 with transaction.atomic():
+                    details_to_update = []
+                    update_fields_set = set()
                     for vulnerability in batch_vulnerabilities:
                         try:
                             cve_details, exploit_info = bulk_data.get(vulnerability.vulnerability_id, (None, None))
                             
-                            # Use get_or_create to avoid race conditions
                             details, created = VulnerabilityDetails.objects.get_or_create(
                                 vulnerability=vulnerability,
                                 defaults={
@@ -2634,55 +2671,48 @@ def update_vulnerability_details_bulk(vulnerability_uuids: List[str], batch_size
                                 }
                             )
                             
-                            # Determine data source
                             data_sources = []
                             if cve_details:
-                                # Check if EPSS data was collected
                                 if cve_details.get('epss_data_source'):
                                     data_sources.append(cve_details['epss_data_source'])
                                 data_sources.append('CVE-CIRCL')
                             if exploit_info:
-                                # Check CISA KEV
                                 if exploit_info.get('cisa_kev_known_exploited'):
                                     data_sources.append('CISA-KEV')
-                                
-                                # Check Exploit-DB (separate tracking)
                                 if exploit_info.get('exploit_db_available'):
                                     data_sources.append('Exploit-DB')
-                                
-                                # Check NVD (for reference links)
                                 if any('nvd' in link for link in exploit_info.get('exploit_links', [])):
                                     data_sources.append('NVD')
                             
                             data_source_str = ' + '.join(data_sources) if data_sources else 'manual'
                             
-                            # Update CVE details if available
                             if cve_details:
                                 for field, value in cve_details.items():
                                     if value is not None:
-                                        # Handle EPSS fields specifically
-                                        if field.startswith('epss_'):
-                                            setattr(details, field, value)
-                                        else:
-                                            # Handle other CVE fields
-                                            setattr(details, field, value)
+                                        setattr(details, field, value)
+                                        update_fields_set.add(field)
                             
-                            # Update exploit information if available
                             if exploit_info:
                                 for field, value in exploit_info.items():
                                     if value is not None:
                                         setattr(details, field, value)
+                                        update_fields_set.add(field)
                             
-                            # Update data source
                             details.data_source = data_source_str
-                            details.last_updated = timezone.now()
-                            details.save()
-                            
+                            update_fields_set.add('data_source')
+                            details_to_update.append(details)
                             success_count += 1
                             
                         except Exception as e:
                             logger.error(f"Error updating vulnerability {vulnerability.vulnerability_id}: {str(e)}")
                             error_count += 1
+
+                    if details_to_update:
+                        VulnerabilityDetails.objects.bulk_update(
+                            details_to_update,
+                            list(update_fields_set),
+                            batch_size=200
+                        )
                 
                 processed_count += len(batch_vulnerabilities)
                 

@@ -117,19 +117,17 @@ class ComponentDetailOptimizedSerializer(serializers.ModelSerializer):
     
     @extend_schema_field(serializers.IntegerField())
     def get_total_images(self, obj):
-        # Get unique images across all versions of this component
+        if hasattr(obj, '_total_images'):
+            return obj._total_images
         from .models import Image
-        
-        # Get all images that contain any version of this component
-        # Using correct related name: component_versions
-        images_qs = Image.objects.filter(
+        return Image.objects.filter(
             component_versions__component=obj
-        ).distinct()
-        
-        return images_qs.count()
+        ).distinct().count()
     
     @extend_schema_field(serializers.IntegerField())
     def get_versions_count(self, obj):
+        if hasattr(obj, '_versions_count'):
+            return obj._versions_count
         return obj.versions.count()
 
 
@@ -707,6 +705,8 @@ class RepositoryDetailSerializer(serializers.ModelSerializer):
 
     @extend_schema_field(serializers.IntegerField())
     def get_tag_count(self, obj):
+        if hasattr(obj, 'tag_count'):
+            return obj.tag_count
         return obj.tags.count()
 
     @extend_schema_field(serializers.ListField(child=serializers.DictField()))
@@ -727,6 +727,8 @@ class RepositoryListSerializer(serializers.ModelSerializer):
 
     @extend_schema_field(serializers.IntegerField())
     def get_tag_count(self, obj):
+        if hasattr(obj, 'tag_count'):
+            return obj.tag_count
         return obj.tags.count()
 
 
@@ -822,6 +824,8 @@ class ComponentVersionListSerializer(serializers.ModelSerializer):
         read_only_fields = ['uuid', 'created_at', 'updated_at']
 
     def get_used_count(self, obj):
+        if hasattr(obj, 'images_count'):
+            return obj.images_count
         return obj.images.count()
 
 

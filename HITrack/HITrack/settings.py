@@ -50,6 +50,7 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    'django.middleware.gzip.GZipMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'corsheaders.middleware.CorsMiddleware',
@@ -58,7 +59,6 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
-    'core.middleware.RequestTimeoutMiddleware',
 ]
 
 ROOT_URLCONF = 'HITrack.urls'
@@ -92,6 +92,7 @@ DATABASES = {
         'PASSWORD': os.getenv('DB_PASSWORD', 'hitrack'),
         'HOST': os.getenv('DB_HOST', '127.0.0.1'),
         'PORT': os.getenv('DB_PORT', '5432'),
+        'CONN_MAX_AGE': 600,
     }
 }
 
@@ -231,6 +232,14 @@ SPECTACULAR_SETTINGS = {
 # Redis options
 REDIS_HOST = os.getenv('REDIS_HOST', '127.0.0.1')
 REDIS_PORT = os.getenv('REDIS_PORT', '6379')
+
+# Django cache backed by Redis (db 1) – shared across Gunicorn/Celery workers
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+        'LOCATION': f'redis://{REDIS_HOST}:{REDIS_PORT}/1',
+    }
+}
 
 # Celery settings
 CELERY_BROKER_URL = 'redis://' + REDIS_HOST + ':' + REDIS_PORT

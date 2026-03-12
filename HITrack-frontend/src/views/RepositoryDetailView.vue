@@ -784,8 +784,8 @@ const fetchRepository = async () => {
 const loadDockerRepos = async () => {
   dockerReposLoading.value = true
   try {
-    const resp = await api.get('repositories/', { params: { repository_type: 'docker', page_size: 500 } })
-    dockerReposForFallback.value = (resp.data?.results || resp.data || []).map((r: any) => ({ uuid: r.uuid, name: r.name }))
+    const resp = await api.get('repositories/names/', { params: { repository_type: 'docker' } })
+    dockerReposForFallback.value = (resp.data || []).map((r: any) => ({ uuid: r.uuid, name: r.name }))
   } catch (e: any) {
     notificationService.error(e?.response?.data?.error || 'Failed to load Docker repositories')
   } finally {
@@ -1008,11 +1008,8 @@ const runScan = async (latestOnly: boolean) => {
 }
 
 onMounted(async () => {
-  // Load repository data first (lightweight)
-  await fetchRepository()
-  
-  // Load tags and charts in parallel (heavier operations)
   await Promise.all([
+    fetchRepository(),
     fetchTags(),
     fetchTagsForCharts()
   ])
