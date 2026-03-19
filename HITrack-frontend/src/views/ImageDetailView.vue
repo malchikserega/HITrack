@@ -1,6 +1,6 @@
 <template>
   <div class="image-detail">
-    <v-container>
+    <v-container fluid class="page-shell page-shell--wide">
       <v-row>
         <v-col cols="12">
           <v-btn variant="text" @click="router.back()" class="mb-2">

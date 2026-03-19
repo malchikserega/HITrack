@@ -1,5 +1,5 @@
 <template>
-  <v-container>
+  <v-container fluid class="page-shell page-shell--wide">
     <v-row>
       <v-col cols="12">
         <v-btn variant="text" @click="goBack" class="mb-2">
@@ -170,14 +170,15 @@
           :page="tagsPage"
           :server-items-length="tagsTotal"
           hide-default-footer
+          class="tag-table"
           item-class="clickable-row"
           @click:row="onTagRowClick"
           @update:sort-by="onSortChange"
         >
           <template #item.tag="{ item }">
-            <div class="d-flex align-center">
-              <span class="font-weight-medium">{{ item.tag }}</span>
-              <div v-if="item.releases && item.releases.length > 0" class="ml-2 d-flex gap-1">
+            <div class="tag-label-cell">
+              <span class="font-weight-medium tag-value">{{ item.tag }}</span>
+              <div v-if="item.releases && item.releases.length > 0" class="tag-release-list">
                 <v-chip
                   v-for="release in item.releases"
                   :key="release.uuid"
@@ -192,22 +193,47 @@
             </div>
           </template>
           <template #item.name="{ item }">
-            <div class="d-flex flex-wrap align-center gap-1">
-              <template v-if="item.image_path">
-                <v-chip size="x-small" variant="tonal" color="primary">{{ item.image_path }}</v-chip>
-              </template>
-              <template v-if="item.image_names && item.image_names.length">
+            <div class="tag-images-cell">
+              <div v-if="getTagImageCount(item)" class="tag-images-meta">
                 <v-chip
-                  v-for="(imgName, idx) in item.image_names"
-                  :key="idx"
+                  size="x-small"
+                  color="secondary"
+                  variant="tonal"
+                  class="tag-images-count"
+                >
+                  {{ getTagImageCount(item) }} image{{ getTagImageCount(item) === 1 ? '' : 's' }}
+                </v-chip>
+              </div>
+              <div v-if="getTagImageCount(item)" class="tag-images-list">
+                <v-tooltip
+                  v-for="entry in getVisibleTagImageEntries(item)"
+                  :key="entry.label"
+                  location="top"
+                >
+                  <template #activator="{ props }">
+                    <v-chip
+                      v-bind="props"
+                      size="x-small"
+                      :variant="entry.primary ? 'tonal' : 'outlined'"
+                      :color="entry.primary ? 'primary' : 'secondary'"
+                      class="tag-image-chip"
+                    >
+                      {{ entry.label }}
+                    </v-chip>
+                  </template>
+                  <span>{{ entry.label }}</span>
+                </v-tooltip>
+                <v-chip
+                  v-if="getHiddenTagImageCount(item)"
                   size="x-small"
                   variant="outlined"
-                  color="secondary"
+                  color="grey-darken-1"
+                  class="tag-image-chip tag-image-chip--summary"
                 >
-                  {{ imgName }}
+                  +{{ getHiddenTagImageCount(item) }} more
                 </v-chip>
-              </template>
-              <span v-if="!item.image_path && (!item.image_names || !item.image_names.length)" class="text-caption text-grey">—</span>
+              </div>
+              <span v-else class="text-caption text-grey">—</span>
             </div>
           </template>
           <template #item.processing_status="{ item }">
@@ -222,62 +248,65 @@
             </v-chip>
           </template>
           <template #item.actions="{ item }">
-            <v-tooltip :text="getActionTooltip(item, 'process')">
-              <template v-slot:activator="{ props }">
-                <v-btn
-                  v-bind="props"
-                  icon="mdi-code-tags"
-                  variant="tonal"
-                  size="x-small"
-                  color="primary"
-                  :disabled="isActionDisabled(item, 'process')"
-                  @click.stop="onProcessTag(item)"
-                />
-              </template>
-            </v-tooltip>
-            <v-tooltip :text="getActionTooltip(item, 'rescan')">
-              <template v-slot:activator="{ props }">
-                <v-btn
-                  v-bind="props"
-                  icon="mdi-cog-refresh"
-                  variant="tonal"
-                  size="x-small"
-                  color="info"
-                  class="ml-2"
-                  :disabled="isActionDisabled(item, 'rescan')"
-                  @click.stop="onRescanTagImages(item)"
-                />
-              </template>
-            </v-tooltip>
-            <v-tooltip text="Reanalyze SBOM for all images in this tag">
-              <template v-slot:activator="{ props }">
-                <v-btn
-                  v-bind="props"
-                  icon="mdi-file-document-refresh"
-                  variant="tonal"
-                  size="x-small"
-                  color="warning"
-                  class="ml-2"
-                  :disabled="isActionDisabled(item, 'rescan')"
-                  :loading="reanalyzingSbom === item.uuid"
-                  @click.stop="onReanalyzeSbom(item)"
-                />
-              </template>
-            </v-tooltip>
-            <v-tooltip text="Delete tag">
-              <template v-slot:activator="{ props }">
-                <v-btn
-                  v-bind="props"
-                  icon="mdi-delete"
-                  variant="tonal"
-                  size="x-small"
-                  color="error"
-                  class="ml-2"
-                  :loading="deletingTag === item.uuid"
-                  @click.stop="onDeleteTag(item)"
-                />
-              </template>
-            </v-tooltip>
+            <div class="tag-actions" @click.stop>
+              <v-tooltip :text="getActionTooltip(item, 'process')">
+                <template v-slot:activator="{ props }">
+                  <v-btn
+                    v-bind="props"
+                    icon="mdi-code-tags"
+                    variant="tonal"
+                    size="x-small"
+                    color="primary"
+                    class="tag-action-btn"
+                    :disabled="isActionDisabled(item, 'process')"
+                    @click.stop="onProcessTag(item)"
+                  />
+                </template>
+              </v-tooltip>
+              <v-tooltip :text="getActionTooltip(item, 'rescan')">
+                <template v-slot:activator="{ props }">
+                  <v-btn
+                    v-bind="props"
+                    icon="mdi-cog-refresh"
+                    variant="tonal"
+                    size="x-small"
+                    color="info"
+                    class="tag-action-btn"
+                    :disabled="isActionDisabled(item, 'rescan')"
+                    @click.stop="onRescanTagImages(item)"
+                  />
+                </template>
+              </v-tooltip>
+              <v-tooltip text="Reanalyze SBOM for all images in this tag">
+                <template v-slot:activator="{ props }">
+                  <v-btn
+                    v-bind="props"
+                    icon="mdi-file-document-refresh"
+                    variant="tonal"
+                    size="x-small"
+                    color="warning"
+                    class="tag-action-btn"
+                    :disabled="isActionDisabled(item, 'rescan')"
+                    :loading="reanalyzingSbom === item.uuid"
+                    @click.stop="onReanalyzeSbom(item)"
+                  />
+                </template>
+              </v-tooltip>
+              <v-tooltip text="Delete tag">
+                <template v-slot:activator="{ props }">
+                  <v-btn
+                    v-bind="props"
+                    icon="mdi-delete"
+                    variant="tonal"
+                    size="x-small"
+                    color="error"
+                    class="tag-action-btn"
+                    :loading="deletingTag === item.uuid"
+                    @click.stop="onDeleteTag(item)"
+                  />
+                </template>
+              </v-tooltip>
+            </div>
           </template>
           <template v-slot:item.updated_at="{ item }">
             {{ $formatDate(item.updated_at) }}
@@ -458,15 +487,16 @@ const loading = ref(true)
 const repositoryLoading = ref(true)
 const tagsLoading = ref(true)
 const chartsLoading = ref(true)
+const MAX_VISIBLE_TAG_IMAGES = 3
 
 const headers = [
-  { title: 'Tag', key: 'tag', sortable: false },
-  { title: 'Name', key: 'name', sortable: false },
-  { title: 'Status', key: 'processing_status', sortable: false },
-  { title: 'Vulnerabilities', key: 'findings', sortable: false },
-  { title: 'Components', key: 'components', sortable: false },
-  { title: 'Updated', key: 'updated_at', sortable: false },
-  { title: 'Actions', key: 'actions', sortable: false }
+  { title: 'Tag', key: 'tag', sortable: false, width: '170px' },
+  { title: 'Images', key: 'name', sortable: false },
+  { title: 'Status', key: 'processing_status', sortable: false, width: '190px' },
+  { title: 'Vulnerabilities', key: 'findings', sortable: false, width: '120px' },
+  { title: 'Components', key: 'components', sortable: false, width: '120px' },
+  { title: 'Updated', key: 'updated_at', sortable: false, width: '160px' },
+  { title: 'Actions', key: 'actions', sortable: false, width: '172px' }
 ]
 
 const tags = ref<any[]>([])
@@ -489,6 +519,36 @@ const newTagName = ref('')
 const newTagDescription = ref('')
 const addTagForm = ref<any>(null)
 const deletingTag = ref<string | null>(null)
+
+const getTagImageEntries = (item: any) => {
+  const entries: Array<{ label: string; primary: boolean }> = []
+  const seen = new Set<string>()
+
+  const addEntry = (label: string | undefined, primary: boolean) => {
+    if (!label || seen.has(label)) return
+    seen.add(label)
+    entries.push({ label, primary })
+  }
+
+  addEntry(item.image_path, true)
+  for (const imageName of item.image_names || []) {
+    addEntry(imageName, false)
+  }
+
+  return entries
+}
+
+const getVisibleTagImageEntries = (item: any) => {
+  return getTagImageEntries(item).slice(0, MAX_VISIBLE_TAG_IMAGES)
+}
+
+const getTagImageCount = (item: any) => {
+  return getTagImageEntries(item).length
+}
+
+const getHiddenTagImageCount = (item: any) => {
+  return Math.max(0, getTagImageCount(item) - MAX_VISIBLE_TAG_IMAGES)
+}
 const showDeleteDialog = ref(false)
 const tagToDelete = ref<any>(null)
 const scanning = ref(false)
@@ -1038,6 +1098,118 @@ onMounted(async () => {
   color: #39FF14 !important;
   background: rgba(57, 255, 20, 0.1) !important;
   border: 1px solid #39FF14 !important;
+}
+
+.tag-label-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 100%;
+}
+
+.tag-value {
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.tag-release-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.tag-images-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 100%;
+}
+
+.tag-images-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tag-images-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 100%;
+}
+
+.tag-image-chip {
+  max-width: min(100%, 320px);
+}
+
+.tag-image-chip--summary,
+.tag-images-count,
+.tag-action-btn {
+  flex-shrink: 0;
+}
+
+.tag-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  width: 100%;
+  white-space: nowrap;
+}
+
+:deep(.tag-table .v-chip__content) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:deep(.tag-table td) {
+  vertical-align: middle;
+}
+
+:deep(.tag-table td:nth-child(3)),
+:deep(.tag-table td:nth-child(4)),
+:deep(.tag-table td:nth-child(5)),
+:deep(.tag-table td:nth-child(7)) {
+  white-space: nowrap;
+}
+
+@media (min-width: 1264px) {
+  :deep(.tag-table table) {
+    table-layout: fixed;
+  }
+
+  :deep(.tag-table th:nth-child(1)),
+  :deep(.tag-table td:nth-child(1)) {
+    width: 170px;
+    min-width: 170px;
+  }
+
+  :deep(.tag-table th:nth-child(3)),
+  :deep(.tag-table td:nth-child(3)) {
+    width: 190px;
+    min-width: 190px;
+  }
+
+  :deep(.tag-table th:nth-child(4)),
+  :deep(.tag-table td:nth-child(4)),
+  :deep(.tag-table th:nth-child(5)),
+  :deep(.tag-table td:nth-child(5)) {
+    width: 120px;
+    min-width: 120px;
+  }
+
+  :deep(.tag-table th:nth-child(6)),
+  :deep(.tag-table td:nth-child(6)) {
+    width: 160px;
+    min-width: 160px;
+  }
+
+  :deep(.tag-table th:nth-child(7)),
+  :deep(.tag-table td:nth-child(7)) {
+    width: 172px;
+    min-width: 172px;
+  }
 }
 
 /* Chart filter button styles */

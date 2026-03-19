@@ -1,6 +1,6 @@
 <template>
   <div class="repositories">
-    <v-container>
+    <v-container fluid class="page-shell page-shell--wide">
       <v-row>
         <v-col cols="12">
           <h1 class="text-h4 mb-4 font-weight-black">Repositories</h1>

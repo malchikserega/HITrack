@@ -21,16 +21,17 @@ from .serializers import (
 from django.db import models
 from .pagination import CustomPageNumberPagination
 from django.db.models import Q, Count, Prefetch, Case, When, Value, BooleanField, IntegerField
+from django.db.models.query import prefetch_related_objects
 from django.utils import timezone
 from django.utils.decorators import method_decorator
 from django.views.decorators.cache import cache_page
 from datetime import timedelta, datetime
 from io import BytesIO
+from collections import defaultdict
 from rest_framework.views import APIView
 from django.http import HttpResponse
 from openpyxl import Workbook
 from django.shortcuts import render
-from packaging import version as packaging_version
 import re
 import logging
 from django.conf import settings
@@ -38,6 +39,234 @@ from django.conf import settings
 logger = logging.getLogger(__name__)
 
 # Create your views here.
+
+REPOSITORY_TAG_LIST_ONLY_FIELDS = (
+    'uuid',
+    'tag',
+    'image_path',
+    'processing_status',
+    'created_at',
+    'updated_at',
+    'repository_id',
+)
+
+REPOSITORY_TAG_ORDERING_MAP = {
+    'created_at': 'created_at',
+    '-created_at': '-created_at',
+    'updated_at': 'updated_at',
+    '-updated_at': '-updated_at',
+    'tag': 'tag',
+    '-tag': '-tag',
+}
+
+IMAGE_LIST_ORDERING_MAP = {
+    'name': 'name',
+    '-name': '-name',
+    'digest': 'digest',
+    '-digest': '-digest',
+    'created_at': 'created_at',
+    '-created_at': '-created_at',
+    'updated_at': 'updated_at',
+    '-updated_at': '-updated_at',
+    'findings': 'findings_count',
+    '-findings': '-findings_count',
+    'components_count': 'components_count',
+    '-components_count': '-components_count',
+    'unique_findings': 'unique_findings_count',
+    '-unique_findings': '-unique_findings_count',
+}
+
+
+def _build_optimized_image_list_queryset(queryset):
+    """Annotate lightweight image summary fields without loading large JSON blobs."""
+    return queryset.annotate(
+        findings_count=Count(
+            'component_versions__componentversionvulnerability',
+            distinct=False
+        ),
+        unique_findings_count=Count(
+            'component_versions__componentversionvulnerability__vulnerability',
+            distinct=True
+        ),
+        components_count=Count(
+            'component_versions',
+            distinct=True
+        ),
+        has_sbom=Case(
+            When(sbom_data__isnull=False, then=True),
+            default=False,
+            output_field=BooleanField()
+        ),
+        has_grype=Case(
+            When(grype_data__isnull=False, then=True),
+            default=False,
+            output_field=BooleanField()
+        )
+    ).prefetch_related(
+        'repository_tags__repository'
+    ).defer('sbom_data', 'grype_data')
+
+
+def _build_repository_tag_image_queryset(queryset):
+    """Lightweight image queryset for nested tag detail responses."""
+    return queryset.annotate(
+        findings_count=Count(
+            'component_versions__componentversionvulnerability',
+            distinct=False
+        ),
+        components_count=Count(
+            'component_versions',
+            distinct=True
+        )
+    ).only(
+        'uuid',
+        'name',
+        'created_at',
+        'updated_at',
+    )
+
+
+def _build_repository_tag_detail_queryset(queryset):
+    return queryset.select_related('repository').annotate(
+        total_unique_vulnerabilities=Count(
+            'images__component_versions__componentversionvulnerability__vulnerability',
+            distinct=True,
+        ),
+        total_findings=Count(
+            'images__component_versions__componentversionvulnerability',
+            distinct=False,
+        ),
+        total_components=Count(
+            'images__component_versions',
+            distinct=False,
+        ),
+    ).prefetch_related(
+        Prefetch('images', queryset=_build_repository_tag_image_queryset(Image.objects.all())),
+        'releases__release',
+    )
+
+
+def _apply_image_list_ordering(queryset, ordering, default='-updated_at'):
+    requested = []
+    for field in (ordering or default).split(','):
+        field = field.strip()
+        if not field:
+            continue
+        resolved = IMAGE_LIST_ORDERING_MAP.get(field)
+        if resolved:
+            requested.append(resolved)
+    if not requested:
+        requested = [IMAGE_LIST_ORDERING_MAP[default]]
+    return queryset.order_by(*requested)
+
+
+def _repository_tag_version_key(tag_value):
+    parts = []
+    remaining = tag_value or ''
+    while remaining:
+        match = re.match(r'^(\d+)', remaining)
+        if not match:
+            break
+        parts.append(int(match.group(1)))
+        remaining = remaining[len(match.group(1)):]
+        while remaining and not remaining[0].isdigit():
+            remaining = remaining[1:]
+    while len(parts) < 4:
+        parts.append(0)
+    return (*parts[:4], (tag_value or '').lower())
+
+
+def _apply_repository_tag_ordering(queryset, ordering, default='-updated_at'):
+    fields = [field.strip() for field in (ordering or default).split(',') if field.strip()]
+    if not fields:
+        fields = [default]
+
+    if len(fields) == 1 and fields[0].lstrip('-') == 'tag':
+        tags = list(queryset)
+        tags.sort(
+            key=lambda tag: _repository_tag_version_key(tag.tag),
+            reverse=fields[0].startswith('-')
+        )
+        return tags
+
+    requested = []
+    for field in fields:
+        resolved = REPOSITORY_TAG_ORDERING_MAP.get(field)
+        if resolved:
+            requested.append(resolved)
+    if not requested:
+        requested = [REPOSITORY_TAG_ORDERING_MAP[default]]
+    return queryset.order_by(*requested)
+
+
+def _attach_repository_tag_summary_data(tags):
+    """Hydrate page-level tag summary data with a handful of bulk queries."""
+    tag_ids = [tag.pk for tag in tags]
+    if not tag_ids:
+        return
+
+    findings_counts = {
+        row['component_version__images__repository_tags__pk']: row['total']
+        for row in ComponentVersionVulnerability.objects.filter(
+            component_version__images__repository_tags__pk__in=tag_ids
+        ).values('component_version__images__repository_tags__pk').annotate(
+            total=Count('pk')
+        )
+    }
+
+    component_counts = {
+        row['repository_tags__pk']: row['total']
+        for row in Image.objects.filter(
+            repository_tags__pk__in=tag_ids
+        ).values('repository_tags__pk').annotate(
+            total=Count('component_versions')
+        )
+    }
+
+    unique_vulnerability_counts = {
+        row['component_version__images__repository_tags__pk']: row['total']
+        for row in ComponentVersionVulnerability.objects.filter(
+            component_version__images__repository_tags__pk__in=tag_ids
+        ).values('component_version__images__repository_tags__pk').annotate(
+            total=Count('vulnerability', distinct=True)
+        )
+    }
+
+    image_names_map = defaultdict(list)
+    image_names_seen = defaultdict(set)
+    image_name_rows = Image.objects.filter(
+        repository_tags__pk__in=tag_ids
+    ).values(
+        'repository_tags__pk',
+        'name',
+    ).order_by(
+        'repository_tags__pk',
+        'name',
+    ).distinct()
+    for row in image_name_rows:
+        tag_pk = row['repository_tags__pk']
+        image_name = row['name']
+        if image_name and image_name not in image_names_seen[tag_pk]:
+            image_names_seen[tag_pk].add(image_name)
+            image_names_map[tag_pk].append(image_name)
+
+    releases_map = defaultdict(list)
+    for link in RepositoryTagRelease.objects.filter(
+        repository_tag_id__in=tag_ids
+    ).select_related('release').order_by('-added_at'):
+        releases_map[link.repository_tag_id].append({
+            'uuid': link.release.uuid,
+            'name': link.release.name,
+            'description': link.release.description,
+            'added_at': link.added_at,
+        })
+
+    for tag in tags:
+        tag.total_findings = findings_counts.get(tag.pk, 0)
+        tag.total_components = component_counts.get(tag.pk, 0)
+        tag.total_unique_vulnerabilities = unique_vulnerability_counts.get(tag.pk, 0)
+        tag.image_names_data = image_names_map.get(tag.pk, [])
+        tag.release_data = releases_map.get(tag.pk, [])
 
 class BaseViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
@@ -94,9 +323,7 @@ class RepositoryViewSet(BaseViewSet):
     @action(detail=True, methods=['get'])
     def tags(self, request, uuid=None):
         repository = self.get_object()
-        tags = repository.tags.prefetch_related(
-            'images', 'releases__release'
-        ).all()
+        tags = _build_repository_tag_detail_queryset(repository.tags.all())
         serializer = RepositoryTagSerializer(tags, many=True)
         return Response(serializer.data)
 
@@ -407,70 +634,25 @@ class RepositoryViewSet(BaseViewSet):
     def paginated_tags(self, request, uuid=None):
         """
         Returns paginated, searchable, and sortable list of tags for a repository.
-        Optimized with efficient bulk queries to avoid N+1 and complex JOINs.
+        Optimized to paginate first and hydrate page-level summary data in bulk.
         """
         repository = self.get_object()
-        from .models import ComponentVersionVulnerability, ComponentVersion, Image
-        from django.db.models import Prefetch
+        tags = repository.tags.only(*REPOSITORY_TAG_LIST_ONLY_FIELDS)
 
-        # Get tags with lightweight prefetch for releases only
-        tags = repository.tags.prefetch_related('releases__release')
-
-        # Apply search filter first to reduce data
         search = request.query_params.get('search')
         if search:
             tags = tags.filter(Q(tag__icontains=search))
 
-        # Apply ordering at DB level (more efficient)
-        ordering = request.query_params.get('ordering', '-created_at')
-        if ordering:
-            tags = tags.order_by(ordering)
+        tags = _apply_repository_tag_ordering(
+            tags,
+            request.query_params.get('ordering', '-created_at'),
+            default='-created_at',
+        )
 
-        # Pagination before counting (only count what we need)
         paginator = CustomPageNumberPagination()
         page = paginator.paginate_queryset(tags, request)
-        
-        # Convert to list: if page is None (pagination disabled), apply default limit for performance
-        # If page is not None, it's already a slice queryset (e.g., tags[10:20] for page 2)
         page = list(page) if page is not None else list(tags[:paginator.page_size])
-        
-        # Get tag IDs for the current page only
-        tag_ids = [tag.pk for tag in page]
-        
-        # Bulk count findings for page tags only - much faster
-        findings_counts = {}
-        if tag_ids:
-            # Use direct query through Image -> ComponentVersion -> ComponentVersionVulnerability
-            findings_data = ComponentVersionVulnerability.objects.filter(
-                component_version__images__repository_tags__pk__in=tag_ids
-            ).values('component_version__images__repository_tags__pk').annotate(
-                count=Count('pk')
-            )
-            for item in findings_data:
-                tag_pk = item['component_version__images__repository_tags__pk']
-                findings_counts[tag_pk] = findings_counts.get(tag_pk, 0) + item['count']
-        
-        # Bulk count components for page tags only
-        # Count components per tag separately to avoid duplicates when image belongs to multiple tags
-        components_counts = {}
-        if tag_ids:
-            # For each tag, count components from images that belong to that specific tag
-            for tag_pk in tag_ids:
-                # Get images that belong to this specific tag
-                images_for_tag = Image.objects.filter(
-                    repository_tags__pk=tag_pk
-                ).annotate(
-                    comp_count=Count('component_versions', distinct=False)
-                ).values('uuid', 'comp_count')
-                
-                # Sum components for this tag
-                total = sum(img['comp_count'] for img in images_for_tag)
-                components_counts[tag_pk] = total
-        
-        # Attach counts to tags on the page
-        for tag in page:
-            tag.total_findings = findings_counts.get(tag.pk, 0)
-            tag.total_components = components_counts.get(tag.pk, 0)
+        _attach_repository_tag_summary_data(page)
         
         serializer = RepositoryTagListSerializer(page, many=True)
         return paginator.get_paginated_response(serializer.data)
@@ -480,67 +662,14 @@ class RepositoryViewSet(BaseViewSet):
         """
         Returns the latest 30 tags for repository for use in charts (fields: uuid, tag, findings, components, created_at)
         Tags are sorted by semantic version (numeric part) and then by suffix, returning the most recent 30 tags.
-        Optimized with efficient bulk queries to avoid N+1 and complex JOINs.
+        Optimized to fetch summary data only for the 30 tags shown in the chart.
         """
         repository = self.get_object()
-        from .models import ComponentVersionVulnerability, ComponentVersion
-        
-        # Get all tags first with prefetch for releases
-        tags = repository.tags.prefetch_related('releases__release')
-        tags_list = list(tags)
-        
-        # Sort by version first (before counting to reduce data)
-        version_regex = re.compile(r'^(\d+\.\d+\.\d+)')
-        def version_key(tag):
-            match = version_regex.match(tag.tag)
-            if match:
-                try:
-                    ver = packaging_version.parse(match.group(1))
-                except Exception:
-                    ver = packaging_version.Version('0.0.0')
-                suffix = tag.tag[len(match.group(1)):] or ''
-                return (ver, suffix)
-            else:
-                return (packaging_version.Version('0.0.0'), tag.tag)
-        
-        sorted_tags = sorted(tags_list, key=version_key)[-30:]
-        
-        # Get tag IDs for only the 30 tags we need
-        tag_ids = [tag.pk for tag in sorted_tags]
-        
-        # Bulk count findings for these 30 tags only - much faster
-        findings_counts = {}
-        if tag_ids:
-            findings_data = ComponentVersionVulnerability.objects.filter(
-                component_version__images__repository_tags__pk__in=tag_ids
-            ).values('component_version__images__repository_tags__pk').annotate(
-                count=Count('pk')
-            )
-            for item in findings_data:
-                tag_pk = item['component_version__images__repository_tags__pk']
-                findings_counts[tag_pk] = findings_counts.get(tag_pk, 0) + item['count']
-        
-        # Bulk count components for these 30 tags only
-        # Count components per tag separately to avoid duplicates when image belongs to multiple tags
-        components_counts = {}
-        if tag_ids:
-            # For each tag, count components from images that belong to that specific tag
-            for tag_pk in tag_ids:
-                # Get images that belong to this specific tag
-                images_for_tag = Image.objects.filter(
-                    repository_tags__pk=tag_pk
-                ).annotate(
-                    comp_count=Count('component_versions', distinct=False)
-                ).values('uuid', 'comp_count')
-                
-                # Sum components for this tag
-                total = sum(img['comp_count'] for img in images_for_tag)
-                components_counts[tag_pk] = total
-        
-        # Attach counts to tags
-        for tag in sorted_tags:
-            tag.total_findings = findings_counts.get(tag.pk, 0)
-            tag.total_components = components_counts.get(tag.pk, 0)
+        sorted_tags = sorted(
+            list(repository.tags.only(*REPOSITORY_TAG_LIST_ONLY_FIELDS)),
+            key=lambda tag: _repository_tag_version_key(tag.tag)
+        )[-30:]
+        _attach_repository_tag_summary_data(sorted_tags)
         
         serializer = RepositoryTagListSerializer(sorted_tags, many=True)
         return Response(serializer.data)
@@ -552,6 +681,12 @@ class RepositoryTagViewSet(BaseViewSet):
     search_fields = ['tag', 'repository__name']
     ordering_fields = ['tag', 'created_at', 'updated_at']
     lookup_field = 'uuid'
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        if self.action == 'retrieve':
+            qs = _build_repository_tag_detail_queryset(qs)
+        return qs
 
     def _check_time_restriction(self, tag):
         """Check if 5 minutes have passed since last update"""
@@ -565,12 +700,16 @@ class RepositoryTagViewSet(BaseViewSet):
     @action(detail=True, methods=['get'])
     def images(self, request, uuid=None):
         tag = self.get_object()
-        images = tag.images.all()
-        
-        # Apply ordering if provided
-        ordering = request.query_params.get('ordering', '-updated_at')
-        if ordering:
-            images = images.order_by(ordering)
+        images = _build_optimized_image_list_queryset(tag.images.all())
+
+        search = request.query_params.get('search')
+        if search:
+            images = images.filter(name__icontains=search)
+
+        images = _apply_image_list_ordering(
+            images,
+            request.query_params.get('ordering', '-updated_at'),
+        )
             
         page = self.paginate_queryset(images)
         if page is not None:
@@ -769,7 +908,7 @@ class ImageViewSet(BaseViewSet):
     queryset = Image.objects.all()
     filterset_fields = ['repository_tags', 'component_versions']
     search_fields = ['name']
-    ordering_fields = ['name', 'created_at', 'updated_at']
+    ordering_fields = ['name', 'created_at', 'updated_at', 'findings_count', 'unique_findings_count', 'components_count']
     pagination_class = CustomPageNumberPagination
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
 
@@ -786,21 +925,10 @@ class ImageViewSet(BaseViewSet):
         
         # Optimize for list action - prevent N+1 queries and memory issues
         if self.action == 'list':
-            # Annotate counts and check for large JSON fields without loading them
-            # This prevents loading sbom_data and grype_data into memory
+            queryset = _build_optimized_image_list_queryset(queryset)
+        elif self.action == 'retrieve':
             queryset = queryset.annotate(
-                findings_count=Count(
-                    'component_versions__componentversionvulnerability',
-                    distinct=False
-                ),
-                unique_findings_count=Count(
-                    'component_versions__componentversionvulnerability__vulnerability',
-                    distinct=True
-                ),
-                components_count=Count(
-                    'component_versions',
-                    distinct=True
-                ),
+                components_count=Count('component_versions', distinct=True),
                 has_sbom=Case(
                     When(sbom_data__isnull=False, then=True),
                     default=False,
@@ -812,10 +940,6 @@ class ImageViewSet(BaseViewSet):
                     output_field=BooleanField()
                 )
             ).prefetch_related(
-                'repository_tags__repository'
-            ).defer('sbom_data', 'grype_data')  # Defer after annotation to avoid loading large JSON
-        elif self.action == 'retrieve':
-            queryset = queryset.prefetch_related(
                 'repository_tags__repository'
             ).defer('sbom_data', 'grype_data')
         
@@ -976,7 +1100,10 @@ class ImageViewSet(BaseViewSet):
         """
         image = self.get_object()
         # Get all component versions linked to this image, with their components
-        component_versions = image.component_versions.select_related('component').all()
+        component_versions = image.component_versions.select_related('component').annotate(
+            vulnerabilities_count=Count('vulnerabilities', distinct=True),
+            images_count=Count('images', distinct=True),
+        ).all()
 
         # Search
         search = request.query_params.get('search')
@@ -1011,8 +1138,23 @@ class ImageViewSet(BaseViewSet):
         # Pagination
         paginator = CustomPageNumberPagination()
         page = paginator.paginate_queryset(component_versions, request)
-        serializer = ComponentVersionSerializer(page, many=True)
-        return paginator.get_paginated_response(serializer.data)
+        items = list(page) if page is not None else list(component_versions[:paginator.page_size])
+        prefetch_related_objects(
+            items,
+            'images',
+            Prefetch(
+                'componentversionvulnerability_set',
+                queryset=ComponentVersionVulnerability.objects.select_related('vulnerability'),
+            ),
+            Prefetch(
+                'locations',
+                queryset=ComponentLocation.objects.select_related('image'),
+            ),
+        )
+        serializer = ComponentVersionSerializer(items, many=True)
+        if page is not None:
+            return paginator.get_paginated_response(serializer.data)
+        return Response(serializer.data)
 
     @action(detail=True, methods=['post'], url_path='rescan-grype')
     def rescan_grype(self, request, uuid=None):
@@ -1642,8 +1784,9 @@ class VulnerabilityViewSet(BaseViewSet):
         # Get component versions that have this vulnerability with proper ordering and annotations
         component_versions = ComponentVersion.objects.filter(
             vulnerabilities=vulnerability
-        ).select_related('component').prefetch_related('images').annotate(
-            vulnerabilities_count=models.Count('vulnerabilities', distinct=True)
+        ).select_related('component').annotate(
+            vulnerabilities_count=models.Count('vulnerabilities', distinct=True),
+            images_count=models.Count('images', distinct=True),
         ).order_by(
             'component__name', 'version', 'created_at'
         )
@@ -1967,127 +2110,34 @@ class RepositoryTagListForRepositoryView(ListAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = RepositoryTagListSerializer
     pagination_class = CustomPageNumberPagination
-    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
-    search_fields = ['tag']
-    ordering_fields = ['created_at', 'updated_at', 'tag']
     ordering = ['-updated_at']
 
     def get_queryset(self):
         repository_uuid = self.kwargs['repository_uuid']
-        from .models import ComponentVersionVulnerability, ComponentVersion, Image
-        
-        # Optimize queryset - annotate counts to avoid N+1 in serializer
-        queryset = RepositoryTag.objects.filter(
+        return RepositoryTag.objects.filter(
             repository__uuid=repository_uuid
-        ).prefetch_related(
-            'releases__release',
-            'images',
-        ).annotate(
-            # Count findings: RepositoryTag -> Image -> ComponentVersion -> ComponentVersionVulnerability
-            total_findings=Count(
-                'images__component_versions__componentversionvulnerability',
-                distinct=False
-            ),
-            # Count components so serializer never runs fallback (optimization 1)
-            total_components=Count('images__component_versions', distinct=False),
-        )
-        
-        # Check if ordering by tag is requested
-        # Use request.GET for Django request, request.query_params for DRF request
-        if hasattr(self.request, 'query_params'):
-            ordering = self.request.query_params.get('ordering', '')
-        else:
-            ordering = self.request.GET.get('ordering', '')
-        if 'tag' in ordering:
-            # Get all tags and sort them semantically
-            tags = list(queryset)
-            version_regex = re.compile(r'^(\d+\.\d+\.\d+)')
-            
-            def version_key(tag):
-                # Extract all numeric parts from the beginning of the tag
-                parts = []
-                remaining = tag.tag
-                
-                # Extract numeric parts (major.minor.patch.build)
-                while remaining:
-                    match = re.match(r'^(\d+)', remaining)
-                    if match:
-                        parts.append(int(match.group(1)))
-                        remaining = remaining[len(match.group(1)):]
-                        # Skip non-numeric characters
-                        while remaining and not remaining[0].isdigit():
-                            remaining = remaining[1:]
-                    else:
-                        break
-                
-                # Pad with zeros to ensure consistent comparison
-                while len(parts) < 4:
-                    parts.append(0)
-                
-                # Take only first 4 parts (major.minor.patch.build)
-                parts = parts[:4]
-                
-                # Add suffix for secondary sorting
-                suffix = remaining or ''
-                
-                return (tuple(parts), suffix)
-            
-            # Sort by version (descending by default for tag ordering)
-            reverse = ordering.startswith('-')
-            tags.sort(key=version_key, reverse=reverse)
-            # total_components already on each tag from queryset annotation (optimization 1)
-
-            # Return the sorted tags as a list (we'll handle pagination manually)
-            return tags
-        
-        return queryset
+        ).only(*REPOSITORY_TAG_LIST_ONLY_FIELDS)
     
     def list(self, request, *args, **kwargs):
         queryset = self.get_queryset()
-        
-        # If queryset is a list (from tag ordering), handle pagination manually
-        if isinstance(queryset, list):
-            from .pagination import CustomPageNumberPagination
-            
-            # Apply pagination manually
-            paginator = CustomPageNumberPagination()
-            page = paginator.paginate_queryset(queryset, request)
-            
-            if page is None:
-                # Pagination is disabled, but we need to limit results for performance
-                page = queryset[:paginator.page_size] if isinstance(queryset, list) else list(queryset[:paginator.page_size])
-            # Tags already have total_components from get_queryset annotation (no per-tag queries)
 
-            serializer = self.get_serializer(page, many=True)
-            return paginator.get_paginated_response(serializer.data)
-        
-        # For regular queryset, page already has total_components from get_queryset annotation
-        page = self.paginate_queryset(queryset)
+        search = request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(tag__icontains=search)
+
+        ordered = _apply_repository_tag_ordering(
+            queryset,
+            request.query_params.get('ordering', '-updated_at'),
+        )
+
+        page = self.paginate_queryset(ordered)
+        items = list(page) if page is not None else list(ordered[:self.pagination_class.page_size])
+        _attach_repository_tag_summary_data(items)
+
+        serializer = self.get_serializer(items, many=True)
         if page is not None:
-            serializer = self.get_serializer(page, many=True)
             return self.get_paginated_response(serializer.data)
-        
-        # No pagination - queryset already has total_components from annotation
-        serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
-
-    def list(self, request, *args, **kwargs):
-        queryset = self.get_queryset()
-        
-        # Check if we have custom tag sorting
-        ordering = request.query_params.get('ordering', '')
-        if 'tag' in ordering and isinstance(queryset, list):
-            # Handle pagination manually for custom sorted list
-            page = self.paginate_queryset(queryset)
-            if page is not None:
-                serializer = self.get_serializer(page, many=True)
-                return self.get_paginated_response(serializer.data)
-            
-            serializer = self.get_serializer(queryset, many=True)
-            return Response(serializer.data)
-        
-        # Use default behavior for other orderings
-        return super().list(request, *args, **kwargs)
 
 class ReportGeneratorView(APIView):
     permission_classes = [IsAuthenticated]

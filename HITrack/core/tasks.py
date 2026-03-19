@@ -735,7 +735,7 @@ def parse_sbom_and_create_components(image_uuid: str):
             for artifact in batch:
                 name = artifact.get('name')
                 version = artifact.get('version')
-                type = artifact.get('type', 'unknown')
+                component_type = artifact.get('type', 'unknown')
                 purl = artifact.get('purl')
                 cpes = artifact.get('cpes', [])
 
@@ -746,7 +746,7 @@ def parse_sbom_and_create_components(image_uuid: str):
                 if name not in component_data:
                     component_data[name] = {
                         'name': name,
-                        'type': type,
+                        'type': component_type,
                         'versions': {},
                         'purl': purl
                     }
@@ -768,15 +768,6 @@ def parse_sbom_and_create_components(image_uuid: str):
                 )
             }
             logger.info(f"Found {len(existing_components)} existing components in batch {current_batch}")
-
-            # Get existing component versions
-            existing_versions = {
-                f"{cv.component.name}:{cv.version}": cv 
-                for cv in ComponentVersion.objects.filter(
-                    component__name__in=component_data.keys()
-                ).select_related('component')
-            }
-            logger.info(f"Found {len(existing_versions)} existing component versions in batch {current_batch}")
 
             # Initialize lists for bulk operations
             components_to_create = []
@@ -818,6 +809,20 @@ def parse_sbom_and_create_components(image_uuid: str):
                     components_updated += len(components_to_update)
                     logger.info(f"Updated {len(components_to_update)} existing components in batch {current_batch}")
 
+                batch_versions = {
+                    version
+                    for data in component_data.values()
+                    for version in data['versions'].keys()
+                }
+                existing_versions = {
+                    f"{cv.component.name}:{cv.version}": cv
+                    for cv in ComponentVersion.objects.filter(
+                        component_id__in=[component.pk for component in existing_components.values()],
+                        version__in=batch_versions,
+                    ).select_related('component')
+                }
+                logger.info(f"Found {len(existing_versions)} existing component versions in batch {current_batch}")
+
                 # Prepare component versions
                 for name, data in component_data.items():
                     component = existing_components[name]
@@ -843,25 +848,50 @@ def parse_sbom_and_create_components(image_uuid: str):
 
                 # Bulk create component versions
                 if component_versions_to_create:
-                    created_versions = ComponentVersion.objects.bulk_create(component_versions_to_create)
-                    versions_created += len(created_versions)
-                    logger.info(f"Created {len(created_versions)} new component versions in batch {current_batch}")
-                    # Add new versions to existing_versions dict
-                    existing_versions.update({
-                        f"{cv.component.name}:{cv.version}": cv 
-                        for cv in created_versions
-                    })
+                    version_keys_before = set(existing_versions.keys())
+                    ComponentVersion.objects.bulk_create(
+                        component_versions_to_create,
+                        ignore_conflicts=True,
+                    )
+                    logger.info(
+                        f"Attempted to create {len(component_versions_to_create)} component versions in batch {current_batch}"
+                    )
+
+                if component_versions_to_update:
+                    versions_to_update_by_pk = {cv.pk: cv for cv in component_versions_to_update}
+                    ComponentVersion.objects.bulk_update(
+                        list(versions_to_update_by_pk.values()),
+                        ['purl', 'cpes'],
+                    )
+                    logger.info(
+                        f"Updated {len(versions_to_update_by_pk)} existing component versions in batch {current_batch}"
+                    )
+
+                refreshed_versions = {
+                    f"{cv.component.name}:{cv.version}": cv
+                    for cv in ComponentVersion.objects.filter(
+                        component_id__in=[component.pk for component in existing_components.values()],
+                        version__in=batch_versions,
+                    ).select_related('component')
+                }
+                if component_versions_to_create:
+                    versions_created += len(set(refreshed_versions.keys()) - version_keys_before)
+                    logger.info(
+                        f"Resolved {len(refreshed_versions)} component versions after create in batch {current_batch}"
+                    )
+                existing_versions = refreshed_versions
 
                 # Link image to component versions
-                image_versions = image.component_versions.all()
+                image_version_pks = set(image.component_versions.values_list('pk', flat=True))
                 links_created = 0
                 for name, data in component_data.items():
                     component = existing_components[name]
                     for version, version_data in data['versions'].items():
                         version_key = f"{name}:{version}"
                         version_obj = existing_versions[version_key]
-                        if version_obj not in image_versions:
+                        if version_obj.pk not in image_version_pks:
                             version_obj.images.add(image)
+                            image_version_pks.add(version_obj.pk)
                             links_created += 1
 
             batch_time = time.time() - batch_start_time
@@ -914,6 +944,12 @@ def parse_sbom_and_create_components(image_uuid: str):
         }
     except Exception as e:
         logger.error(f"Error parsing SBOM for image {image_uuid}: {str(e)}")
+        try:
+            image = Image.objects.get(uuid=image_uuid)
+            image.scan_status = 'error'
+            image.save(update_fields=['scan_status', 'updated_at'])
+        except Exception as save_error:
+            logger.error(f"Failed to update image status after SBOM parsing error: {str(save_error)}")
         return {
             "status": "error",
             "task_name": "Parse SBOM and Create Components",

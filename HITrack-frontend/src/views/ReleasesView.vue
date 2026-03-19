@@ -1,5 +1,5 @@
 <template>
-  <v-container fluid class="releases-page">
+  <v-container fluid class="releases-page page-shell page-shell--wide">
     <v-row>
       <v-col cols="12">
         <div class="d-flex justify-space-between align-center mb-6">

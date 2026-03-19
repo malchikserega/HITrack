@@ -1,6 +1,6 @@
 <template>
   <div class="vulnerabilities">
-    <v-container>
+    <v-container fluid class="page-shell page-shell--wide">
       <v-row>
         <v-col cols="12">
           <div class="d-flex align-center justify-space-between mb-4">

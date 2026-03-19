@@ -1,6 +1,6 @@
 <template>
   <div class="images">
-    <v-container>
+    <v-container fluid class="page-shell page-shell--wide">
       <v-row>
         <v-col cols="12">
           <v-btn variant="text" @click="goBack" class="mb-2">
