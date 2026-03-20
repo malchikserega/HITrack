@@ -323,18 +323,18 @@ const formatDigest = (digest: string) => {
 const copyDigest = (digest: string) => {
   if (!digest) return
   navigator.clipboard.writeText(digest)
-    .then(() => notificationService.success('Digest copied!'))
+    .then(() => notificationService.copied('Digest copied to clipboard.'))
     .catch(() => notificationService.error('Failed to copy digest'))
 }
 
 const onRescan = async (image: Image) => {
   try {
     await api.post(`images/${image.uuid}/rescan/`)
-    notificationService.success('Image rescan started successfully')
+    notificationService.queued('Image rescan was queued.')
     await fetchImages()
   } catch (error: any) {
     if (error.response?.status === 409) {
-      notificationService.warning(error.response.data.error || 'Image is already being scanned')
+      notificationService.conflict(error.response.data.error || 'Image is already being scanned')
     } else {
       notificationService.error('Failed to start image rescan')
     }
@@ -345,11 +345,15 @@ const onRescanGrype = async (image: Image) => {
   if (!image.uuid) return
   try {
     await api.post(`images/${image.uuid}/rescan-grype/`)
-    notificationService.success('Grype scan scheduled successfully')
+    notificationService.queued('Grype scan was queued.')
     fetchImages()
   } catch (e: any) {
     const msg = e?.response?.data?.error || 'Failed to schedule Grype scan'
-    notificationService.error(msg)
+    if (e?.response?.status === 409) {
+      notificationService.conflict(msg)
+    } else {
+      notificationService.error(msg)
+    }
   }
 }
 

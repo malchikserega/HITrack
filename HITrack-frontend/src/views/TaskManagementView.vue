@@ -548,7 +548,7 @@ export default defineComponent({
         if (response.data?.task_id) {
           upsertPendingTask(response.data.task_id, 'Test Task')
         }
-        notificationService.success('Test task started successfully')
+        notificationService.started('Test task started.')
       } catch (error) {
         console.error('Error running test task:', error)
         notificationService.error(`Failed to start test task: ${error}`)
@@ -564,7 +564,7 @@ export default defineComponent({
         if (response.data?.task_id) {
           upsertPendingTask(response.data.task_id, 'Test Failing Task')
         }
-        notificationService.success('Failing test task started successfully')
+        notificationService.started('Failing test task started.')
       } catch (error) {
         console.error('Error running failing task:', error)
         notificationService.error(`Failed to start failing task: ${error}`)
@@ -599,7 +599,7 @@ export default defineComponent({
         if (response.data?.task_id) {
           upsertPendingTask(response.data.task_id, 'Update All Components Latest Versions')
         }
-        notificationService.success('Update all components task started successfully')
+        notificationService.started('Update all components task started.')
       } catch (error) {
         console.error('Error updating all components latest versions:', error)
         notificationService.error(`Failed to start update task: ${error}`)
@@ -619,7 +619,7 @@ export default defineComponent({
         if (response.data?.new_task_id) {
           upsertPendingTask(response.data.new_task_id, task.task_name)
         }
-        notificationService.success(`Task "${task.task_name}" retry initiated`)
+        notificationService.queued(`Task "${task.task_name}" retry was queued.`)
       } catch (error) {
         console.error('Error retrying task:', error)
         notificationService.error(`Failed to retry task "${task.task_name}": ${error}`)
@@ -634,7 +634,7 @@ export default defineComponent({
         if (existingTask) {
           existingTask.status = 'revoked'
         }
-        notificationService.success(`Task "${task.task_name}" stopped successfully`)
+        notificationService.completed(`Task "${task.task_name}" was stopped.`)
       } catch (error) {
         console.error('Error stopping task:', error)
         notificationService.error(`Failed to stop task "${task.task_name}": ${error}`)
@@ -695,7 +695,7 @@ export default defineComponent({
           upsertPendingTask(response.data.task_id, task.name || task.task)
         }
         await loadPeriodicTasks()
-        notificationService.success(`Periodic task "${task.name}" started`)
+        notificationService.started(`Periodic task "${task.name}" started.`)
       } catch (error) {
         console.error('Error running periodic task now:', error)
         notificationService.error(`Failed to run periodic task "${task.name}"`)

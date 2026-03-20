@@ -927,20 +927,20 @@ const onProcessTag = async (tag: any) => {
     return
   }
   if (isActionDisabled(tag, 'process')) {
-    notificationService.warning(getActionTooltip(tag, 'process'))
+    notificationService.conflict(getActionTooltip(tag, 'process'))
     return
   }
   const previousStatus = tag.processing_status
   tag.processing_status = 'pending'
   try {
     await api.post(`repository-tags/${tag.uuid}/process/`)
-    notificationService.success('Tag processing started successfully')
+    notificationService.queued('Tag processing was queued.')
     await fetchTags()
   } catch (error: any) {
     tag.processing_status = previousStatus
     console.error('Error processing tag:', error)
     if (error.response?.status === 409) {
-      notificationService.warning(error.response.data.error || 'Tag is already queued for processing')
+      notificationService.conflict(error.response.data.error || 'Tag is already queued for processing')
       fetchTags()
     } else {
       notificationService.error('Failed to process tag')
@@ -951,16 +951,16 @@ const onProcessTag = async (tag: any) => {
 const onRescanTagImages = async (tag: any) => {
   if (!tag.uuid) return
   if (isActionDisabled(tag, 'rescan')) {
-    notificationService.warning(getActionTooltip(tag, 'rescan'))
+    notificationService.conflict(getActionTooltip(tag, 'rescan'))
     return
   }
   try {
     const resp = await api.post(`repository-tags/${tag.uuid}/rescan-images/`)
-    notificationService.success(resp.data.message || 'Rescan started')
+    notificationService.started(resp.data.message || 'Tag image rescan started.')
     fetchTags()
   } catch (e: any) {
     if (e.response?.status === 409) {
-      notificationService.warning(e.response.data.error || 'At least one image is already being scanned or queued for scanning')
+      notificationService.conflict(e.response.data.error || 'At least one image is already being scanned or queued for scanning')
     } else if (e.response?.status === 429) {
       notificationService.warning(e.response.data.error || 'Please wait before trying again')
     } else {
@@ -972,7 +972,7 @@ const onRescanTagImages = async (tag: any) => {
 const onReanalyzeSbom = async (tag: any) => {
   if (!tag.uuid) return
   if (isActionDisabled(tag, 'rescan')) {
-    notificationService.warning(getActionTooltip(tag, 'rescan'))
+    notificationService.conflict(getActionTooltip(tag, 'rescan'))
     return
   }
   
@@ -985,9 +985,9 @@ const onReanalyzeSbom = async (tag: any) => {
       // Show success message with details about skipped images if any
       const message = resp.data.message || `Reanalysis started for ${resp.data.count} images`
       if (resp.data.skipped_count && resp.data.skipped_count > 0) {
-        notificationService.info(message)
+        notificationService.started(message, 3800, { title: 'Partial Start' })
       } else {
-        notificationService.success(message)
+        notificationService.started(message)
       }
       // Refresh tags list after a short delay to allow backend to process
       setTimeout(() => {
@@ -1000,9 +1000,11 @@ const onReanalyzeSbom = async (tag: any) => {
         // Otherwise this shouldn't happen with new logic, but keep for backward compatibility
         const errorMsg = e.response.data.error || 'All images are already being scanned or queued for scanning'
         if (e.response.data.skipped_count) {
-          notificationService.info(`${errorMsg} (${e.response.data.skipped_count} images skipped)`)
+          notificationService.warning(`${errorMsg} (${e.response.data.skipped_count} images skipped)`, 4200, {
+            title: 'Partial Skip',
+          })
         } else {
-          notificationService.warning(errorMsg)
+          notificationService.conflict(errorMsg)
         }
       } else if (e.response?.status === 404) {
         notificationService.warning(e.response.data.error || 'No images with SBOM data found for this tag')
@@ -1070,7 +1072,7 @@ const openScanDialog = () => {
     return
   }
   if (isScanDisabled()) {
-    notificationService.warning(getScanTooltip())
+    notificationService.conflict(getScanTooltip())
     return
   }
   showScanDialog.value = true
@@ -1082,16 +1084,16 @@ const runScan = async (latestOnly: boolean) => {
   scanning.value = true
   try {
     await api.post(`repositories/${repository.value.uuid}/scan_tags/`, { latest_only: latestOnly })
-    notificationService.success(
+    notificationService.queued(
       latestOnly
-        ? 'Repository scan (latest only) started successfully'
-        : 'Repository scan started successfully'
+        ? 'Repository latest-tag scan was queued.'
+        : 'Repository scan was queued.'
     )
     await fetchRepository()
     await fetchTags()
   } catch (error: any) {
     if (error.response?.status === 409) {
-      notificationService.warning(error.response.data.error || 'Repository is already being scanned')
+      notificationService.conflict(error.response.data.error || 'Repository is already being scanned')
     } else {
       console.error('Error starting repository scan:', error)
       notificationService.error('Failed to start repository scan')

@@ -38,30 +38,42 @@
       <router-view></router-view>
     </v-main>
 
-    <!-- Global notification snackbars -->
-    <div class="notification-container">
-      <v-snackbar
-        v-for="(notification, index) in notifications"
-        :key="index"
-        v-model="notification.show"
-        :color="notification.color"
-        :timeout="notification.timeout"
-        :location="(notification.location as any)"
-        class="notification-snackbar"
-        :style="{ bottom: `${index * 60}px` }"
+    <transition-group
+      name="notification-list"
+      tag="div"
+      class="notification-container"
+    >
+      <div
+        v-for="notification in notifications"
+        :key="notification.id"
+        class="notification-card"
+        :class="`notification-card--${notification.color}`"
       >
-        {{ notification.message }}
-        <template v-slot:actions>
+        <div class="notification-card__content">
+          <v-icon
+            :icon="notification.icon"
+            class="notification-card__icon"
+          />
+          <div class="notification-card__text">
+            <div class="notification-card__title">
+              {{ notification.title }}
+            </div>
+            <div class="notification-card__message">
+              {{ notification.message }}
+            </div>
+          </div>
           <v-btn
-            color="white"
+            icon
             variant="text"
-            @click="removeNotification(index)"
+            density="comfortable"
+            class="notification-card__close"
+            @click="removeNotification(notification.id)"
           >
-            Close
+            <v-icon icon="mdi-close" size="18" />
           </v-btn>
-        </template>
-      </v-snackbar>
-    </div>
+        </div>
+      </div>
+    </transition-group>
 
     <div ref="matrixBgRef" class="matrix-bg" :style="{ display: isMatrix && matrixAnimation ? 'block' : 'none' }">
       <canvas ref="matrixCanvasRef" id="matrix-canvas" style="width:100vw;height:100vh;display:block;"></canvas>
@@ -205,25 +217,10 @@ const menuItems = [
   { title: 'Component Matrix', path: '/component-matrix' }
 ]
 
-const notifications = ref<Array<{
-  show: boolean;
-  message: string;
-  color: string;
-  timeout: number;
-  location: string;
-}>>([])
+const notifications = notificationService.getSnackbar()
 
-// Watch for changes in notification service
-watch(
-  () => notificationService.getSnackbar(),
-  (newValue) => {
-    notifications.value = newValue.value
-  },
-  { deep: true }
-)
-
-const removeNotification = (index: number) => {
-  notificationService.removeNotification(index)
+const removeNotification = (id: number) => {
+  notificationService.removeNotification(id)
 }
 
 const handleLogout = async () => {
@@ -365,13 +362,117 @@ body {
 
 .notification-container {
   position: fixed;
-  bottom: 0;
-  right: 0;
-  z-index: 1000;
+  top: 88px;
+  right: 24px;
+  z-index: 2000;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: min(420px, calc(100vw - 32px));
+  pointer-events: none;
 }
 
-.notification-snackbar {
-  margin-bottom: 8px;
+.notification-card {
+  pointer-events: auto;
+  position: relative;
+  overflow: hidden;
+  border-radius: 18px;
+  border: 1px solid #d9dee7;
+  background: rgba(255, 255, 255, 0.96);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 18px 50px rgba(19, 25, 37, 0.16);
+}
+
+.notification-card::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 4px;
+  background: #5f6b7a;
+}
+
+.notification-card__content {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 12px;
+  align-items: start;
+  padding: 14px 14px 14px 18px;
+}
+
+.notification-card__icon {
+  margin-top: 2px;
+  color: inherit;
+}
+
+.notification-card__text {
+  min-width: 0;
+}
+
+.notification-card__title {
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #4d5968;
+}
+
+.notification-card__message {
+  margin-top: 4px;
+  font-size: 0.95rem;
+  line-height: 1.45;
+  color: #1a2230;
+}
+
+.notification-card__close {
+  margin-top: -4px;
+  color: #6a7686;
+}
+
+.notification-card--success::before {
+  background: #2e7d32;
+}
+
+.notification-card--success .notification-card__icon {
+  color: #2e7d32;
+}
+
+.notification-card--error::before {
+  background: #c62828;
+}
+
+.notification-card--error .notification-card__icon {
+  color: #c62828;
+}
+
+.notification-card--warning::before {
+  background: #ed6c02;
+}
+
+.notification-card--warning .notification-card__icon {
+  color: #ed6c02;
+}
+
+.notification-card--info::before {
+  background: #1976d2;
+}
+
+.notification-card--info .notification-card__icon {
+  color: #1976d2;
+}
+
+.notification-list-enter-active,
+.notification-list-leave-active {
+  transition: all 0.22s ease;
+}
+
+.notification-list-enter-from,
+.notification-list-leave-to {
+  opacity: 0;
+  transform: translateY(-8px) translateX(18px);
+}
+
+.notification-list-move {
+  transition: transform 0.22s ease;
 }
 
 .logo-text {
@@ -477,6 +578,23 @@ body {
   border: 1px solid #39FF14 !important;
 }
 
+.v-theme--matrix .notification-card {
+  background: rgba(0, 10, 0, 0.95);
+  border-color: #39ff14;
+  box-shadow: 0 0 24px rgba(57, 255, 20, 0.22);
+}
+
+.v-theme--matrix .notification-card__title,
+.v-theme--matrix .notification-card__message,
+.v-theme--matrix .notification-card__close,
+.v-theme--matrix .notification-card__icon {
+  color: #39ff14 !important;
+}
+
+.v-theme--matrix .notification-card::before {
+  background: #39ff14;
+}
+
 .v-theme--matrix .v-tooltip__content {
   background: #000000 !important;
   color: #39FF14 !important;
@@ -488,6 +606,15 @@ body {
   background: #000000 !important;
   color: #39FF14 !important;
   border: 1px solid #39FF14 !important;
+}
+
+@media (max-width: 700px) {
+  .notification-container {
+    top: 78px;
+    right: 12px;
+    left: 12px;
+    width: auto;
+  }
 }
 
 /* Matrix theme - fix specific Vuetify components */

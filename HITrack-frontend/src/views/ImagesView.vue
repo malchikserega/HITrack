@@ -489,19 +489,19 @@ const onRescan = async (img: Image) => {
     return
   }
   if (isImageScanActive(img)) {
-    notificationService.warning('Image is already being scanned or queued for scanning')
+    notificationService.conflict('Image is already being scanned or queued for scanning')
     return
   }
   const previousStatus = img.scan_status
   img.scan_status = 'pending'
   try {
     await api.post(`images/${img.uuid}/rescan/`)
-    notificationService.success('Image rescan scheduled successfully')
+    notificationService.queued('Image rescan was queued.')
     await fetchImages()
   } catch (error: any) {
     img.scan_status = previousStatus
     if (error.response?.status === 409) {
-      notificationService.warning(error.response.data.error || 'Image is already being scanned or queued for scanning')
+      notificationService.conflict(error.response.data.error || 'Image is already being scanned or queued for scanning')
       fetchImages()
     } else {
       notificationService.error('Failed to rescan image')
@@ -512,7 +512,7 @@ const onRescan = async (img: Image) => {
 const onUpdateLatestVersions = async (item: Image) => {
   try {
     await api.post(`images/${item.uuid}/update_latest_versions/`)
-    notificationService.success('Latest versions update started successfully')
+    notificationService.started('Latest version lookup started.')
     await fetchImages()
   } catch (error: any) {
     notificationService.error(error.response?.data?.error || 'Failed to update latest versions')
@@ -522,20 +522,20 @@ const onUpdateLatestVersions = async (item: Image) => {
 const onRescanGrype = async (image: Image) => {
   if (!image.uuid) return
   if (isImageScanActive(image)) {
-    notificationService.warning('Image is already being scanned or queued for scanning')
+    notificationService.conflict('Image is already being scanned or queued for scanning')
     return
   }
   const previousStatus = image.scan_status
   image.scan_status = 'pending'
   try {
     await api.post(`images/${image.uuid}/rescan-grype/`)
-    notificationService.success('Grype scan scheduled successfully')
+    notificationService.queued('Grype scan was queued.')
     fetchImages()
   } catch (e: any) {
     image.scan_status = previousStatus
     const msg = e?.response?.data?.error || 'Failed to schedule Grype scan'
     if (e?.response?.status === 409) {
-      notificationService.warning(msg)
+      notificationService.conflict(msg)
       fetchImages()
     } else {
       notificationService.error(msg)
@@ -557,7 +557,7 @@ const formatDigest = (digest: string) => {
 const copyDigest = (digest: string) => {
   if (!digest) return
   navigator.clipboard.writeText(digest)
-    .then(() => notificationService.success('Digest copied!'))
+    .then(() => notificationService.copied('Digest copied to clipboard.'))
     .catch(() => notificationService.error('Failed to copy digest'))
 }
 

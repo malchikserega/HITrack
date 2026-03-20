@@ -515,7 +515,7 @@ const onScan = (repo: Repository) => {
     return
   }
   if (isScanDisabled(repo)) {
-    notificationService.warning(getScanTooltip(repo))
+    notificationService.conflict(getScanTooltip(repo))
     return
   }
   repoToScan.value = repo
@@ -530,16 +530,16 @@ const runScan = async (latestOnly: boolean) => {
   repo.scan_status = 'pending'
   try {
     await api.post(`repositories/${repo.uuid}/scan_tags/`, { latest_only: latestOnly })
-    notificationService.success(
+    notificationService.queued(
       latestOnly
-        ? 'Repository scan (latest only) started successfully'
-        : 'Repository scan started successfully'
+        ? 'Repository latest-tag scan was queued.'
+        : 'Repository scan was queued.'
     )
     await fetchRepositories()
   } catch (error: any) {
     repo.scan_status = previousStatus
     if (error.response?.status === 409) {
-      notificationService.warning(error.response.data.error || 'Repository is already being scanned')
+      notificationService.conflict(error.response.data.error || 'Repository is already being scanned')
       fetchRepositories()
     } else {
       console.error('Error starting repository scan:', error)

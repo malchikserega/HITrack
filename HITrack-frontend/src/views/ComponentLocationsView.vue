@@ -186,12 +186,7 @@ export default {
       try {
         await api.post(`/images/${imageUuid.value}/rescan-grype/`)
         
-        // Show success message
-        this.$notify({
-          type: 'success',
-          title: 'Scan Started',
-          text: 'Grype scan has been started. Component locations will be updated when the scan completes.'
-        })
+        this.$notify.started('Grype scan started. Component locations will refresh after completion.')
 
         // Wait a bit and then reload
         setTimeout(() => {
@@ -200,11 +195,7 @@ export default {
 
       } catch (err) {
         console.error('Error starting rescan:', err)
-        this.$notify({
-          type: 'error',
-          title: 'Scan Failed',
-          text: err.response?.data?.error || 'Failed to start Grype scan'
-        })
+        this.$notify.error(err.response?.data?.error || 'Failed to start Grype scan')
       } finally {
         rescanning.value = false
       }
