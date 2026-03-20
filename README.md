@@ -38,7 +38,9 @@ The default `docker-compose.yml` starts the full platform:
 - `httpd`: reverse proxy and entrypoint for the UI/API on `127.0.0.1:1337`
 - `hitrack-frontend`: Vue 3 + Vuetify frontend
 - `hitrack-api`: Django REST API, admin, migrations, and app bootstrap
-- `worker`: Celery workers for scanning and background processing
+- `worker-light`: Celery worker for lightweight/orchestration/metadata tasks
+- `worker-scan`: Celery worker for heavy scanning/image/SBOM/Grype tasks
+- `beat`: dedicated Celery Beat scheduler for django-celery-beat cron jobs
 - `hitrack-db`: PostgreSQL 17
 - `hitrack-redis`: Redis for task queue/broker
 
@@ -47,6 +49,7 @@ Important runtime notes:
 - The backend container mounts `/var/run/docker.sock`, because scanning workflows invoke container tooling from inside the app container.
 - The backend image installs `syft`, `grype`, `helm`, and Docker CLI during build.
 - Persistent project data is stored in local folders such as `volume/`, `storage/`, and `static_data/`.
+- Celery traffic is split into `light` and `scan` queues so heavy image-processing tasks do not starve lightweight scheduled/admin tasks.
 
 ## Supported Workflows
 

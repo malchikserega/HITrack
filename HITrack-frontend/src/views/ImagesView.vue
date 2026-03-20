@@ -109,12 +109,13 @@
                           class="mr-2"
                           color="primary"
                           v-bind="props"
-                          :disabled="item.scan_status === 'in_process'"
-                          @click.stop="item.scan_status !== 'in_process' && onRescan(item)"
-                          :style="{ cursor: item.scan_status === 'in_process' ? 'not-allowed' : 'pointer', opacity: item.scan_status === 'in_process' ? 0.5 : 1 }"
+                          :disabled="isImageScanActive(item)"
+                          @click.stop="!isImageScanActive(item) && onRescan(item)"
+                          :style="{ cursor: isImageScanActive(item) ? 'not-allowed' : 'pointer', opacity: isImageScanActive(item) ? 0.5 : 1 }"
                         >mdi-refresh</v-icon>
                       </template>
                       <span v-if="item.scan_status === 'in_process'">Scan in process</span>
+                      <span v-else-if="item.scan_status === 'pending'">Scan pending</span>
                       <span v-else>Rescan image</span>
                     </v-tooltip>
                     <v-tooltip location="top">
@@ -136,10 +137,14 @@
                           class="mr-2"
                           color="warning"
                           v-bind="props"
-                          @click.stop="onRescanGrype(item)"
+                          :disabled="isImageScanActive(item)"
+                          @click.stop="!isImageScanActive(item) && onRescanGrype(item)"
+                          :style="{ cursor: isImageScanActive(item) ? 'not-allowed' : 'pointer', opacity: isImageScanActive(item) ? 0.5 : 1 }"
                         >mdi-bug</v-icon>
                       </template>
-                      <span>Reanalyze SBOM</span>
+                      <span v-if="item.scan_status === 'in_process'">Scan in process</span>
+                      <span v-else-if="item.scan_status === 'pending'">Scan pending</span>
+                      <span v-else>Reanalyze SBOM</span>
                     </v-tooltip>
                     <v-tooltip location="top">
                       <template #activator="{ props }">
@@ -238,7 +243,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, computed, watch } from 'vue'
+import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '../plugins/axios'
 import { notificationService } from '../plugins/notifications'
@@ -256,6 +261,9 @@ const page = ref(1)
 const itemsPerPage = ref(10)
 const totalItems = ref(0)
 const sortBy = ref<DataTableSortItem[]>([{ key: 'updated_at', order: 'desc' }])
+const hasActiveImageScans = computed(() =>
+  images.value.some(image => ['pending', 'in_process'].includes(image.scan_status || 'none'))
+)
 const editedItem = ref<Image>({
   id: undefined,
   uuid: '',
@@ -281,6 +289,7 @@ const itemToDelete = ref<Image | null>(null)
 const formTitle = ref('New Image')
 const showUniqueFindings = ref(false)
 const router = useRouter()
+let refreshTimer: number | null = null
 
 const defaultItem = {
   id: undefined,
@@ -339,6 +348,21 @@ const fetchImages = async () => {
   }
 }
 
+const startAutoRefresh = () => {
+  if (refreshTimer !== null) return
+  refreshTimer = window.setInterval(() => {
+    if (!loading.value) {
+      fetchImages()
+    }
+  }, 5000)
+}
+
+const stopAutoRefresh = () => {
+  if (refreshTimer === null) return
+  window.clearInterval(refreshTimer)
+  refreshTimer = null
+}
+
 const pageCount = computed(() => Math.ceil(totalItems.value / itemsPerPage.value) || 1)
 
 const onItemsPerPageChange = (val: number) => {
@@ -351,6 +375,13 @@ watch([search, sortBy], () => {
   page.value = 1
   fetchImages()
 })
+watch(hasActiveImageScans, (isActive) => {
+  if (isActive) {
+    startAutoRefresh()
+  } else {
+    stopAutoRefresh()
+  }
+}, { immediate: true })
 
 const openDialog = (title: string, item?: Image) => {
   formTitle.value = title
@@ -448,17 +479,33 @@ const onDelete = (img: Image) => {
   confirmDelete(img);
 };
 
+const isImageScanActive = (img: Image) => {
+  return ['pending', 'in_process'].includes(img.scan_status)
+}
+
 const onRescan = async (img: Image) => {
   if (!img.uuid) {
     notificationService.error('Cannot rescan image: missing UUID')
     return
   }
-  
+  if (isImageScanActive(img)) {
+    notificationService.warning('Image is already being scanned or queued for scanning')
+    return
+  }
+  const previousStatus = img.scan_status
+  img.scan_status = 'pending'
   try {
     await api.post(`images/${img.uuid}/rescan/`)
     notificationService.success('Image rescan scheduled successfully')
-  } catch (error) {
-    notificationService.error('Failed to rescan image')
+    await fetchImages()
+  } catch (error: any) {
+    img.scan_status = previousStatus
+    if (error.response?.status === 409) {
+      notificationService.warning(error.response.data.error || 'Image is already being scanned or queued for scanning')
+      fetchImages()
+    } else {
+      notificationService.error('Failed to rescan image')
+    }
   }
 };
 
@@ -474,13 +521,25 @@ const onUpdateLatestVersions = async (item: Image) => {
 
 const onRescanGrype = async (image: Image) => {
   if (!image.uuid) return
+  if (isImageScanActive(image)) {
+    notificationService.warning('Image is already being scanned or queued for scanning')
+    return
+  }
+  const previousStatus = image.scan_status
+  image.scan_status = 'pending'
   try {
     await api.post(`images/${image.uuid}/rescan-grype/`)
     notificationService.success('Grype scan scheduled successfully')
     fetchImages()
   } catch (e: any) {
+    image.scan_status = previousStatus
     const msg = e?.response?.data?.error || 'Failed to schedule Grype scan'
-    notificationService.error(msg)
+    if (e?.response?.status === 409) {
+      notificationService.warning(msg)
+      fetchImages()
+    } else {
+      notificationService.error(msg)
+    }
   }
 }
 
@@ -536,6 +595,10 @@ const onRowClick = (item: Image) => {
 
 onMounted(() => {
   fetchImages()
+})
+
+onUnmounted(() => {
+  stopAutoRefresh()
 })
 </script>
 

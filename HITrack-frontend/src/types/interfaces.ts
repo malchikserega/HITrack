@@ -192,7 +192,7 @@ export interface ContainerRegistry {
 export interface TaskResult {
   task_id: string;
   task_name: string;
-  status: 'success' | 'error' | 'pending' | 'in_process';
+  status: 'success' | 'error' | 'pending' | 'in_process' | 'revoked';
   result_summary?: any;
   duration?: number;
   created: string;
@@ -203,7 +203,7 @@ export interface TaskResult {
 export interface TaskResultList {
   task_id: string;
   task_name: string;
-  status: 'success' | 'error' | 'pending' | 'in_process';
+  status: 'success' | 'error' | 'pending' | 'in_process' | 'revoked';
   duration?: number;
   created: string;
 }

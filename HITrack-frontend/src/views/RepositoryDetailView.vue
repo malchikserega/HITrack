@@ -446,7 +446,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, computed, watch } from 'vue'
+import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import api from '../plugins/axios'
 import { notificationService } from '../plugins/notifications'
@@ -507,6 +507,10 @@ const tagsTotal = ref(0)
 interface SortItem { key: string; order: 'asc' | 'desc' }
 const tagsSortBy = ref<SortItem[]>([{ key: 'tag', order: 'desc' }])
 const tagsPageCount = computed(() => Math.ceil(tagsTotal.value / tagsPerPage.value) || 1)
+const hasActiveTagProcessing = computed(() =>
+  tags.value.some(tag => ['pending', 'in_process'].includes(tag.processing_status || 'none'))
+)
+let tagsRefreshTimer: number | null = null
 
 const tagsForCharts = ref<any[]>([])
 const showOnlyVulnerableVersions = ref(false)
@@ -820,11 +824,33 @@ const fetchTags = async () => {
   }
 }
 
+const startTagsAutoRefresh = () => {
+  if (tagsRefreshTimer !== null) return
+  tagsRefreshTimer = window.setInterval(() => {
+    if (!tagsLoading.value) {
+      fetchTags()
+    }
+  }, 5000)
+}
+
+const stopTagsAutoRefresh = () => {
+  if (tagsRefreshTimer === null) return
+  window.clearInterval(tagsRefreshTimer)
+  tagsRefreshTimer = null
+}
+
 watch([tagSearch], () => {
   tagsPage.value = 1
   fetchTags()
 })
 watch([tagsPage, tagsPerPage], fetchTags)
+watch(hasActiveTagProcessing, (isActive) => {
+  if (isActive) {
+    startTagsAutoRefresh()
+  } else {
+    stopTagsAutoRefresh()
+  }
+}, { immediate: true })
 
 const fetchRepository = async () => {
   repositoryLoading.value = true
@@ -904,13 +930,21 @@ const onProcessTag = async (tag: any) => {
     notificationService.warning(getActionTooltip(tag, 'process'))
     return
   }
+  const previousStatus = tag.processing_status
+  tag.processing_status = 'pending'
   try {
     await api.post(`repository-tags/${tag.uuid}/process/`)
     notificationService.success('Tag processing started successfully')
-    await fetchRepository()
+    await fetchTags()
   } catch (error: any) {
+    tag.processing_status = previousStatus
     console.error('Error processing tag:', error)
-    notificationService.error('Failed to process tag')
+    if (error.response?.status === 409) {
+      notificationService.warning(error.response.data.error || 'Tag is already queued for processing')
+      fetchTags()
+    } else {
+      notificationService.error('Failed to process tag')
+    }
   }
 }
 
@@ -1073,6 +1107,10 @@ onMounted(async () => {
     fetchTags(),
     fetchTagsForCharts()
   ])
+})
+
+onUnmounted(() => {
+  stopTagsAutoRefresh()
 })
 </script>
 

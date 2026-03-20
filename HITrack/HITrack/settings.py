@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/5.0/ref/settings/
 
 from pathlib import Path
 import os
+from kombu import Queue
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -255,12 +256,39 @@ CELERY_TASK_TIME_LIMIT = 600  # 10 minutes
 CELERY_TASK_SOFT_TIME_LIMIT = 420  # 7 minutes
 CELERY_TASK_ACKS_LATE = True
 CELERY_WORKER_PREFETCH_MULTIPLIER = 1
-CELERY_TASK_DEFAULT_QUEUE = 'default'
-CELERY_TASK_QUEUES = {
-    'default': {
-        'exchange': 'default',
-        'routing_key': 'default',
-    },
+CELERY_TASK_DEFAULT_QUEUE = 'light'
+CELERY_TASK_QUEUES = (
+    Queue('light', routing_key='light'),
+    Queue('scan', routing_key='scan'),
+)
+CELERY_TASK_ROUTES = {
+    'Generate SBOM and Create Components': {'queue': 'scan', 'routing_key': 'scan'},
+    'Parse SBOM and Create Components': {'queue': 'scan', 'routing_key': 'scan'},
+    'Process Grype Scan Results': {'queue': 'scan', 'routing_key': 'scan'},
+    'Scan Image with Grype': {'queue': 'scan', 'routing_key': 'scan'},
+    'Scan Repository Tags': {'queue': 'scan', 'routing_key': 'scan'},
+    'Process Single Tag': {'queue': 'scan', 'routing_key': 'scan'},
+    'Process All Tags': {'queue': 'scan', 'routing_key': 'scan'},
+    'Scan Repository': {'queue': 'scan', 'routing_key': 'scan'},
+
+    'Periodic Repository Scan': {'queue': 'light', 'routing_key': 'light'},
+    'Rescan All Images with SBOM': {'queue': 'light', 'routing_key': 'light'},
+    'Monitor Mass Rescan Progress': {'queue': 'light', 'routing_key': 'light'},
+    'Update Components Latest Versions': {'queue': 'light', 'routing_key': 'light'},
+    'Update All Components Latest Versions': {'queue': 'light', 'routing_key': 'light'},
+    'Delete Old Repository Tags': {'queue': 'light', 'routing_key': 'light'},
+    'Update Vulnerability Details': {'queue': 'light', 'routing_key': 'light'},
+    'Update All Vulnerability Details': {'queue': 'light', 'routing_key': 'light'},
+    'Update Critical Vulnerability Details': {'queue': 'light', 'routing_key': 'light'},
+    'Cleanup Old Vulnerability Data': {'queue': 'light', 'routing_key': 'light'},
+    'Update Vulnerability Details (Bulk)': {'queue': 'light', 'routing_key': 'light'},
+    'Update Critical Vulnerabilities (Bulk)': {'queue': 'light', 'routing_key': 'light'},
+    'Monitor Task Status': {'queue': 'light', 'routing_key': 'light'},
+    'Monitor Bulk Update Progress': {'queue': 'light', 'routing_key': 'light'},
+    'Update CISA KEV Vulnerabilities': {'queue': 'light', 'routing_key': 'light'},
+    'Test Task': {'queue': 'light', 'routing_key': 'light'},
+    'Test Failing Task': {'queue': 'light', 'routing_key': 'light'},
+    'Performance Monitor': {'queue': 'light', 'routing_key': 'light'},
 }
 
 #ONLY FOR DOCKER

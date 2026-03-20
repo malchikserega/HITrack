@@ -1,13 +1,16 @@
 from __future__ import absolute_import, unicode_literals
 
 from hitrack_celery.celery import celery_app
+import hashlib
 import logging
 import re
 from datetime import timedelta
 from django.utils import timezone
 from typing import List, Dict
-from django.db import transaction
+from django.db import connection, transaction
+from django.db.models import Count, Q
 import time
+from .utils.status import resolve_repository_tag_processing_status
 
 # Performance and logging configuration
 # Set DEBUG_LOGGING=true environment variable to enable debug logging
@@ -44,6 +47,214 @@ def _get_cached_latest_version(package_type: str, package_name: str) -> str | No
 def _set_cached_latest_version(package_type: str, package_name: str, version: str):
     from django.core.cache import cache
     cache.set(f'pkg_ver:{package_type}:{package_name}', version, _PKG_VERSION_CACHE_TTL)
+
+
+def _normalize_image_digest(digest):
+    return digest or None
+
+
+def _has_completed_image_scan(image):
+    return (
+        image.scan_status == 'success' and
+        image.sbom_data is not None and
+        image.grype_data is not None
+    )
+
+
+def _has_completed_image_payload(image):
+    return image.sbom_data is not None and image.grype_data is not None
+
+
+def _image_identity_lock_key(name, digest):
+    normalized_digest = _normalize_image_digest(digest) or '<no-digest>'
+    lock_bytes = hashlib.blake2b(
+        f"{name}|{normalized_digest}".encode('utf-8'),
+        digest_size=8,
+    ).digest()
+    return int.from_bytes(lock_bytes, byteorder='big', signed=True)
+
+
+def _acquire_image_identity_lock(name, digest):
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT pg_advisory_xact_lock(%s)",
+            [_image_identity_lock_key(name, digest)],
+        )
+
+
+def _equivalent_images_queryset(name, digest):
+    from .models import Image
+
+    queryset = Image.objects.filter(name=name)
+    normalized_digest = _normalize_image_digest(digest)
+    if normalized_digest:
+        return queryset.filter(digest=normalized_digest)
+    return queryset.filter(Q(digest__isnull=True) | Q(digest=''))
+
+
+def _pick_preferred_image(images):
+    if not images:
+        return None
+
+    status_rank = {
+        'success': 0,
+        'in_process': 1,
+        'pending': 2,
+        'error': 3,
+        'none': 4,
+    }
+
+    return min(
+        images,
+        key=lambda image: (
+            status_rank.get(image.scan_status, 99),
+            0 if image.grype_data is not None else 1,
+            0 if image.sbom_data is not None else 1,
+            0 if image.digest else 1,
+            image.created_at,
+            str(image.pk),
+        ),
+    )
+
+
+def _get_or_create_canonical_image(name, digest=None, artifact_reference=None):
+    from .models import Image
+
+    normalized_digest = _normalize_image_digest(digest)
+
+    with transaction.atomic():
+        _acquire_image_identity_lock(name, normalized_digest)
+        matching_images = list(
+            _equivalent_images_queryset(name, normalized_digest).select_for_update()
+        )
+        image = _pick_preferred_image(matching_images)
+        created = False
+
+        if image is None and normalized_digest:
+            digestless_images = list(
+                _equivalent_images_queryset(name, None).select_for_update()
+            )
+            digestless_image = _pick_preferred_image(digestless_images)
+            conflicting_digest_exists = Image.objects.filter(name=name).exclude(
+                Q(digest=normalized_digest) | Q(digest__isnull=True) | Q(digest='')
+            ).exists()
+            if digestless_image and not conflicting_digest_exists:
+                image = digestless_image
+
+        if image is None:
+            image = Image.objects.create(
+                name=name,
+                digest=normalized_digest,
+                artifact_reference=artifact_reference,
+            )
+            created = True
+        else:
+            updated_fields = []
+            if normalized_digest and image.digest != normalized_digest:
+                image.digest = normalized_digest
+                updated_fields.append('digest')
+            if artifact_reference and not image.artifact_reference:
+                image.artifact_reference = artifact_reference
+                updated_fields.append('artifact_reference')
+            if updated_fields:
+                image.save(update_fields=updated_fields + ['updated_at'])
+
+        return image, created
+
+
+def _propagate_image_completion_to_equivalent_images(image):
+    from .models import ComponentLocation
+
+    duplicate_images = list(
+        _equivalent_images_queryset(image.name, image.digest)
+        .exclude(pk=image.pk)
+        .prefetch_related('repository_tags', 'component_versions', 'component_locations')
+    )
+    if not duplicate_images:
+        return list(image.repository_tags.values_list('pk', flat=True))
+
+    source_component_versions = list(image.component_versions.values_list('pk', flat=True))
+    source_locations = list(
+        image.component_locations.select_related('component_version').all()
+    )
+    related_tag_ids = set(image.repository_tags.values_list('pk', flat=True))
+
+    for duplicate in duplicate_images:
+        related_tag_ids.update(duplicate.repository_tags.values_list('pk', flat=True))
+
+        if source_component_versions:
+            duplicate.component_versions.add(*source_component_versions)
+        for location in source_locations:
+            ComponentLocation.objects.get_or_create(
+                component_version=location.component_version,
+                image=duplicate,
+                path=location.path,
+                defaults={
+                    'layer_id': location.layer_id,
+                    'access_path': location.access_path,
+                    'evidence_type': location.evidence_type,
+                    'annotations': location.annotations,
+                },
+            )
+
+        update_fields = []
+        if duplicate.digest != image.digest:
+            duplicate.digest = image.digest
+            update_fields.append('digest')
+        if duplicate.sbom_data != image.sbom_data:
+            duplicate.sbom_data = image.sbom_data
+            update_fields.append('sbom_data')
+        if duplicate.grype_data != image.grype_data:
+            duplicate.grype_data = image.grype_data
+            update_fields.append('grype_data')
+        if duplicate.scan_status != 'success':
+            duplicate.scan_status = 'success'
+            update_fields.append('scan_status')
+        if update_fields:
+            duplicate.save(update_fields=update_fields + ['updated_at'])
+
+    return list(related_tag_ids)
+
+
+def _sync_repository_tag_processing_statuses(tag_ids):
+    from .models import RepositoryTag
+
+    if not tag_ids:
+        return {}
+
+    status_rows = RepositoryTag.objects.filter(
+        pk__in=tag_ids
+    ).annotate(
+        total_images_count=Count('images', distinct=True),
+        pending_images_count=Count('images', filter=Q(images__scan_status='pending'), distinct=True),
+        in_process_images_count=Count('images', filter=Q(images__scan_status='in_process'), distinct=True),
+        error_images_count=Count('images', filter=Q(images__scan_status='error'), distinct=True),
+        success_images_count=Count('images', filter=Q(images__scan_status='success'), distinct=True),
+    ).only('uuid', 'processing_status')
+
+    now = timezone.now()
+    updated_tags = []
+    resolved_statuses = {}
+
+    for tag in status_rows:
+        new_status = resolve_repository_tag_processing_status(
+            tag.processing_status,
+            tag.total_images_count or 0,
+            tag.pending_images_count or 0,
+            tag.in_process_images_count or 0,
+            tag.error_images_count or 0,
+            tag.success_images_count or 0,
+        )
+        resolved_statuses[str(tag.pk)] = new_status
+        if tag.processing_status != new_status:
+            tag.processing_status = new_status
+            tag.updated_at = now
+            updated_tags.append(tag)
+
+    if updated_tags:
+        RepositoryTag.objects.bulk_update(updated_tags, ['processing_status', 'updated_at'])
+
+    return resolved_statuses
 
 @celery_app.task(bind=True, max_retries=1, name="Generate SBOM and Create Components")
 def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="docker"):
@@ -199,7 +410,9 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
             # Read and save SBOM data
             with open(temp_file_path, 'r') as f:
                 image.sbom_data = json.load(f)
-            image.scan_status = 'success'
+            # Reset stale Grype data so the follow-up vulnerability scan is always rerun.
+            image.grype_data = None
+            image.scan_status = 'in_process'
             image.save()
             
             logger.info(f"Successfully generated SBOM for image {image_uuid}")
@@ -254,6 +467,9 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
             image = Image.objects.get(uuid=image_uuid)
             image.scan_status = 'error'
             image.save()
+            _sync_repository_tag_processing_statuses(
+                list(image.repository_tags.values_list('pk', flat=True))
+            )
         except Exception as save_error:
             logger.error(f"Failed to update image status: {str(save_error)}")
         
@@ -277,98 +493,94 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
 @celery_app.task(name="Periodic Repository Scan")
 def periodic_repository_scan():
     """
-    Periodic task that scans all active repositories for new tags.
-    This task should be scheduled to run daily.
+    Queue latest-only scans for all active repositories.
+    Intended to be scheduled via django-celery-beat / Django admin.
     """
-    from .models import Repository, RepositoryTag, ContainerRegistry
-    from .utils.registry import get_tags, get_bearer_token, get_manifest, is_helm_chart
-    from datetime import datetime
-
-    logger.info("Starting periodic repository scan")
+    from .models import Repository
+    logger.info("Starting periodic repository scan for active repositories (latest_only=True)")
     results = []
     active_repositories = Repository.objects.filter(status=True).select_related('container_registry')
     logger.info(f"Found {active_repositories.count()} active repositories")
 
     for repository in active_repositories:
         try:
-            logger.info(f"Processing repository: {repository.name}")
+            logger.info(f"Queueing latest-tag scan for repository: {repository.name}")
 
-            # Get registry and token
-            registry = repository.container_registry
-            if not registry:
-                logger.warning(f"No registry found for repository {repository.name}, skipping")
+            if not repository.container_registry:
+                logger.warning(f"No registry configured for repository {repository.name}, skipping")
+                results.append({
+                    "repository": repository.name,
+                    "repository_uuid": str(repository.uuid),
+                    "status": "skipped",
+                    "reason": "no_container_registry",
+                })
                 continue
 
-            # Get all tags from registry (ACR or Artifactory)
-            all_tags = list(get_tags(registry, repository.name, limit=10))
-            logger.info(f"Found {len(all_tags)} tags for repository {repository.name}")
+            if repository.scan_status == 'in_process':
+                logger.info(f"Repository {repository.name} is already being scanned, skipping")
+                results.append({
+                    "repository": repository.name,
+                    "repository_uuid": str(repository.uuid),
+                    "status": "skipped",
+                    "reason": "scan_already_in_process",
+                })
+                continue
 
-            # Determine repository type if unknown
-            if repository.repository_type in ('none', 'Unknown') and all_tags:
-                first_tag = all_tags[0]
-                manifest, _ = get_manifest(registry, repository.name, first_tag)
-                if manifest:
-                    if is_helm_chart(manifest):
-                        repository.repository_type = 'helm'
-                    else:
-                        repository.repository_type = 'docker'
-                    repository.save()
-
-            tags_to_scan = all_tags[-10:] if all_tags else []
-            logger.info(f"Found {len(tags_to_scan)} tags to scan for repository {repository.name}")
-
-            # Get existing tags from database
-            existing_tags = set(repository.tags.values_list('tag', flat=True))
-            logger.info(f"Found {len(existing_tags)} existing tags in database for repository {repository.name}")
-
-            # Find new tags
-            new_tags = [tag for tag in tags_to_scan if tag not in existing_tags]
-            logger.info(f"Found {len(new_tags)} new tags for repository {repository.name}")
-
-            # Create new tags in bulk
-            if new_tags:
-                RepositoryTag.objects.bulk_create(
-                    [RepositoryTag(repository=repository, tag=tag) for tag in new_tags],
-                    ignore_conflicts=True
-                )
-
-            # Update repository last scanned timestamp
-            repository.last_scanned = datetime.now()
+            repository.scan_status = 'pending'
             repository.save()
+
+            async_result = scan_repository_tags.apply_async(
+                args=[str(repository.uuid)],
+                kwargs={
+                    'latest_only': True,
+                    'process_existing': True,
+                },
+            )
 
             results.append({
                 "repository": repository.name,
-                "status": "success",
-                "new_tags": len(new_tags)
+                "repository_uuid": str(repository.uuid),
+                "status": "queued",
+                "task_id": async_result.id,
+                "latest_only": True,
+                "process_existing": True,
             })
 
         except Exception as e:
-            logger.error(f"Error processing repository {repository.name}: {str(e)}")
+            logger.error(f"Error queueing repository {repository.name}: {str(e)}")
+            try:
+                repository.scan_status = 'error'
+                repository.save()
+            except Exception:
+                pass
             results.append({
                 "repository": repository.name,
+                "repository_uuid": str(repository.uuid),
                 "status": "error",
-                "error": str(e)
+                "error": str(e),
             })
 
-    # Calculate summary statistics
     total_repositories = len(results)
-    successful_repositories = len([r for r in results if r['status'] == 'success'])
+    queued_repositories = len([r for r in results if r['status'] == 'queued'])
+    skipped_repositories = len([r for r in results if r['status'] == 'skipped'])
     failed_repositories = len([r for r in results if r['status'] == 'error'])
-    total_new_tags = sum([r.get('new_tags', 0) for r in results if r['status'] == 'success'])
-    
+
     return {
-        "status": "completed",
+        "status": "queued",
         "task_name": "Periodic Repository Scan",
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": timezone.now().isoformat(),
         "summary": {
-            "total_repositories_processed": total_repositories,
-            "successful_repositories": successful_repositories,
+            "total_repositories_seen": active_repositories.count(),
+            "repositories_handled": total_repositories,
+            "queued_repositories": queued_repositories,
+            "skipped_repositories": skipped_repositories,
             "failed_repositories": failed_repositories,
-            "total_new_tags_discovered": total_new_tags,
-            "success_rate": f"{(successful_repositories / total_repositories * 100):.1f}%" if total_repositories > 0 else "0%"
         },
         "results": results,
-        "message": f"Periodic scan completed: {successful_repositories}/{total_repositories} repositories processed successfully, {total_new_tags} new tags discovered"
+        "message": (
+            f"Periodic latest-tag scan queued for {queued_repositories} repositories; "
+            f"{skipped_repositories} skipped, {failed_repositories} failed to queue"
+        ),
     }
 
 @celery_app.task(name="Scan Repository")
@@ -696,7 +908,7 @@ def parse_sbom_and_create_components(image_uuid: str):
                 "timestamp": timezone.now().isoformat()
             }
 
-        if image.scan_status != 'success':
+        if image.scan_status not in ['success', 'in_process']:
             logger.warning(f"Image {image_uuid} scan status is not success: {image.scan_status}")
             return {
                 "status": "error",
@@ -948,6 +1160,9 @@ def parse_sbom_and_create_components(image_uuid: str):
             image = Image.objects.get(uuid=image_uuid)
             image.scan_status = 'error'
             image.save(update_fields=['scan_status', 'updated_at'])
+            _sync_repository_tag_processing_statuses(
+                list(image.repository_tags.values_list('pk', flat=True))
+            )
         except Exception as save_error:
             logger.error(f"Failed to update image status after SBOM parsing error: {str(save_error)}")
         return {
@@ -1336,7 +1551,9 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
 
         # Set status to success only after all matches are processed
         image.scan_status = 'success'
-        image.save()
+        image.save(update_fields=['scan_status', 'updated_at'])
+        related_tag_ids = _propagate_image_completion_to_equivalent_images(image)
+        _sync_repository_tag_processing_statuses(related_tag_ids)
         logger.info(f"Successfully processed Grype scan results for image {image_uuid}")
         logger.info(f"Total matches processed: {len(matches)}")
         # Calculate summary statistics
@@ -1379,6 +1596,9 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
             image = Image.objects.get(uuid=image_uuid)
             image.scan_status = 'error'
             image.save()
+            _sync_repository_tag_processing_statuses(
+                list(image.repository_tags.values_list('pk', flat=True))
+            )
         except Exception as save_error:
             logger.error(f"Failed to update image status: {str(save_error)}")
         
@@ -1409,8 +1629,9 @@ def scan_image_with_grype(self, image_uuid: str):
         # Get image
         image = Image.objects.get(uuid=image_uuid)
         
-        # Check if already in process
-        if image.scan_status == 'in_process':
+        # Allow the normal Syft -> Parse SBOM -> Grype pipeline to continue while the image
+        # is already marked in_process; only skip if another Grype run has already produced data.
+        if image.scan_status == 'in_process' and image.grype_data:
             logger.warning(f"Image {image_uuid} is already being scanned")
             return {"status": "skipped", "reason": "already in process"}
 
@@ -1419,6 +1640,9 @@ def scan_image_with_grype(self, image_uuid: str):
             logger.error(f"No SBOM data found for image {image_uuid}")
             image.scan_status = 'error'
             image.save()
+            _sync_repository_tag_processing_statuses(
+                list(image.repository_tags.values_list('pk', flat=True))
+            )
             return {
                 "status": "error",
                 "error": "No SBOM data found"
@@ -1490,6 +1714,9 @@ def scan_image_with_grype(self, image_uuid: str):
             image = Image.objects.get(uuid=image_uuid)
             image.scan_status = 'error'
             image.save()
+            _sync_repository_tag_processing_statuses(
+                list(image.repository_tags.values_list('pk', flat=True))
+            )
         except Exception as save_error:
             logger.error(f"Failed to update image status: {str(save_error)}")
         
@@ -1714,11 +1941,17 @@ def _pick_latest_tag_by_version(tags):
     time_limit=SCAN_REPOSITORY_TAGS_TIME_LIMIT,
     soft_time_limit=SCAN_REPOSITORY_TAGS_SOFT_LIMIT,
 )
-def scan_repository_tags(repository_uuid: str, latest_only: bool = False):
+def scan_repository_tags(
+    repository_uuid: str,
+    latest_only: bool = False,
+    process_existing: bool = False,
+):
     """
-    Task that scans a single repository for new tags.
+    Task that scans a single repository for tags.
     For Artifactory repo keys: lists images via catalog, then tags per image.
     When latest_only=True, only one tag per image is collected (highest version by number).
+    When process_existing=True, already-known tags discovered by this scan are re-queued
+    for the standard processing pipeline as long as they are not already pending/in process.
     """
     from .models import Repository, RepositoryTag, ContainerRegistry
     from .utils.registry import (
@@ -1728,9 +1961,12 @@ def scan_repository_tags(repository_uuid: str, latest_only: bool = False):
         get_helm_chart_versions,
         is_helm_chart,
     )
-    from datetime import datetime
-
-    logger.info(f"Starting repository tags scan for repository {repository_uuid} (latest_only={latest_only})")
+    logger.info(
+        "Starting repository tags scan for repository %s (latest_only=%s, process_existing=%s)",
+        repository_uuid,
+        latest_only,
+        process_existing,
+    )
     
     try:
         repository = Repository.objects.select_related('container_registry').get(uuid=repository_uuid)
@@ -1853,10 +2089,17 @@ def scan_repository_tags(repository_uuid: str, latest_only: bool = False):
         # Process each (tag_name, image_path)
         new_count = 0
         new_tag_uuids = []
+        existing_tag_uuids_to_process = []
+        existing_tags_already_running = 0
         for tag_name, image_path in all_tag_tuples:
             try:
                 image_path_val = (image_path or '').strip()
-                if not RepositoryTag.objects.filter(repository=repository, tag=tag_name, image_path=image_path_val).exists():
+                existing_tag = RepositoryTag.objects.filter(
+                    repository=repository,
+                    tag=tag_name,
+                    image_path=image_path_val,
+                ).only('uuid', 'processing_status').first()
+                if existing_tag is None:
                     digest = ''
                     # Native Helm repos (packageType=helm) have no Docker manifest; skip digest
                     if not (repository.repository_type == 'helm' and registry.provider == 'jfrog'):
@@ -1884,22 +2127,33 @@ def scan_repository_tags(repository_uuid: str, latest_only: bool = False):
                     new_count += 1
                     new_tag_uuids.append(str(rt.uuid))
                     logger.info(f"Created tag {tag_name}" + (f" for image {image_path_val}" if image_path_val else ""))
+                elif process_existing:
+                    if existing_tag.processing_status in ['pending', 'in_process']:
+                        existing_tags_already_running += 1
+                    else:
+                        existing_tag_uuids_to_process.append(str(existing_tag.uuid))
             except Exception as e:
                 logger.error(f"Error processing tag {tag_name}: {str(e)}")
                 continue
 
         # Update repository status
         repository.scan_status = 'success'
-        repository.last_scanned = datetime.now()
+        repository.last_scanned = timezone.now()
         repository.save()
         logger.info(f"Successfully completed repository tags scan for {repository.name} ({new_count} new tags)")
 
         # Schedule processing (create Images, SBOM) for each new tag
-        if new_tag_uuids:
+        tags_to_process = new_tag_uuids + existing_tag_uuids_to_process
+        if tags_to_process:
             from .tasks import process_single_tag
-            for tag_uuid in new_tag_uuids:
+            for tag_uuid in tags_to_process:
                 process_single_tag.apply_async(args=[tag_uuid], task_name="Process Single Tag")
-            logger.info(f"Scheduled process_single_tag for {len(new_tag_uuids)} new tags")
+            logger.info(
+                "Scheduled process_single_tag for %s tags (%s new, %s existing)",
+                len(tags_to_process),
+                len(new_tag_uuids),
+                len(existing_tag_uuids_to_process),
+            )
         
         existing_tags_before = RepositoryTag.objects.filter(repository=repository).count() - new_count
         new_tags_created = new_count
@@ -1917,6 +2171,9 @@ def scan_repository_tags(repository_uuid: str, latest_only: bool = False):
                 "new_tags_created": new_tags_created,
                 "existing_tags_before": existing_tags_before,
                 "tags_skipped": tags_skipped,
+                "existing_tags_requeued": len(existing_tag_uuids_to_process),
+                "existing_tags_already_running": existing_tags_already_running,
+                "tags_scheduled_for_processing": len(tags_to_process),
                 "scan_status_updated": True,
                 "last_scanned_updated": True
             },
@@ -1926,7 +2183,7 @@ def scan_repository_tags(repository_uuid: str, latest_only: bool = False):
                 "registry_name": registry.name
             },
             "scan_details": {
-                "scan_timestamp": datetime.now().isoformat(),
+                "scan_timestamp": timezone.now().isoformat(),
                 "scan_duration": "completed",
                 "repository_type_determined": repository.repository_type not in ('none', 'Unknown')
             },
@@ -2010,11 +2267,9 @@ def process_single_tag(tag_uuid: str):
         # For Docker images, just create the record
         if repository.repository_type == 'docker':
             image_ref = _repository_tag_image_ref(repository, tag, registry)
-            image, created = Image.objects.get_or_create(
+            image, created = _get_or_create_canonical_image(
                 name=image_ref,
-                defaults={
-                    'artifact_reference': image_ref
-                }
+                artifact_reference=image_ref,
             )
             image.repository_tags.add(tag)
             logger.info(f"{'Created' if created else 'Linked'} Docker image {image_ref}")
@@ -2090,64 +2345,53 @@ def process_single_tag(tag_uuid: str):
                                 )
                                 break
                 artifact_ref = f"{repository.url}:{tag.tag}"
-                if image_digest:
-                    image = Image.objects.filter(name=image_ref, digest=image_digest).first()
-                    if image:
-                        created = False
-                    else:
-                        existing_image = Image.objects.filter(name=image_ref).exclude(digest=image_digest).first()
-                        if existing_image:
-                            image = Image.objects.create(
-                                name=image_ref,
-                                digest=image_digest,
-                                artifact_reference=artifact_ref
-                            )
-                            created = True
-                        else:
-                            image = Image.objects.create(
-                                name=image_ref,
-                                digest=image_digest,
-                                artifact_reference=artifact_ref
-                            )
-                            created = True
-                else:
-                    image = Image.objects.filter(name=image_ref).first()
-                    if image:
-                        created = False
-                    else:
-                        image = Image.objects.create(
-                            name=image_ref,
-                            digest=None,
-                            artifact_reference=artifact_ref
-                        )
-                        created = True
+                image, created = _get_or_create_canonical_image(
+                    name=image_ref,
+                    digest=image_digest,
+                    artifact_reference=artifact_ref,
+                )
                 image.repository_tags.add(tag)
                 logger.info(f"{'Created' if created else 'Linked'} Helm image {image_ref} with digest {image_digest}")
-
-        # Set status to success
-        tag.processing_status = 'success'
-        tag.save()
 
         # Trigger SBOM scan for all images linked to this tag
         images = tag.images.all()
         started = 0
+        repaired_tag_ids = set()
         for image in images:
-            if image.scan_status not in ['in_process', 'pending']:
-                image.scan_status = 'pending'
-                image.save()
-                repo_tag = image.repository_tags.first()
-                art_type = repo_tag.repository.repository_type if repo_tag else 'docker'
-                generate_sbom_and_create_components.delay(
-                    image_uuid=str(image.uuid),
-                    art_type=art_type
-                )
-                started += 1
+            if image.scan_status in ['in_process', 'pending'] and _has_completed_image_payload(image):
+                image.scan_status = 'success'
+                image.save(update_fields=['scan_status', 'updated_at'])
+                repaired_tag_ids.update(_propagate_image_completion_to_equivalent_images(image))
+                continue
+            if image.scan_status in ['in_process', 'pending']:
+                continue
+            if _has_completed_image_scan(image):
+                continue
+
+            image.scan_status = 'pending'
+            image.save(update_fields=['scan_status', 'updated_at'])
+            repo_tag = image.repository_tags.first()
+            art_type = repo_tag.repository.repository_type if repo_tag else 'docker'
+            generate_sbom_and_create_components.delay(
+                image_uuid=str(image.uuid),
+                art_type=art_type
+            )
+            started += 1
         logger.info(f"Triggered SBOM scan for {started} images for tag {tag.tag}")
 
         # Calculate summary statistics
         total_images_linked = images.count()
         images_pending_before = images.filter(scan_status='pending').count()
         images_in_process_before = images.filter(scan_status='in_process').count()
+
+        if total_images_linked == 0:
+            tag.processing_status = 'success'
+            tag.save(update_fields=['processing_status', 'updated_at'])
+        else:
+            synced_statuses = _sync_repository_tag_processing_statuses(
+                list({tag.pk, *repaired_tag_ids})
+            )
+            tag.processing_status = synced_statuses.get(str(tag.pk), tag.processing_status)
         
         return {
             "status": "success",
@@ -2164,7 +2408,7 @@ def process_single_tag(tag_uuid: str):
                 "images_pending_before": images_pending_before,
                 "images_in_process_before": images_in_process_before,
                 "sbom_scans_triggered": started,
-                "tag_processing_status": "success"
+                "tag_processing_status": tag.processing_status
             },
             "processing_details": {
                 "repository_type": repository.repository_type,

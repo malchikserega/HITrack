@@ -107,6 +107,22 @@ def _build_optimized_image_list_queryset(queryset):
     ).defer('sbom_data', 'grype_data')
 
 
+def _with_repository_scan_status_annotations(queryset):
+    return queryset.annotate(
+        tag_count=Count('tags', distinct=True),
+        active_tag_count=Count(
+            'tags',
+            filter=Q(tags__processing_status__in=['pending', 'in_process']),
+            distinct=True,
+        ),
+        active_image_count=Count(
+            'tags__images',
+            filter=Q(tags__images__scan_status__in=['pending', 'in_process']),
+            distinct=True,
+        ),
+    )
+
+
 def _build_repository_tag_image_queryset(queryset):
     """Lightweight image queryset for nested tag detail responses."""
     return queryset.annotate(
@@ -121,6 +137,7 @@ def _build_repository_tag_image_queryset(queryset):
     ).only(
         'uuid',
         'name',
+        'scan_status',
         'created_at',
         'updated_at',
     )
@@ -261,12 +278,29 @@ def _attach_repository_tag_summary_data(tags):
             'added_at': link.added_at,
         })
 
+    status_counts_map = defaultdict(dict)
+    for row in Image.objects.filter(
+        repository_tags__pk__in=tag_ids
+    ).values(
+        'repository_tags__pk',
+        'scan_status',
+    ).annotate(
+        total=Count('pk', distinct=True)
+    ):
+        status_counts_map[row['repository_tags__pk']][row['scan_status'] or 'none'] = row['total']
+
     for tag in tags:
+        tag_status_counts = status_counts_map.get(tag.pk, {})
         tag.total_findings = findings_counts.get(tag.pk, 0)
         tag.total_components = component_counts.get(tag.pk, 0)
         tag.total_unique_vulnerabilities = unique_vulnerability_counts.get(tag.pk, 0)
         tag.image_names_data = image_names_map.get(tag.pk, [])
         tag.release_data = releases_map.get(tag.pk, [])
+        tag.total_images_count = sum(tag_status_counts.values())
+        tag.pending_images_count = tag_status_counts.get('pending', 0)
+        tag.in_process_images_count = tag_status_counts.get('in_process', 0)
+        tag.error_images_count = tag_status_counts.get('error', 0)
+        tag.success_images_count = tag_status_counts.get('success', 0)
 
 class BaseViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
@@ -292,9 +326,11 @@ class RepositoryViewSet(BaseViewSet):
     def get_queryset(self):
         qs = super().get_queryset()
         if self.action == 'list':
-            qs = qs.annotate(tag_count=Count('tags'))
+            qs = _with_repository_scan_status_annotations(qs)
         elif self.action == 'retrieve':
-            qs = qs.prefetch_related('image_fallback_repositories').annotate(tag_count=Count('tags'))
+            qs = _with_repository_scan_status_annotations(
+                qs.prefetch_related('image_fallback_repositories')
+            )
         return qs
 
     def partial_update(self, request, *args, **kwargs):
@@ -323,7 +359,8 @@ class RepositoryViewSet(BaseViewSet):
     @action(detail=True, methods=['get'])
     def tags(self, request, uuid=None):
         repository = self.get_object()
-        tags = _build_repository_tag_detail_queryset(repository.tags.all())
+        tags = list(_build_repository_tag_detail_queryset(repository.tags.all()))
+        _attach_repository_tag_summary_data(tags)
         serializer = RepositoryTagSerializer(tags, many=True)
         return Response(serializer.data)
 
@@ -721,7 +758,9 @@ class RepositoryTagViewSet(BaseViewSet):
     @action(detail=True, methods=['post'])
     def process(self, request, uuid=None):
         tag = self.get_object()
-        if tag.processing_status in ['in_process', 'pending']:
+        if tag.processing_status in ['in_process', 'pending'] or tag.images.filter(
+            scan_status__in=['in_process', 'pending']
+        ).exists():
             return Response(
                 {'error': 'Tag is already queued for processing'}, 
                 status=status.HTTP_409_CONFLICT
@@ -771,6 +810,9 @@ class RepositoryTagViewSet(BaseViewSet):
                     task_name="Generate SBOM and Create Components"
                 )
                 started += 1
+        if started:
+            tag.processing_status = 'in_process'
+            tag.save(update_fields=['processing_status', 'updated_at'])
         return Response({
             'status': 'success',
             'message': f'Rescan started for {started} images',
@@ -817,6 +859,10 @@ class RepositoryTagViewSet(BaseViewSet):
             image.save()
             scan_image_with_grype.delay(str(image.uuid))
             started += 1
+
+        if started:
+            tag.processing_status = 'in_process'
+            tag.save(update_fields=['processing_status', 'updated_at'])
         
         message = f'Reanalysis started for {started} images with SBOM data'
         if skipped_images.exists():
@@ -1164,11 +1210,20 @@ class ImageViewSet(BaseViewSet):
         image = self.get_object()
         if not image.sbom_data:
             return Response({'error': 'No SBOM data available for this image.'}, status=400)
+        if image.scan_status in ['in_process', 'pending']:
+            return Response(
+                {'error': 'Image is already being scanned or queued for scanning'},
+                status=status.HTTP_409_CONFLICT
+            )
         try:
+            image.scan_status = 'pending'
+            image.save(update_fields=['scan_status', 'updated_at'])
             from .tasks import scan_image_with_grype
             scan_image_with_grype.delay(str(image.uuid))
             return Response({'status': 'success', 'message': 'Grype scan scheduled successfully'})
         except Exception as e:
+            image.scan_status = 'error'
+            image.save(update_fields=['scan_status', 'updated_at'])
             return Response({'error': str(e)}, status=500)
 
     @action(detail=True, methods=['get'], url_path='component-locations')

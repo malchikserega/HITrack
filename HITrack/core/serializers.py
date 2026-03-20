@@ -1,13 +1,87 @@
 from rest_framework import serializers
 from rest_framework.validators import UniqueValidator
 from drf_spectacular.utils import extend_schema_field
+from django.db.models import Count, Q
 from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ComponentVersionVulnerability, Release, RepositoryTagRelease, VulnerabilityDetails, ComponentLocation
 from collections import Counter, defaultdict
+from .utils.status import (
+    resolve_repository_scan_status,
+    resolve_repository_tag_processing_status,
+)
 # Celery Task Serializers
 from django_celery_results.models import TaskResult
 from django_celery_beat.models import PeriodicTask, IntervalSchedule, CrontabSchedule
 from datetime import datetime
 import json
+
+
+def _get_repository_tag_processing_status(obj):
+    count_attrs = (
+        'total_images_count',
+        'pending_images_count',
+        'in_process_images_count',
+        'error_images_count',
+        'success_images_count',
+    )
+    if all(hasattr(obj, attr) for attr in count_attrs):
+        return resolve_repository_tag_processing_status(
+            getattr(obj, 'processing_status', 'none'),
+            getattr(obj, 'total_images_count', 0) or 0,
+            getattr(obj, 'pending_images_count', 0) or 0,
+            getattr(obj, 'in_process_images_count', 0) or 0,
+            getattr(obj, 'error_images_count', 0) or 0,
+            getattr(obj, 'success_images_count', 0) or 0,
+        )
+
+    prefetched_images = getattr(obj, '_prefetched_objects_cache', {}).get('images')
+    if prefetched_images is not None and all('scan_status' in image.__dict__ for image in prefetched_images):
+        status_counts = Counter((image.scan_status or 'none') for image in prefetched_images)
+        return resolve_repository_tag_processing_status(
+            getattr(obj, 'processing_status', 'none'),
+            len(prefetched_images),
+            status_counts.get('pending', 0),
+            status_counts.get('in_process', 0),
+            status_counts.get('error', 0),
+            status_counts.get('success', 0),
+        )
+
+    counts = obj.images.aggregate(
+        total_images_count=Count('pk', distinct=True),
+        pending_images_count=Count('pk', filter=Q(scan_status='pending'), distinct=True),
+        in_process_images_count=Count('pk', filter=Q(scan_status='in_process'), distinct=True),
+        error_images_count=Count('pk', filter=Q(scan_status='error'), distinct=True),
+        success_images_count=Count('pk', filter=Q(scan_status='success'), distinct=True),
+    )
+    return resolve_repository_tag_processing_status(
+        getattr(obj, 'processing_status', 'none'),
+        counts['total_images_count'] or 0,
+        counts['pending_images_count'] or 0,
+        counts['in_process_images_count'] or 0,
+        counts['error_images_count'] or 0,
+        counts['success_images_count'] or 0,
+    )
+
+
+def _get_repository_scan_status(obj):
+    if hasattr(obj, 'active_tag_count') and hasattr(obj, 'active_image_count'):
+        return resolve_repository_scan_status(
+            getattr(obj, 'scan_status', 'none'),
+            getattr(obj, 'active_tag_count', 0) or 0,
+            getattr(obj, 'active_image_count', 0) or 0,
+        )
+
+    active_tag_count = obj.tags.filter(
+        processing_status__in=['pending', 'in_process']
+    ).count()
+    active_image_count = Image.objects.filter(
+        repository_tags__repository=obj,
+        scan_status__in=['pending', 'in_process'],
+    ).distinct().count()
+    return resolve_repository_scan_status(
+        getattr(obj, 'scan_status', 'none'),
+        active_tag_count,
+        active_image_count,
+    )
 
 class ComponentLocationSerializer(serializers.ModelSerializer):
     """Serializer for component location information"""
@@ -544,11 +618,16 @@ class RepositoryTagSerializer(serializers.ModelSerializer):
     findings = serializers.SerializerMethodField()
     components = serializers.SerializerMethodField()
     releases = serializers.SerializerMethodField()
+    processing_status = serializers.SerializerMethodField()
 
     class Meta:
         model = RepositoryTag
         fields = ['uuid', 'tag', 'repository', 'images', 'created_at', 'updated_at', 'vulnerabilities_count', 'processing_status', 'findings', 'components', 'releases']
         read_only_fields = ['created_at', 'updated_at', 'uuid']
+
+    @extend_schema_field(serializers.CharField())
+    def get_processing_status(self, obj):
+        return _get_repository_tag_processing_status(obj)
 
     def get_releases(self, obj):
         if hasattr(obj, 'release_data'):
@@ -611,11 +690,16 @@ class RepositoryTagListSerializer(serializers.ModelSerializer):
     components = serializers.SerializerMethodField()
     releases = serializers.SerializerMethodField()
     image_names = serializers.SerializerMethodField()
+    processing_status = serializers.SerializerMethodField()
 
     class Meta:
         model = RepositoryTag
         fields = ['uuid', 'tag', 'image_path', 'image_names', 'created_at', 'updated_at', 'processing_status', 'findings', 'components', 'releases']
         read_only_fields = ['created_at', 'updated_at', 'uuid']
+
+    @extend_schema_field(serializers.CharField())
+    def get_processing_status(self, obj):
+        return _get_repository_tag_processing_status(obj)
 
     @extend_schema_field(serializers.IntegerField())
     def get_findings(self, obj):
@@ -711,7 +795,7 @@ class RepositorySerializer(serializers.ModelSerializer):
 class RepositoryDetailSerializer(serializers.ModelSerializer):
     """Optimized serializer for repository detail view - excludes heavy fields"""
     tag_count = serializers.SerializerMethodField()
-    scan_status = serializers.CharField(read_only=True)
+    scan_status = serializers.SerializerMethodField()
     last_scanned = serializers.DateTimeField(read_only=True)
     image_fallback_repositories = serializers.SerializerMethodField()
 
@@ -730,6 +814,10 @@ class RepositoryDetailSerializer(serializers.ModelSerializer):
             return obj.tag_count
         return obj.tags.count()
 
+    @extend_schema_field(serializers.CharField())
+    def get_scan_status(self, obj):
+        return _get_repository_scan_status(obj)
+
     @extend_schema_field(serializers.ListField(child=serializers.DictField()))
     def get_image_fallback_repositories(self, obj):
         return [
@@ -740,6 +828,7 @@ class RepositoryDetailSerializer(serializers.ModelSerializer):
 
 class RepositoryListSerializer(serializers.ModelSerializer):
     tag_count = serializers.SerializerMethodField()
+    scan_status = serializers.SerializerMethodField()
 
     class Meta:
         model = Repository
@@ -751,6 +840,10 @@ class RepositoryListSerializer(serializers.ModelSerializer):
         if hasattr(obj, 'tag_count'):
             return obj.tag_count
         return obj.tags.count()
+
+    @extend_schema_field(serializers.CharField())
+    def get_scan_status(self, obj):
+        return _get_repository_scan_status(obj)
 
 
 class ComponentShortSerializer(serializers.ModelSerializer):

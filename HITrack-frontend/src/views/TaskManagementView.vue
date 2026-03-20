@@ -389,7 +389,7 @@
 </template>
 
 <script lang="ts">
-import { defineComponent, ref, reactive, onMounted, watch } from 'vue'
+import { defineComponent, ref, reactive, onMounted, onUnmounted, watch, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '@/plugins/axios'
 import type { TaskResult, TaskStatistics, PeriodicTask } from '@/types/interfaces'
@@ -421,6 +421,10 @@ export default defineComponent({
     const search = ref('')
     const taskDetailsDialog = ref(false)
     const selectedTask = ref<TaskResult | null>(null)
+    const hasActiveTasks = computed(() =>
+      tasks.value.some(task => ['pending', 'in_process'].includes(task.status))
+    )
+    let refreshTimer: number | null = null
     
     const options = ref({
       page: 1,
@@ -501,12 +505,49 @@ export default defineComponent({
       }
     }
 
+    const startAutoRefresh = () => {
+      if (refreshTimer !== null) return
+      refreshTimer = window.setInterval(() => {
+        if (!loading.value) {
+          loadTasks()
+          loadStatistics()
+        }
+      }, 5000)
+    }
+
+    const stopAutoRefresh = () => {
+      if (refreshTimer === null) return
+      window.clearInterval(refreshTimer)
+      refreshTimer = null
+    }
+
+    const upsertPendingTask = (taskId: string, taskName: string) => {
+      if (!taskId) return
+
+      const pendingTask: TaskResult = {
+        task_id: taskId,
+        task_name: taskName,
+        status: 'pending',
+        created: new Date().toISOString(),
+      }
+
+      const existingIndex = tasks.value.findIndex(task => task.task_id === taskId)
+      if (existingIndex >= 0) {
+        tasks.value.splice(existingIndex, 1, { ...tasks.value[existingIndex], ...pendingTask })
+        return
+      }
+
+      tasks.value = [pendingTask, ...tasks.value].slice(0, options.value.itemsPerPage || 10)
+      totalTasks.value += 1
+    }
+
     const runTestTask = async () => {
       testTaskLoading.value = true
       try {
-        await api.post('/test-tasks/run_test_task/')
-        await loadTasks()
-        await loadStatistics()
+        const response = await api.post('/test-tasks/run_test_task/')
+        if (response.data?.task_id) {
+          upsertPendingTask(response.data.task_id, 'Test Task')
+        }
         notificationService.success('Test task started successfully')
       } catch (error) {
         console.error('Error running test task:', error)
@@ -519,11 +560,14 @@ export default defineComponent({
     const runFailingTask = async () => {
       failingTaskLoading.value = true
       try {
-        await api.post('/test-tasks/run_failing_task/')
-        await loadTasks()
-        await loadStatistics()
+        const response = await api.post('/test-tasks/run_failing_task/')
+        if (response.data?.task_id) {
+          upsertPendingTask(response.data.task_id, 'Test Failing Task')
+        }
+        notificationService.success('Failing test task started successfully')
       } catch (error) {
         console.error('Error running failing task:', error)
+        notificationService.error(`Failed to start failing task: ${error}`)
       } finally {
         failingTaskLoading.value = false
       }
@@ -551,13 +595,11 @@ export default defineComponent({
     const updateAllComponentsLatestVersions = async () => {
       updateComponentsLoading.value = true
       try {
-        await api.post('/test-tasks/update_all_components_latest_versions/')
+        const response = await api.post('/test-tasks/update_all_components_latest_versions/')
+        if (response.data?.task_id) {
+          upsertPendingTask(response.data.task_id, 'Update All Components Latest Versions')
+        }
         notificationService.success('Update all components task started successfully')
-        // Reload tasks after a short delay
-        setTimeout(async () => {
-          await loadTasks()
-          await loadStatistics()
-        }, 3000)
       } catch (error) {
         console.error('Error updating all components latest versions:', error)
         notificationService.error(`Failed to start update task: ${error}`)
@@ -573,9 +615,10 @@ export default defineComponent({
 
     const retryTask = async (task: TaskResult) => {
       try {
-        await api.post(`/tasks/${task.task_id}/retry_task/`)
-        await loadTasks()
-        await loadStatistics()
+        const response = await api.post(`/tasks/${task.task_id}/retry_task/`)
+        if (response.data?.new_task_id) {
+          upsertPendingTask(response.data.new_task_id, task.task_name)
+        }
         notificationService.success(`Task "${task.task_name}" retry initiated`)
       } catch (error) {
         console.error('Error retrying task:', error)
@@ -587,8 +630,10 @@ export default defineComponent({
       stoppingTasks.value.push(task.task_id)
       try {
         await api.post(`/tasks/${task.task_id}/stop_task/`)
-        await loadTasks()
-        await loadStatistics()
+        const existingTask = tasks.value.find(item => item.task_id === task.task_id)
+        if (existingTask) {
+          existingTask.status = 'revoked'
+        }
         notificationService.success(`Task "${task.task_name}" stopped successfully`)
       } catch (error) {
         console.error('Error stopping task:', error)
@@ -607,6 +652,8 @@ export default defineComponent({
           return 'success'
         case 'error':
           return 'error'
+        case 'revoked':
+          return 'secondary'
         case 'pending':
           return 'warning'
         case 'in_process':
@@ -643,10 +690,15 @@ export default defineComponent({
 
     const runPeriodicTaskNow = async (task: PeriodicTask) => {
       try {
-        await api.post(`/periodic-tasks/${task.id}/run_now/`)
+        const response = await api.post(`/periodic-tasks/${task.id}/run_now/`)
+        if (response.data?.task_id) {
+          upsertPendingTask(response.data.task_id, task.name || task.task)
+        }
         await loadPeriodicTasks()
+        notificationService.success(`Periodic task "${task.name}" started`)
       } catch (error) {
         console.error('Error running periodic task now:', error)
+        notificationService.error(`Failed to run periodic task "${task.name}"`)
       }
     }
 
@@ -659,8 +711,20 @@ export default defineComponent({
       loadTasks()
     }, { deep: true })
 
+    watch(hasActiveTasks, (isActive) => {
+      if (isActive) {
+        startAutoRefresh()
+      } else {
+        stopAutoRefresh()
+      }
+    }, { immediate: true })
+
     onMounted(() => {
       Promise.all([loadTasks(), loadStatistics(), loadPeriodicTasks()])
+    })
+
+    onUnmounted(() => {
+      stopAutoRefresh()
     })
 
 
@@ -681,6 +745,7 @@ export default defineComponent({
           search,
           taskDetailsDialog,
           selectedTask,
+          hasActiveTasks,
           options,
           totalTasks,
           headers,
