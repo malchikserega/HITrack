@@ -443,6 +443,16 @@ const vulnerabilityHeaders = [
 ]
 
 
+const extractArrayPayload = (payload: any) => {
+  if (Array.isArray(payload)) {
+    return payload
+  }
+  if (Array.isArray(payload?.results)) {
+    return payload.results
+  }
+  return []
+}
+
 
 const totalImages = computed(() => {
   // Use the optimized total_images field from component detail endpoint
@@ -494,10 +504,13 @@ const loadComponentVersions = async () => {
   versionsLoading.value = true
   
   try {
-    const response = await api.get(`/components/${route.params.uuid}/versions/`)
-    componentVersions.value = response.data
+    const response = await api.get(`/components/${route.params.uuid}/versions/`, {
+      params: { page_size: 1000 }
+    })
+    componentVersions.value = extractArrayPayload(response.data)
   } catch (err) {
     console.error('Error loading component versions:', err)
+    componentVersions.value = []
   } finally {
     versionsLoading.value = false
   }
