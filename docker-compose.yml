@@ -104,6 +104,31 @@ services:
     networks:
       - hitrack-network
 
+  worker-enrichment:
+    restart: always
+    image: hitrack-api
+    links:
+      - hitrack-db
+      - hitrack-redis
+    environment:
+      - ENRICHMENT_WORKERS=2
+      - ENRICHMENT_MAX_TASKS_PER_CHILD=25
+    volumes:
+      - ./storage:/storage
+      - ./static_data:/code/static
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      hitrack-db:
+        condition: service_healthy
+      hitrack-api:
+        condition: service_started
+      hitrack-redis:
+        condition: service_healthy
+    env_file: env.env
+    command: "worker-enrichment"
+    networks:
+      - hitrack-network
+
   beat:
     restart: always
     image: hitrack-api
@@ -160,4 +185,3 @@ volumes:
 
 networks:
   hitrack-network:
-  

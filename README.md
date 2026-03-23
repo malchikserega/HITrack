@@ -40,6 +40,7 @@ The default `docker-compose.yml` starts the full platform:
 - `hitrack-api`: Django REST API, admin, migrations, and app bootstrap
 - `worker-light`: Celery worker for lightweight/orchestration/metadata tasks
 - `worker-scan`: Celery worker for heavy scanning/image/SBOM/Grype tasks
+- `worker-enrichment`: Celery worker for vulnerability enrichment, EPSS/KEV/exploit metadata refresh, and bulk CVE detail updates
 - `beat`: dedicated Celery Beat scheduler for django-celery-beat cron jobs
 - `hitrack-db`: PostgreSQL 17
 - `hitrack-redis`: Redis for task queue/broker
@@ -49,7 +50,7 @@ Important runtime notes:
 - The backend container mounts `/var/run/docker.sock`, because scanning workflows invoke container tooling from inside the app container.
 - The backend image installs `syft`, `grype`, `helm`, and Docker CLI during build.
 - Persistent project data is stored in local folders such as `volume/`, `storage/`, and `static_data/`.
-- Celery traffic is split into `light` and `scan` queues so heavy image-processing tasks do not starve lightweight scheduled/admin tasks.
+- Celery traffic is split into `light`, `scan`, and `enrichment` queues so long-running vulnerability metadata refreshes do not starve either image scanning or lightweight scheduled/admin tasks.
 
 ## Supported Workflows
 
@@ -181,7 +182,7 @@ If you want scanning workflows to work outside Docker, your local environment al
 
 ```bash
 cd HITrack
-celery -A hitrack_celery worker --loglevel=INFO -E --pool=threads
+celery -A hitrack_celery worker --queues=light --loglevel=INFO
 ```
 
 ### Frontend

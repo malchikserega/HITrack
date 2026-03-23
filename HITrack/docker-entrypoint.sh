@@ -34,6 +34,16 @@ elif [ "$1" = 'worker-scan' ]; then
 		--loglevel=info \
 		-n scan@%h
 
+elif [ "$1" = 'worker-enrichment' ]; then
+	: "${ENRICHMENT_WORKERS:=2}"
+	: "${ENRICHMENT_MAX_TASKS_PER_CHILD:=25}"
+	celery -A hitrack_celery worker \
+		--queues=enrichment \
+		--concurrency="$ENRICHMENT_WORKERS" \
+		--max-tasks-per-child="$ENRICHMENT_MAX_TASKS_PER_CHILD" \
+		--loglevel=info \
+		-n enrichment@%h
+
 elif [ "$1" = 'beat' ]; then
 	celery -A hitrack_celery beat \
 		--scheduler django_celery_beat.schedulers:DatabaseScheduler \

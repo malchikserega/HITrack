@@ -197,6 +197,7 @@ class Vulnerability(models.Model):
         verbose_name_plural = 'Vulnerabilities'
         indexes = [
             models.Index(fields=['severity']),
+            models.Index(fields=['epss']),
         ]
 
     def __str__(self):
@@ -260,6 +261,12 @@ class VulnerabilityDetails(models.Model):
     class Meta:
         verbose_name = 'Vulnerability Details'
         verbose_name_plural = 'Vulnerability Details'
+        indexes = [
+            models.Index(fields=['last_updated']),
+            models.Index(fields=['exploit_available']),
+            models.Index(fields=['cisa_kev_known_exploited']),
+            models.Index(fields=['cisa_kev_ransomware_use']),
+        ]
     
     def __str__(self):
         return f"Details for {self.vulnerability.vulnerability_id}"
