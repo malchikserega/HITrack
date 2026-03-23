@@ -100,7 +100,49 @@ def _build_vulnerability_data_sources(cve_details, exploit_info):
 
 
 def _normalize_image_digest(digest):
-    return digest or None
+    if not digest:
+        return None
+
+    normalized = str(digest).strip()
+    if not normalized:
+        return None
+
+    if '@' in normalized:
+        normalized = normalized.split('@', 1)[-1].strip()
+    if not normalized:
+        return None
+
+    if ':' not in normalized:
+        normalized = f"sha256:{normalized}"
+
+    return normalized
+
+
+def _resolve_repository_tag_image_digest(tag, image_ref, registry):
+    from .utils.registry import get_image_digest
+
+    stored_digest = getattr(tag, 'digest', None)
+    resolved_digest = _normalize_image_digest(stored_digest)
+
+    if registry:
+        try:
+            registry_digest = _normalize_image_digest(get_image_digest(registry, image_ref))
+        except Exception as exc:
+            logger.warning(
+                "Failed to resolve image digest for %s from registry %s: %s",
+                image_ref,
+                getattr(registry, 'name', 'unknown'),
+                exc,
+            )
+            registry_digest = None
+        if registry_digest:
+            resolved_digest = registry_digest
+
+    if tag is not None and resolved_digest and stored_digest != resolved_digest:
+        tag.digest = resolved_digest
+        tag.save(update_fields=['digest', 'updated_at'])
+
+    return resolved_digest
 
 
 def _has_completed_image_scan(image):
@@ -264,6 +306,131 @@ def _propagate_image_completion_to_equivalent_images(image):
             duplicate.save(update_fields=update_fields + ['updated_at'])
 
     return list(related_tag_ids)
+
+
+def _merge_component_location_into_image(source_location, target_image):
+    from .models import ComponentLocation
+
+    target_location, created = ComponentLocation.objects.get_or_create(
+        component_version=source_location.component_version,
+        image=target_image,
+        path=source_location.path,
+        defaults={
+            'layer_id': source_location.layer_id,
+            'access_path': source_location.access_path,
+            'evidence_type': source_location.evidence_type,
+            'annotations': source_location.annotations,
+        },
+    )
+    if created:
+        return True
+
+    updated_fields = []
+    for field_name in ('layer_id', 'access_path', 'evidence_type', 'annotations'):
+        current_value = getattr(target_location, field_name)
+        incoming_value = getattr(source_location, field_name)
+        if not current_value and incoming_value:
+            setattr(target_location, field_name, incoming_value)
+            updated_fields.append(field_name)
+    if updated_fields:
+        target_location.save(update_fields=updated_fields)
+
+    return False
+
+
+def _merge_duplicate_image_group(images, normalized_digest):
+    if len(images) <= 1:
+        return None
+
+    status_rank = {
+        'success': 0,
+        'in_process': 1,
+        'pending': 2,
+        'error': 3,
+        'none': 4,
+    }
+
+    primary = _pick_preferred_image(images)
+    duplicate_images = [image for image in images if image.pk != primary.pk]
+    if not duplicate_images:
+        return None
+
+    related_tag_ids = set(primary.repository_tags.values_list('pk', flat=True))
+    primary_tag_ids = set(related_tag_ids)
+    primary_component_version_ids = set(primary.component_versions.values_list('pk', flat=True))
+
+    merged_tag_links = 0
+    merged_component_links = 0
+    merged_locations = 0
+    normalized_images = 0
+    deleted_images = 0
+
+    update_fields = []
+    if primary.digest != normalized_digest:
+        primary.digest = normalized_digest
+        update_fields.append('digest')
+        normalized_images += 1
+
+    for duplicate in duplicate_images:
+        duplicate_tag_ids = set(duplicate.repository_tags.values_list('pk', flat=True))
+        new_tag_ids = list(duplicate_tag_ids - primary_tag_ids)
+        if new_tag_ids:
+            primary.repository_tags.add(*new_tag_ids)
+            merged_tag_links += len(new_tag_ids)
+            primary_tag_ids.update(new_tag_ids)
+        related_tag_ids.update(duplicate_tag_ids)
+
+        duplicate_component_version_ids = set(
+            duplicate.component_versions.values_list('pk', flat=True)
+        )
+        new_component_version_ids = list(
+            duplicate_component_version_ids - primary_component_version_ids
+        )
+        if new_component_version_ids:
+            primary.component_versions.add(*new_component_version_ids)
+            merged_component_links += len(new_component_version_ids)
+            primary_component_version_ids.update(new_component_version_ids)
+
+        for location in duplicate.component_locations.select_related('component_version').all():
+            if _merge_component_location_into_image(location, primary):
+                merged_locations += 1
+
+        if not primary.artifact_reference and duplicate.artifact_reference:
+            primary.artifact_reference = duplicate.artifact_reference
+            update_fields.append('artifact_reference')
+        if primary.sbom_data is None and duplicate.sbom_data is not None:
+            primary.sbom_data = duplicate.sbom_data
+            update_fields.append('sbom_data')
+        if primary.grype_data is None and duplicate.grype_data is not None:
+            primary.grype_data = duplicate.grype_data
+            update_fields.append('grype_data')
+        if duplicate.digest != normalized_digest:
+            duplicate.digest = normalized_digest
+            duplicate.save(update_fields=['digest', 'updated_at'])
+            normalized_images += 1
+        if status_rank.get(duplicate.scan_status, 99) < status_rank.get(primary.scan_status, 99):
+            primary.scan_status = duplicate.scan_status
+            update_fields.append('scan_status')
+
+    if update_fields:
+        primary.save(update_fields=sorted(set(update_fields)) + ['updated_at'])
+
+    for duplicate in duplicate_images:
+        duplicate.delete()
+        deleted_images += 1
+
+    if related_tag_ids:
+        _sync_repository_tag_processing_statuses(list(related_tag_ids))
+
+    return {
+        'primary_image_uuid': str(primary.uuid),
+        'duplicate_groups_merged': 1,
+        'duplicate_images_deleted': deleted_images,
+        'repository_tag_links_merged': merged_tag_links,
+        'component_version_links_merged': merged_component_links,
+        'component_locations_merged': merged_locations,
+        'images_normalized': normalized_images,
+    }
 
 
 def _sync_repository_tag_processing_statuses(tag_ids):
@@ -785,11 +952,15 @@ def process_all_tags():
                 # For Docker images, just create the record
                 if repository.repository_type == 'docker':
                     image_ref = _repository_tag_image_ref(repository, repo_tag, registry)
-                    image, created = Image.objects.get_or_create(
+                    image_digest = _resolve_repository_tag_image_digest(
+                        repo_tag,
+                        image_ref,
+                        registry,
+                    )
+                    image, created = _get_or_create_canonical_image(
                         name=image_ref,
-                        defaults={
-                            'artifact_reference': image_ref
-                        }
+                        digest=image_digest,
+                        artifact_reference=image_ref,
                     )
                     image.repository_tags.add(repo_tag)
                     logger.info(f"{'Created' if created else 'Linked'} Docker image {image_ref}")
@@ -2159,15 +2330,15 @@ def scan_repository_tags(
                             img = repository.name[len(rk) + 1:] if repository.name.startswith(rk + '/') else repository.name
                             manifest, d = get_manifest(registry, rk, tag_name, image_name=img)
                             if d:
-                                digest = (d or '').replace('sha256:', '')
+                                digest = _normalize_image_digest(d)
                         elif registry.provider != 'jfrog' or not image_path_val:
                             manifest, d = get_manifest(registry, repository.name, tag_name)
                             if d:
-                                digest = (d or '').replace('sha256:', '')
+                                digest = _normalize_image_digest(d)
                         else:
                             manifest, d = get_manifest(registry, repository.name, tag_name, image_name=image_path_val)
                             if d:
-                                digest = (d or '').replace('sha256:', '')
+                                digest = _normalize_image_digest(d)
                     rt = RepositoryTag.objects.create(
                         repository=repository,
                         tag=tag_name,
@@ -2317,8 +2488,14 @@ def process_single_tag(tag_uuid: str):
         # For Docker images, just create the record
         if repository.repository_type == 'docker':
             image_ref = _repository_tag_image_ref(repository, tag, registry)
+            image_digest = _resolve_repository_tag_image_digest(
+                tag,
+                image_ref,
+                registry,
+            )
             image, created = _get_or_create_canonical_image(
                 name=image_ref,
+                digest=image_digest,
                 artifact_reference=image_ref,
             )
             image.repository_tags.add(tag)
@@ -2509,6 +2686,116 @@ def process_single_tag(tag_uuid: str):
             },
             "timestamp": timezone.now().isoformat()
         }
+
+
+@celery_app.task(name="Deduplicate Images by Identity")
+def deduplicate_images_by_identity():
+    """
+    Repair historical duplicate Image rows that represent the same logical image.
+    Images are considered duplicates when they share the same name and normalized digest.
+    """
+    from .models import Image
+
+    digest_filter = ~Q(digest__isnull=True) & ~Q(digest='')
+    names_with_multiple_images = set(
+        Image.objects.filter(digest_filter)
+        .values('name')
+        .annotate(image_count=Count('uuid'))
+        .filter(image_count__gt=1)
+        .values_list('name', flat=True)
+    )
+    names_with_unnormalized_digest = set(
+        Image.objects.filter(digest_filter)
+        .exclude(digest__startswith='sha256:')
+        .values_list('name', flat=True)
+    )
+    candidate_names = sorted(names_with_multiple_images | names_with_unnormalized_digest)
+
+    summary = {
+        'candidate_names_seen': len(candidate_names),
+        'duplicate_groups_merged': 0,
+        'duplicate_images_deleted': 0,
+        'repository_tag_links_merged': 0,
+        'component_version_links_merged': 0,
+        'component_locations_merged': 0,
+        'images_normalized': 0,
+    }
+    affected_primary_images = []
+
+    for image_name in candidate_names:
+        image_rows = list(
+            Image.objects.filter(name=image_name)
+            .filter(digest_filter)
+            .prefetch_related(
+                'repository_tags',
+                'component_versions',
+                'component_locations__component_version',
+            )
+        )
+        grouped_by_digest = {}
+        for image in image_rows:
+            normalized_digest = _normalize_image_digest(image.digest)
+            if not normalized_digest:
+                continue
+            grouped_by_digest.setdefault(normalized_digest, []).append(image)
+
+        for normalized_digest, grouped_images in grouped_by_digest.items():
+            if len(grouped_images) == 1 and grouped_images[0].digest == normalized_digest:
+                continue
+
+            with transaction.atomic():
+                _acquire_image_identity_lock(image_name, normalized_digest)
+                locked_images = list(
+                    Image.objects.filter(pk__in=[image.pk for image in grouped_images])
+                    .select_for_update()
+                    .prefetch_related(
+                        'repository_tags',
+                        'component_versions',
+                        'component_locations__component_version',
+                    )
+                )
+                locked_images = [
+                    image for image in locked_images
+                    if _normalize_image_digest(image.digest) == normalized_digest
+                ]
+
+                if len(locked_images) == 1:
+                    image = locked_images[0]
+                    if image.digest != normalized_digest:
+                        image.digest = normalized_digest
+                        image.save(update_fields=['digest', 'updated_at'])
+                        summary['images_normalized'] += 1
+                    continue
+
+                merge_result = _merge_duplicate_image_group(locked_images, normalized_digest)
+                if not merge_result:
+                    continue
+
+                affected_primary_images.append(merge_result['primary_image_uuid'])
+                for key in (
+                    'duplicate_groups_merged',
+                    'duplicate_images_deleted',
+                    'repository_tag_links_merged',
+                    'component_version_links_merged',
+                    'component_locations_merged',
+                    'images_normalized',
+                ):
+                    summary[key] += merge_result[key]
+
+    return {
+        "status": "success",
+        "task_name": "Deduplicate Images by Identity",
+        "summary": summary,
+        "details": {
+            "affected_primary_images": affected_primary_images,
+        },
+        "message": (
+            f"Image deduplication completed: {summary['duplicate_images_deleted']} duplicate "
+            f"images removed across {summary['duplicate_groups_merged']} identity groups"
+        ),
+        "timestamp": timezone.now().isoformat(),
+    }
+
 
 @celery_app.task(name="Delete Old Repository Tags")
 def delete_old_repository_tags(days: int = 1):

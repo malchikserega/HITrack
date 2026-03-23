@@ -277,6 +277,7 @@ CELERY_TASK_ROUTES = {
     'Monitor Mass Rescan Progress': {'queue': 'light', 'routing_key': 'light'},
     'Update Components Latest Versions': {'queue': 'light', 'routing_key': 'light'},
     'Update All Components Latest Versions': {'queue': 'light', 'routing_key': 'light'},
+    'Deduplicate Images by Identity': {'queue': 'light', 'routing_key': 'light'},
     'Delete Old Repository Tags': {'queue': 'light', 'routing_key': 'light'},
     'Update Vulnerability Details': {'queue': 'enrichment', 'routing_key': 'enrichment'},
     'Update All Vulnerability Details': {'queue': 'light', 'routing_key': 'light'},
