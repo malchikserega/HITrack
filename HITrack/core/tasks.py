@@ -2,14 +2,20 @@ from __future__ import absolute_import, unicode_literals
 
 from hitrack_celery.celery import celery_app
 import hashlib
+import html
 import logging
+import os
 import re
+import subprocess
+import time
 from datetime import timedelta
+from urllib.parse import parse_qsl, unquote
+
+import requests
 from django.utils import timezone
 from typing import List, Dict
 from django.db import connection, transaction
 from django.db.models import Count, Q
-import time
 from .utils.status import resolve_repository_tag_processing_status
 
 # Performance and logging configuration
@@ -27,7 +33,6 @@ from .utils.status import resolve_repository_tag_processing_status
 logger = logging.getLogger(__name__)
 
 # Remove debug logging in production
-import os
 DEBUG_LOGGING = os.getenv('DEBUG_LOGGING', 'False').lower() == 'true'
 
 DOCKER_IMAGE_REGEX = re.compile(r'^[a-zA-Z0-9._/-]+(:[a-zA-Z0-9._-]+)?$')
@@ -40,16 +45,265 @@ _PKG_VERSION_CACHE_TTL = 3600  # 1 hour
 VULNERABILITY_DETAILS_FRESHNESS_HOURS = 24
 ENRICHMENT_BATCH_SIZE = 100
 CRITICAL_ENRICHMENT_BATCH_SIZE = 50
+_DEBIAN_DISTRO_SERIES_MAP = {
+    "10": "buster",
+    "11": "bullseye",
+    "12": "bookworm",
+    "13": "trixie",
+    "14": "forky",
+    "buster": "buster",
+    "bullseye": "bullseye",
+    "bookworm": "bookworm",
+    "trixie": "trixie",
+    "forky": "forky",
+    "sid": "sid",
+    "unstable": "sid",
+    "testing": "testing",
+    "stable": "stable",
+    "oldstable": "oldstable",
+}
+_UBUNTU_DISTRO_SERIES_MAP = {
+    "18.04": "bionic",
+    "20.04": "focal",
+    "22.04": "jammy",
+    "24.04": "noble",
+    "24.10": "oracular",
+    "25.04": "plucky",
+    "25.10": "questing",
+    "26.04": "resolute",
+    "bionic": "bionic",
+    "focal": "focal",
+    "jammy": "jammy",
+    "noble": "noble",
+    "oracular": "oracular",
+    "plucky": "plucky",
+    "questing": "questing",
+    "resolute": "resolute",
+    "devel": "devel",
+}
 
-def _get_cached_latest_version(package_type: str, package_name: str) -> str | None:
+
+def _build_latest_version_cache_key(package_type: str, package_name: str, context: str | None = None) -> str:
+    key = f"pkg_ver:{package_type}:{package_name}"
+    if context:
+        key = f"{key}:{context}"
+    return key
+
+
+def _get_cached_latest_version(package_type: str, package_name: str, context: str | None = None) -> str | None:
     """Check Redis cache for a previously fetched latest package version."""
     from django.core.cache import cache
-    return cache.get(f'pkg_ver:{package_type}:{package_name}')
+    return cache.get(_build_latest_version_cache_key(package_type, package_name, context))
 
 
-def _set_cached_latest_version(package_type: str, package_name: str, version: str):
+def _set_cached_latest_version(package_type: str, package_name: str, version: str, context: str | None = None):
     from django.core.cache import cache
-    cache.set(f'pkg_ver:{package_type}:{package_name}', version, _PKG_VERSION_CACHE_TTL)
+    cache.set(
+        _build_latest_version_cache_key(package_type, package_name, context),
+        version,
+        _PKG_VERSION_CACHE_TTL,
+    )
+
+
+def _parse_purl_metadata(purl: str) -> dict | None:
+    if not purl or not str(purl).startswith("pkg:"):
+        return None
+
+    package_reference = str(purl)[4:]
+    package_reference, _, _ = package_reference.partition("#")
+    package_reference, _, qualifier_string = package_reference.partition("?")
+    package_path, _, version = package_reference.partition("@")
+    segments = [unquote(segment).strip() for segment in package_path.split("/") if segment.strip()]
+    if len(segments) < 2:
+        return None
+
+    package_type = segments[0].lower()
+    namespace_segments = [segment.lower() for segment in segments[1:-1]]
+    package_name = segments[-1].lower()
+    qualifiers = {
+        key.lower(): unquote(value).strip().lower()
+        for key, value in parse_qsl(qualifier_string, keep_blank_values=True)
+        if key
+    }
+
+    full_name = "/".join([*namespace_segments, package_name]) if namespace_segments else package_name
+    namespace = "/".join(namespace_segments) if namespace_segments else None
+
+    return {
+        "package_type": package_type,
+        "package_name": package_name,
+        "namespace": namespace,
+        "full_name": full_name,
+        "version": version,
+        "qualifiers": qualifiers,
+    }
+
+
+def _resolve_deb_distribution(metadata: dict) -> tuple[str | None, str | None, str | None]:
+    qualifiers = metadata.get("qualifiers") or {}
+    namespace = (metadata.get("namespace") or "").split("/", 1)[0].strip().lower()
+    distro_value = (qualifiers.get("distro") or "").strip().lower()
+    arch = (qualifiers.get("arch") or "").strip().lower() or None
+
+    family = None
+    raw_series = ""
+
+    if distro_value.startswith("debian"):
+        family = "debian"
+        raw_series = distro_value.removeprefix("debian").lstrip("-_/")
+    elif distro_value.startswith("ubuntu"):
+        family = "ubuntu"
+        raw_series = distro_value.removeprefix("ubuntu").lstrip("-_/")
+    elif distro_value:
+        raw_series = distro_value
+
+    if family is None and namespace in {"debian", "ubuntu"}:
+        family = namespace
+
+    if not raw_series:
+        raw_series = namespace if namespace not in {"debian", "ubuntu"} else ""
+
+    if family == "debian":
+        series = _DEBIAN_DISTRO_SERIES_MAP.get(raw_series)
+    elif family == "ubuntu":
+        series = _UBUNTU_DISTRO_SERIES_MAP.get(raw_series)
+    else:
+        series = None
+
+    return family, series, arch
+
+
+def _extract_deb_version_from_package_page(response_text: str, package_name: str, arch: str | None = None) -> str | None:
+    plain_text = html.unescape(response_text or "")
+
+    if arch:
+        arch_row_match = re.search(
+            rf"{re.escape(arch)}\s+([0-9A-Za-z.+:~\-]+)\s+\d",
+            plain_text,
+            re.IGNORECASE,
+        )
+        if arch_row_match:
+            return arch_row_match.group(1).strip()
+
+    title_match = re.search(
+        rf"(?:#\s*)?Package:\s*{re.escape(package_name)}\s*\(([^)]+)\)",
+        plain_text,
+        re.IGNORECASE,
+    )
+    if title_match:
+        version_text = title_match.group(1).split(" and others", 1)[0].strip()
+        if version_text:
+            return version_text
+
+    return None
+
+
+def _lookup_deb_latest_version_from_packages_site(package_name: str, family: str | None, series: str | None, arch: str | None) -> str | None:
+    if not family or not series:
+        return None
+
+    if family == "debian":
+        path_parts = [series]
+        if arch:
+            path_parts.append(arch)
+        path_parts.append(package_name)
+        url = f"https://packages.debian.org/{'/'.join(path_parts)}"
+    elif family == "ubuntu":
+        url = f"https://packages.ubuntu.com/{series}/{package_name}"
+    else:
+        return None
+
+    response = requests.get(url, timeout=10)
+    if not response.ok:
+        return None
+
+    return _extract_deb_version_from_package_page(response.text, package_name, arch=arch)
+
+
+def _lookup_latest_version_for_purl(purl: str) -> str | None:
+    metadata = _parse_purl_metadata(purl)
+    if not metadata:
+        return None
+
+    package_type = metadata["package_type"]
+    package_name = metadata["package_name"]
+    full_name = metadata["full_name"]
+    cache_context = None
+
+    if package_type == "deb":
+        family, series, arch = _resolve_deb_distribution(metadata)
+        cache_context = ":".join(part for part in [family, series, arch] if part) or None
+        latest_version = _get_cached_latest_version(package_type, package_name, cache_context)
+        if latest_version is not None:
+            return latest_version
+
+        try:
+            latest_version = _lookup_deb_latest_version_from_packages_site(package_name, family, series, arch)
+        except Exception:
+            latest_version = None
+
+        if latest_version is None:
+            try:
+                output = subprocess.check_output(
+                    ["apt-cache", "policy", package_name],
+                    text=True,
+                    timeout=5,
+                )
+                for line in output.splitlines():
+                    if "Candidate:" in line:
+                        candidate = line.split(":", 1)[1].strip()
+                        latest_version = candidate if candidate and candidate != "(none)" else None
+                        break
+            except Exception:
+                latest_version = None
+
+        if latest_version:
+            _set_cached_latest_version(package_type, package_name, latest_version, cache_context)
+        return latest_version
+
+    latest_version = _get_cached_latest_version(package_type, full_name)
+    if latest_version is not None:
+        return latest_version
+
+    if package_type == "pypi":
+        url = f"https://pypi.org/pypi/{full_name}/json"
+        response = requests.get(url, timeout=5)
+        if response.ok:
+            latest_version = response.json()["info"]["version"]
+    elif package_type == "npm":
+        url = f"https://registry.npmjs.org/{full_name}"
+        response = requests.get(url, timeout=5)
+        if response.ok:
+            latest_version = response.json()["dist-tags"]["latest"]
+    elif package_type == "nuget":
+        url = f"https://api.nuget.org/v3-flatcontainer/{full_name}/index.json"
+        response = requests.get(url, timeout=5)
+        if response.ok:
+            versions = response.json().get("versions", [])
+            latest_version = versions[-1] if versions else None
+    elif package_type == "golang":
+        if full_name == "stdlib":
+            url = "https://golang.org/dl/?mode=json"
+            response = requests.get(url, timeout=5)
+            if response.ok:
+                versions = response.json()
+                stable_versions = [
+                    version_info["version"]
+                    for version_info in versions
+                    if not version_info["version"].endswith("beta")
+                    and not version_info["version"].endswith("rc")
+                ]
+                if stable_versions:
+                    latest_version = max(stable_versions).replace("go", "")
+        else:
+            url = f"https://proxy.golang.org/{full_name}/@latest"
+            response = requests.get(url, timeout=5)
+            if response.ok:
+                latest_version = response.json().get("Version", "").replace("v", "")
+
+    if latest_version:
+        _set_cached_latest_version(package_type, full_name, latest_version)
+    return latest_version
 
 
 def _is_supported_vulnerability_enrichment_target(vulnerability_id: str, vulnerability_type: str | None = None) -> bool:
@@ -1404,10 +1658,6 @@ def update_components_latest_versions(image_uuid: str):
     This task can be triggered manually through the API.
     """
     from .models import Image, ComponentVersion
-    import time
-    import requests
-    import subprocess
-    from packaging.version import parse as parse_version
 
     logger.info(f"Starting latest versions update for image {image_uuid}")
     start_time = time.time()
@@ -1417,6 +1667,7 @@ def update_components_latest_versions(image_uuid: str):
             'component_versions__component'
         ).get(uuid=image_uuid)
         component_versions = list(image.component_versions.all())
+        total_component_versions = len(component_versions)
         logger.info(f"Found {len(component_versions)} component versions to process")
         updated_count = 0
         versions_to_update = []
@@ -1435,65 +1686,9 @@ def update_components_latest_versions(image_uuid: str):
                     logger.info(f"No PURL found for component version {component_version.component.name}:{component_version.version}")
                     continue
                 logger.info(f"Processing component version {component_version.component.name}:{component_version.version}")
-                parts = component_version.purl.split("/")
-                if len(parts) < 2:
-                    continue
-                package_type = parts[0].split(":")[1] if ":" in parts[0] else None
-                if not package_type:
-                    continue
-                package_name = parts[1].lower()
-                if len(parts) > 2:
-                    package_name = f"{package_name}/{parts[2].lower()}"
-                if "@" in package_name:
-                    package_name = package_name.split("@")[0]
                 if DEBUG_LOGGING:
                     logger.debug(f"Processing PURL: {component_version.purl}")
-                    logger.debug(f"Package type: {package_type}, Package name: {package_name}")
-                # Check Redis cache before making HTTP calls
-                latest_version = _get_cached_latest_version(package_type, package_name)
-                if latest_version is None:
-                    if package_type == "pypi":
-                        url = f"https://pypi.org/pypi/{package_name}/json"
-                        r = requests.get(url, timeout=5)
-                        if r.ok:
-                            latest_version = r.json()["info"]["version"]
-                    elif package_type == "npm":
-                        url = f"https://registry.npmjs.org/{package_name}"
-                        r = requests.get(url, timeout=5)
-                        if r.ok:
-                            latest_version = r.json()["dist-tags"]["latest"]
-                    elif package_type == "nuget":
-                        url = f"https://api.nuget.org/v3-flatcontainer/{package_name}/index.json"
-                        r = requests.get(url, timeout=5)
-                        if r.ok:
-                            versions = r.json().get("versions", [])
-                            latest_version = versions[-1] if versions else None
-                    elif package_type == "deb":
-                        try:
-                            output = subprocess.check_output(["apt-cache", "policy", package_name], text=True, timeout=5)
-                            for line in output.splitlines():
-                                if "Candidate:" in line:
-                                    latest_version = line.split(":")[1].strip()
-                                    break
-                        except Exception:
-                            continue
-                    elif package_type == "golang":
-                        if package_name == "stdlib":
-                            url = "https://golang.org/dl/?mode=json"
-                            r = requests.get(url, timeout=5)
-                            if r.ok:
-                                versions = r.json()
-                                stable_versions = [v['version'] for v in versions if not v['version'].endswith('beta') and not v['version'].endswith('rc')]
-                                if stable_versions:
-                                    latest_version = max(stable_versions).replace('go', '')
-                        else:
-                            url = f"https://proxy.golang.org/{package_name}/@latest"
-                            r = requests.get(url, timeout=5)
-                            if r.ok:
-                                data = r.json()
-                                latest_version = data.get('Version', '').replace('v', '')
-                    if latest_version:
-                        _set_cached_latest_version(package_type, package_name, latest_version)
+                latest_version = _lookup_latest_version_for_purl(component_version.purl)
                 if latest_version:
                     component_version.latest_version = latest_version
                     component_version.latest_version_updated_at = now
@@ -1522,10 +1717,10 @@ def update_components_latest_versions(image_uuid: str):
             "image_uuid": str(image_uuid),
             "image_name": image.name,
             "summary": {
-                "total_component_versions_processed": component_versions.count(),
+                "total_component_versions_processed": total_component_versions,
                 "component_versions_updated": updated_count,
-                "component_versions_skipped": component_versions.count() - updated_count,
-                "update_rate": f"{(updated_count / component_versions.count() * 100):.1f}%" if component_versions.count() > 0 else "0%"
+                "component_versions_skipped": total_component_versions - updated_count,
+                "update_rate": f"{(updated_count / total_component_versions * 100):.1f}%" if total_component_versions > 0 else "0%"
             },
             "processing_time": total_time,
             "processing_time_formatted": f"{total_time:.2f} seconds",
@@ -3905,10 +4100,6 @@ def update_all_components_latest_versions():
     - Processes in batches of 50 components
     """
     from .models import ComponentVersion
-    import time
-    import requests
-    import subprocess
-    from packaging.version import parse as parse_version
     from django.utils import timezone
     from datetime import timedelta
 
@@ -3958,67 +4149,10 @@ def update_all_components_latest_versions():
                     
                     if DEBUG_LOGGING:
                         logger.debug(f"Processing component version {component_version.component.name}:{component_version.version}")
-                    parts = component_version.purl.split("/")
-                    if len(parts) < 2:
-                        skipped_count += 1
-                        continue
-                    
-                    package_type = parts[0].split(":")[1] if ":" in parts[0] else None
-                    if not package_type:
-                        skipped_count += 1
-                        continue
-                    
-                    package_name = parts[1].lower()
-                    if len(parts) < 2:
-                        package_name = f"{package_name}/{parts[2].lower()}"
-                    if "@" in package_name:
-                        package_name = package_name.split("@")[0]
-                    
                     if DEBUG_LOGGING:
                         logger.debug(f"Processing PURL: {component_version.purl}")
-                        logger.debug(f"Package type: {package_type}, Package name: {package_name}")
                     
-                    latest_version = None
-                    if package_type == "pypi":
-                        url = f"https://pypi.org/pypi/{package_name}/json"
-                        r = requests.get(url, timeout=5)
-                        if r.ok:
-                            latest_version = r.json()["info"]["version"]
-                    elif package_type == "npm":
-                        url = f"https://registry.npmjs.org/{package_name}"
-                        r = requests.get(url, timeout=5)
-                        if r.ok:
-                            latest_version = r.json()["dist-tags"]["latest"]
-                    elif package_type == "nuget":
-                        url = f"https://api.nuget.org/v3-flatcontainer/{package_name}/index.json"
-                        r = requests.get(url, timeout=5)
-                        if r.ok:
-                            versions = r.json().get("versions", [])
-                            latest_version = versions[-1] if versions else None
-                    elif package_type == "deb":
-                        try:
-                            output = subprocess.check_output(["apt-cache", "policy", package_name], text=True, timeout=5)
-                            for line in output.splitlines():
-                                if "Candidate:" in line:
-                                    latest_version = line.split(":")[1].strip()
-                                    break
-                        except Exception:
-                            continue
-                    elif package_type == "golang":
-                        if package_name == "stdlib":
-                            url = "https://golang.org/dl/?mode=json"
-                            r = requests.get(url, timeout=5)
-                            if r.ok:
-                                versions = r.json()
-                                stable_versions = [v['version'] for v in versions if not v['version'].endswith('beta') and not v['version'].endswith('rc')]
-                                if stable_versions:
-                                    latest_version = max(stable_versions).replace('go', '')
-                        else:
-                            url = f"https://proxy.golang.org/{package_name}/@latest"
-                            r = requests.get(url, timeout=5)
-                            if r.ok:
-                                data = r.json()
-                                latest_version = data.get('Version', '').replace('v', '')
+                    latest_version = _lookup_latest_version_for_purl(component_version.purl)
                     
                     if latest_version:
                         component_version.latest_version = latest_version
