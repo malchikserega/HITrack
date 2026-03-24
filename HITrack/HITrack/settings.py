@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/5.0/ref/settings/
 
 from pathlib import Path
 import os
+from kombu import Queue
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -50,6 +51,7 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    'django.middleware.gzip.GZipMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'corsheaders.middleware.CorsMiddleware',
@@ -58,7 +60,6 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
-    'core.middleware.RequestTimeoutMiddleware',
 ]
 
 ROOT_URLCONF = 'HITrack.urls'
@@ -92,6 +93,7 @@ DATABASES = {
         'PASSWORD': os.getenv('DB_PASSWORD', 'hitrack'),
         'HOST': os.getenv('DB_HOST', '127.0.0.1'),
         'PORT': os.getenv('DB_PORT', '5432'),
+        'CONN_MAX_AGE': 600,
     }
 }
 
@@ -232,6 +234,14 @@ SPECTACULAR_SETTINGS = {
 REDIS_HOST = os.getenv('REDIS_HOST', '127.0.0.1')
 REDIS_PORT = os.getenv('REDIS_PORT', '6379')
 
+# Django cache backed by Redis (db 1) – shared across Gunicorn/Celery workers
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+        'LOCATION': f'redis://{REDIS_HOST}:{REDIS_PORT}/1',
+    }
+}
+
 # Celery settings
 CELERY_BROKER_URL = 'redis://' + REDIS_HOST + ':' + REDIS_PORT
 CELERY_BROKER_TRANSPORT_OPTIONS = {
@@ -246,12 +256,43 @@ CELERY_TASK_TIME_LIMIT = 600  # 10 minutes
 CELERY_TASK_SOFT_TIME_LIMIT = 420  # 7 minutes
 CELERY_TASK_ACKS_LATE = True
 CELERY_WORKER_PREFETCH_MULTIPLIER = 1
-CELERY_TASK_DEFAULT_QUEUE = 'default'
-CELERY_TASK_QUEUES = {
-    'default': {
-        'exchange': 'default',
-        'routing_key': 'default',
-    },
+CELERY_TASK_DEFAULT_QUEUE = 'light'
+CELERY_TASK_QUEUES = (
+    Queue('light', routing_key='light'),
+    Queue('scan', routing_key='scan'),
+    Queue('enrichment', routing_key='enrichment'),
+)
+CELERY_TASK_ROUTES = {
+    'Generate SBOM and Create Components': {'queue': 'scan', 'routing_key': 'scan'},
+    'Parse SBOM and Create Components': {'queue': 'scan', 'routing_key': 'scan'},
+    'Process Grype Scan Results': {'queue': 'scan', 'routing_key': 'scan'},
+    'Scan Image with Grype': {'queue': 'scan', 'routing_key': 'scan'},
+    'Scan Repository Tags': {'queue': 'scan', 'routing_key': 'scan'},
+    'Process Single Tag': {'queue': 'scan', 'routing_key': 'scan'},
+    'Process All Tags': {'queue': 'scan', 'routing_key': 'scan'},
+    'Scan Repository': {'queue': 'scan', 'routing_key': 'scan'},
+
+    'Periodic Repository Scan': {'queue': 'light', 'routing_key': 'light'},
+    'Rescan All Images with SBOM': {'queue': 'light', 'routing_key': 'light'},
+    'Monitor Mass Rescan Progress': {'queue': 'light', 'routing_key': 'light'},
+    'Update Components Latest Versions': {'queue': 'light', 'routing_key': 'light'},
+    'Update All Components Latest Versions': {'queue': 'light', 'routing_key': 'light'},
+    'Update Deb Components Latest Versions': {'queue': 'light', 'routing_key': 'light'},
+    'Recalculate Vulnerability Fix Availability': {'queue': 'light', 'routing_key': 'light'},
+    'Deduplicate Images by Identity': {'queue': 'light', 'routing_key': 'light'},
+    'Delete Old Repository Tags': {'queue': 'light', 'routing_key': 'light'},
+    'Update Vulnerability Details': {'queue': 'enrichment', 'routing_key': 'enrichment'},
+    'Update All Vulnerability Details': {'queue': 'light', 'routing_key': 'light'},
+    'Update Critical Vulnerability Details': {'queue': 'light', 'routing_key': 'light'},
+    'Cleanup Old Vulnerability Data': {'queue': 'light', 'routing_key': 'light'},
+    'Update Vulnerability Details (Bulk)': {'queue': 'enrichment', 'routing_key': 'enrichment'},
+    'Update Critical Vulnerabilities (Bulk)': {'queue': 'enrichment', 'routing_key': 'enrichment'},
+    'Monitor Task Status': {'queue': 'light', 'routing_key': 'light'},
+    'Monitor Bulk Update Progress': {'queue': 'light', 'routing_key': 'light'},
+    'Update CISA KEV Vulnerabilities': {'queue': 'enrichment', 'routing_key': 'enrichment'},
+    'Test Task': {'queue': 'light', 'routing_key': 'light'},
+    'Test Failing Task': {'queue': 'light', 'routing_key': 'light'},
+    'Performance Monitor': {'queue': 'light', 'routing_key': 'light'},
 }
 
 #ONLY FOR DOCKER

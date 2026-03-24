@@ -10,13 +10,27 @@ export interface BaseEntity {
 
 /**
  * Repository interface
+ * When loaded from registry (e.g. get_acr_repos for JFrog), items may include
+ * optional package_type ('docker' | 'helm') from the registry API.
  */
+/** Minimal repo for fallback list (detail API returns { uuid, name }) */
+export interface RepositoryFallbackItem {
+  uuid: string
+  name: string
+}
+
 export interface Repository extends BaseEntity {
   name: string
   url: string
+  /** For JFrog: the Artifactory repo key (e.g. a8n-docker-local). Empty for ACR. */
+  repo_key?: string
   tag_count: number
   repository_type: 'docker' | 'helm' | 'none'
   scan_status: 'pending' | 'in_process' | 'success' | 'error' | 'none'
+  /** Set by get_acr_repos for JFrog; use when adding repos to set repository_type */
+  package_type?: 'docker' | 'helm'
+  /** For Helm repos: Docker repos to try when chart image refs fail (detail only) */
+  image_fallback_repositories?: RepositoryFallbackItem[]
 }
 
 /**
@@ -72,6 +86,9 @@ export interface Vulnerability extends BaseEntity {
   epss: number
   fixable?: boolean
   fix?: string
+  fix_status?: string
+  fix_state?: string
+  fix_versions?: string[]
   details?: VulnerabilityDetails
   has_details: boolean
   exploit_available: boolean
@@ -165,11 +182,20 @@ export interface Stats {
   components: number
 }
 
+/** Container registry provider (ACR or Artifactory) */
+export type RegistryProvider = 'acr' | 'jfrog'
+
+export interface ContainerRegistry {
+  uuid: string
+  name: string
+  api_url: string
+}
+
 // Celery Task Interfaces
 export interface TaskResult {
   task_id: string;
   task_name: string;
-  status: 'success' | 'error' | 'pending' | 'in_process';
+  status: 'success' | 'error' | 'pending' | 'in_process' | 'revoked';
   result_summary?: any;
   duration?: number;
   created: string;
@@ -180,7 +206,7 @@ export interface TaskResult {
 export interface TaskResultList {
   task_id: string;
   task_name: string;
-  status: 'success' | 'error' | 'pending' | 'in_process';
+  status: 'success' | 'error' | 'pending' | 'in_process' | 'revoked';
   duration?: number;
   created: string;
 }

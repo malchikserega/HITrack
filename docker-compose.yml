@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   hitrack-db:
     image: postgres:17-alpine
@@ -56,13 +54,15 @@ services:
     networks:
       - hitrack-network
 
-  worker:
+  worker-light:
+    restart: always
     image: hitrack-api
     links:
       - hitrack-db
       - hitrack-redis
-    deploy:
-      replicas: 2
+    environment:
+      - LIGHT_WORKERS=4
+      - LIGHT_MAX_TASKS_PER_CHILD=100
     volumes:
       - ./storage:/storage
       - ./static_data:/code/static
@@ -75,7 +75,78 @@ services:
       hitrack-redis:
         condition: service_healthy
     env_file: env.env
-    command: "worker"
+    command: "worker-light"
+    networks:
+      - hitrack-network
+
+  worker-scan:
+    restart: always
+    image: hitrack-api
+    links:
+      - hitrack-db
+      - hitrack-redis
+    environment:
+      - SCAN_WORKERS=2
+      - SCAN_MAX_TASKS_PER_CHILD=20
+    volumes:
+      - ./storage:/storage
+      - ./static_data:/code/static
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      hitrack-db:
+        condition: service_healthy
+      hitrack-api:
+        condition: service_started
+      hitrack-redis:
+        condition: service_healthy
+    env_file: env.env
+    command: "worker-scan"
+    networks:
+      - hitrack-network
+
+  worker-enrichment:
+    restart: always
+    image: hitrack-api
+    links:
+      - hitrack-db
+      - hitrack-redis
+    environment:
+      - ENRICHMENT_WORKERS=2
+      - ENRICHMENT_MAX_TASKS_PER_CHILD=25
+    volumes:
+      - ./storage:/storage
+      - ./static_data:/code/static
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      hitrack-db:
+        condition: service_healthy
+      hitrack-api:
+        condition: service_started
+      hitrack-redis:
+        condition: service_healthy
+    env_file: env.env
+    command: "worker-enrichment"
+    networks:
+      - hitrack-network
+
+  beat:
+    restart: always
+    image: hitrack-api
+    links:
+      - hitrack-db
+      - hitrack-redis
+    volumes:
+      - ./storage:/storage
+      - ./static_data:/code/static
+    depends_on:
+      hitrack-db:
+        condition: service_healthy
+      hitrack-api:
+        condition: service_started
+      hitrack-redis:
+        condition: service_healthy
+    env_file: env.env
+    command: "beat"
     networks:
       - hitrack-network
 
@@ -105,8 +176,6 @@ services:
       - ./httpd/proxy-html.conf:/usr/local/apache2/conf/extra/proxy-html.conf:ro
     depends_on:
       hitrack-api:
-        condition: service_started
-      worker:
         condition: service_started
     networks:
       - hitrack-network

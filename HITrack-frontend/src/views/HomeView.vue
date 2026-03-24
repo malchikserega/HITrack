@@ -364,7 +364,7 @@ const scanAllRepositories = async () => {
   scanning.value = true
   try {
     // This would be implemented based on your API
-    notificationService.success('Repository scan initiated')
+    notificationService.started('Repository scan started.')
   } catch (error) {
     notificationService.error('Failed to initiate scan')
   } finally {

@@ -1,13 +1,22 @@
 from __future__ import absolute_import, unicode_literals
 
 from hitrack_celery.celery import celery_app
+import hashlib
+import html
 import logging
+import os
 import re
+import subprocess
+import time
 from datetime import timedelta
+from urllib.parse import parse_qsl, unquote
+
+import requests
 from django.utils import timezone
 from typing import List, Dict
-from django.db import transaction
-import time
+from django.db import connection, transaction
+from django.db.models import Count, Q
+from .utils.status import resolve_repository_tag_processing_status
 
 # Performance and logging configuration
 # Set DEBUG_LOGGING=true environment variable to enable debug logging
@@ -24,13 +33,904 @@ import time
 logger = logging.getLogger(__name__)
 
 # Remove debug logging in production
-import os
 DEBUG_LOGGING = os.getenv('DEBUG_LOGGING', 'False').lower() == 'true'
 
 DOCKER_IMAGE_REGEX = re.compile(r'^[a-zA-Z0-9._/-]+(:[a-zA-Z0-9._-]+)?$')
 
 def is_safe_image_ref(image_ref: str) -> bool:
     return bool(DOCKER_IMAGE_REGEX.match(image_ref)) and len(image_ref) < 200
+
+
+_PKG_VERSION_CACHE_TTL = 3600  # 1 hour
+VULNERABILITY_DETAILS_FRESHNESS_HOURS = 24
+ENRICHMENT_BATCH_SIZE = 100
+CRITICAL_ENRICHMENT_BATCH_SIZE = 50
+_DEBIAN_DISTRO_SERIES_MAP = {
+    "10": "buster",
+    "11": "bullseye",
+    "12": "bookworm",
+    "13": "trixie",
+    "14": "forky",
+    "buster": "buster",
+    "bullseye": "bullseye",
+    "bookworm": "bookworm",
+    "trixie": "trixie",
+    "forky": "forky",
+    "sid": "sid",
+    "unstable": "sid",
+    "testing": "testing",
+    "stable": "stable",
+    "oldstable": "oldstable",
+}
+_UBUNTU_DISTRO_SERIES_MAP = {
+    "18.04": "bionic",
+    "20.04": "focal",
+    "22.04": "jammy",
+    "24.04": "noble",
+    "24.10": "oracular",
+    "25.04": "plucky",
+    "25.10": "questing",
+    "26.04": "resolute",
+    "bionic": "bionic",
+    "focal": "focal",
+    "jammy": "jammy",
+    "noble": "noble",
+    "oracular": "oracular",
+    "plucky": "plucky",
+    "questing": "questing",
+    "resolute": "resolute",
+    "devel": "devel",
+}
+
+
+def _build_latest_version_cache_key(package_type: str, package_name: str, context: str | None = None) -> str:
+    key = f"pkg_ver:{package_type}:{package_name}"
+    if context:
+        key = f"{key}:{context}"
+    return key
+
+
+def _get_cached_latest_version(package_type: str, package_name: str, context: str | None = None) -> str | None:
+    """Check Redis cache for a previously fetched latest package version."""
+    from django.core.cache import cache
+    return cache.get(_build_latest_version_cache_key(package_type, package_name, context))
+
+
+def _set_cached_latest_version(package_type: str, package_name: str, version: str, context: str | None = None):
+    from django.core.cache import cache
+    cache.set(
+        _build_latest_version_cache_key(package_type, package_name, context),
+        version,
+        _PKG_VERSION_CACHE_TTL,
+    )
+
+
+def _parse_purl_metadata(purl: str) -> dict | None:
+    if not purl or not str(purl).startswith("pkg:"):
+        return None
+
+    package_reference = str(purl)[4:]
+    package_reference, _, _ = package_reference.partition("#")
+    package_reference, _, qualifier_string = package_reference.partition("?")
+    package_path, _, version = package_reference.partition("@")
+    segments = [unquote(segment).strip() for segment in package_path.split("/") if segment.strip()]
+    if len(segments) < 2:
+        return None
+
+    package_type = segments[0].lower()
+    namespace_segments = [segment.lower() for segment in segments[1:-1]]
+    package_name = segments[-1].lower()
+    qualifiers = {
+        key.lower(): unquote(value).strip().lower()
+        for key, value in parse_qsl(qualifier_string, keep_blank_values=True)
+        if key
+    }
+
+    full_name = "/".join([*namespace_segments, package_name]) if namespace_segments else package_name
+    namespace = "/".join(namespace_segments) if namespace_segments else None
+
+    return {
+        "package_type": package_type,
+        "package_name": package_name,
+        "namespace": namespace,
+        "full_name": full_name,
+        "version": version,
+        "qualifiers": qualifiers,
+    }
+
+
+def _resolve_deb_distribution(metadata: dict) -> tuple[str | None, str | None, str | None]:
+    qualifiers = metadata.get("qualifiers") or {}
+    namespace = (metadata.get("namespace") or "").split("/", 1)[0].strip().lower()
+    distro_value = (qualifiers.get("distro") or "").strip().lower()
+    arch = (qualifiers.get("arch") or "").strip().lower() or None
+
+    family = None
+    raw_series = ""
+
+    if distro_value.startswith("debian"):
+        family = "debian"
+        raw_series = distro_value.removeprefix("debian").lstrip("-_/")
+    elif distro_value.startswith("ubuntu"):
+        family = "ubuntu"
+        raw_series = distro_value.removeprefix("ubuntu").lstrip("-_/")
+    elif distro_value:
+        raw_series = distro_value
+
+    if family is None and namespace in {"debian", "ubuntu"}:
+        family = namespace
+
+    if not raw_series:
+        raw_series = namespace if namespace not in {"debian", "ubuntu"} else ""
+
+    if family == "debian":
+        series = _DEBIAN_DISTRO_SERIES_MAP.get(raw_series)
+    elif family == "ubuntu":
+        series = _UBUNTU_DISTRO_SERIES_MAP.get(raw_series)
+    else:
+        series = None
+
+    return family, series, arch
+
+
+def _extract_deb_version_from_package_page(response_text: str, package_name: str, arch: str | None = None) -> str | None:
+    plain_text = html.unescape(response_text or "")
+
+    if arch:
+        arch_row_match = re.search(
+            rf"{re.escape(arch)}\s+([0-9A-Za-z.+:~\-]+)\s+\d",
+            plain_text,
+            re.IGNORECASE,
+        )
+        if arch_row_match:
+            return arch_row_match.group(1).strip()
+
+    title_match = re.search(
+        rf"(?:#\s*)?Package:\s*{re.escape(package_name)}\s*\(([^)]+)\)",
+        plain_text,
+        re.IGNORECASE,
+    )
+    if title_match:
+        version_text = title_match.group(1).split(" and others", 1)[0].strip()
+        if version_text:
+            return version_text
+
+    return None
+
+
+def _lookup_deb_latest_version_from_packages_site(package_name: str, family: str | None, series: str | None, arch: str | None) -> str | None:
+    if not family or not series:
+        return None
+
+    if family == "debian":
+        path_parts = [series]
+        if arch:
+            path_parts.append(arch)
+        path_parts.append(package_name)
+        url = f"https://packages.debian.org/{'/'.join(path_parts)}"
+    elif family == "ubuntu":
+        url = f"https://packages.ubuntu.com/{series}/{package_name}"
+    else:
+        return None
+
+    response = requests.get(url, timeout=10)
+    if not response.ok:
+        return None
+
+    return _extract_deb_version_from_package_page(response.text, package_name, arch=arch)
+
+
+def _lookup_latest_version_for_purl(purl: str) -> str | None:
+    metadata = _parse_purl_metadata(purl)
+    if not metadata:
+        return None
+
+    package_type = metadata["package_type"]
+    package_name = metadata["package_name"]
+    full_name = metadata["full_name"]
+    cache_context = None
+
+    if package_type == "deb":
+        family, series, arch = _resolve_deb_distribution(metadata)
+        cache_context = ":".join(part for part in [family, series, arch] if part) or None
+        latest_version = _get_cached_latest_version(package_type, package_name, cache_context)
+        if latest_version is not None:
+            return latest_version
+
+        try:
+            latest_version = _lookup_deb_latest_version_from_packages_site(package_name, family, series, arch)
+        except Exception:
+            latest_version = None
+
+        if latest_version is None:
+            try:
+                output = subprocess.check_output(
+                    ["apt-cache", "policy", package_name],
+                    text=True,
+                    timeout=5,
+                )
+                for line in output.splitlines():
+                    if "Candidate:" in line:
+                        candidate = line.split(":", 1)[1].strip()
+                        latest_version = candidate if candidate and candidate != "(none)" else None
+                        break
+            except Exception:
+                latest_version = None
+
+        if latest_version:
+            _set_cached_latest_version(package_type, package_name, latest_version, cache_context)
+        return latest_version
+
+    latest_version = _get_cached_latest_version(package_type, full_name)
+    if latest_version is not None:
+        return latest_version
+
+    if package_type == "pypi":
+        url = f"https://pypi.org/pypi/{full_name}/json"
+        response = requests.get(url, timeout=5)
+        if response.ok:
+            latest_version = response.json()["info"]["version"]
+    elif package_type == "npm":
+        url = f"https://registry.npmjs.org/{full_name}"
+        response = requests.get(url, timeout=5)
+        if response.ok:
+            latest_version = response.json()["dist-tags"]["latest"]
+    elif package_type == "nuget":
+        url = f"https://api.nuget.org/v3-flatcontainer/{full_name}/index.json"
+        response = requests.get(url, timeout=5)
+        if response.ok:
+            versions = response.json().get("versions", [])
+            latest_version = versions[-1] if versions else None
+    elif package_type == "golang":
+        if full_name == "stdlib":
+            url = "https://golang.org/dl/?mode=json"
+            response = requests.get(url, timeout=5)
+            if response.ok:
+                versions = response.json()
+                stable_versions = [
+                    version_info["version"]
+                    for version_info in versions
+                    if not version_info["version"].endswith("beta")
+                    and not version_info["version"].endswith("rc")
+                ]
+                if stable_versions:
+                    latest_version = max(stable_versions).replace("go", "")
+        else:
+            url = f"https://proxy.golang.org/{full_name}/@latest"
+            response = requests.get(url, timeout=5)
+            if response.ok:
+                latest_version = response.json().get("Version", "").replace("v", "")
+
+    if latest_version:
+        _set_cached_latest_version(package_type, full_name, latest_version)
+    return latest_version
+
+
+def _normalize_fix_versions(raw_versions) -> list[str]:
+    if not isinstance(raw_versions, list):
+        return []
+
+    normalized_versions = []
+    seen_versions = set()
+    for raw_version in raw_versions:
+        version = str(raw_version).strip()
+        if not version or version in seen_versions:
+            continue
+        seen_versions.add(version)
+        normalized_versions.append(version)
+    return normalized_versions
+
+
+def _normalize_fix_state(raw_state) -> str | None:
+    state = str(raw_state or "").strip().lower()
+    return state or None
+
+
+def _is_deb_component_version(component_version_obj) -> bool:
+    component = getattr(component_version_obj, 'component', None)
+    component_type = getattr(component, 'type', None)
+    if str(component_type or '').lower() == 'deb':
+        return True
+
+    metadata = _parse_purl_metadata(getattr(component_version_obj, 'purl', None))
+    return bool(metadata and metadata.get('package_type') == 'deb')
+
+
+def _dpkg_version_gte(left_version: str, right_version: str) -> bool | None:
+    if not left_version or not right_version:
+        return None
+
+    try:
+        result = subprocess.run(
+            ['dpkg', '--compare-versions', str(left_version), 'ge', str(right_version)],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except (FileNotFoundError, OSError):
+        return None
+
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    return None
+
+
+def _determine_fix_metadata(component_version_obj, vulnerability_data: dict) -> dict:
+    fix_data = vulnerability_data.get('fix', {})
+    if not isinstance(fix_data, dict):
+        fix_data = {}
+
+    fix_versions = _normalize_fix_versions(fix_data.get('versions', []))
+    raw_fix_state = str(fix_data.get('state', '') or '').strip() or None
+    normalized_fix_state = _normalize_fix_state(raw_fix_state)
+
+    fixable = bool(fix_versions)
+    fix_status = 'unknown'
+
+    if fix_versions:
+        fix_status = 'available'
+        if _is_deb_component_version(component_version_obj):
+            latest_repo_version = str(getattr(component_version_obj, 'latest_version', '') or '').strip()
+            if latest_repo_version:
+                comparisons = [
+                    _dpkg_version_gte(latest_repo_version, fix_version)
+                    for fix_version in fix_versions
+                ]
+                known_comparisons = [result for result in comparisons if result is not None]
+                if known_comparisons and not any(known_comparisons):
+                    fixable = False
+                    fix_status = 'not_in_repo'
+    elif normalized_fix_state == 'wont-fix':
+        fix_status = 'wont_fix'
+    elif normalized_fix_state == 'not-fixed':
+        fix_status = 'not_fixed'
+    elif normalized_fix_state == 'fixed':
+        fix_status = 'version_unknown'
+
+    fix_display = ', '.join(fix_versions) if fix_versions else (raw_fix_state or '')
+    if fix_status == 'not_in_repo' and fix_display:
+        fix_display = f"{fix_display} (not yet in repo)"
+
+    return {
+        'fixable': fixable,
+        'fix': fix_display,
+        'fix_state': raw_fix_state,
+        'fix_status': fix_status,
+        'fix_versions': fix_versions,
+    }
+
+
+def _run_bulk_component_latest_version_update(
+    queryset,
+    task_name: str,
+    skip_recent_days: int,
+    batch_size: int = 50,
+) -> dict:
+    from datetime import timedelta
+    from django.utils import timezone
+
+    logger.info(f"Starting latest versions update for {task_name}")
+    start_time = time.time()
+
+    try:
+        now = timezone.now()
+        cutoff_date = now - timedelta(days=skip_recent_days)
+
+        component_versions = queryset.filter(
+            purl__isnull=False,
+        ).exclude(
+            latest_version_updated_at__gte=cutoff_date,
+        ).select_related('component')
+
+        total_count = component_versions.count()
+        logger.info(
+            f"Found {total_count} component versions to process for {task_name} "
+            f"(skipping components updated within last {skip_recent_days} days)"
+        )
+
+        updated_count = 0
+        skipped_count = 0
+        error_count = 0
+
+        for i in range(0, total_count, batch_size):
+            batch = component_versions[i:i + batch_size]
+            batch_start_time = time.time()
+            current_batch = i // batch_size + 1
+            total_batches = (total_count + batch_size - 1) // batch_size if total_count else 0
+
+            logger.info(f"Processing batch {current_batch}/{total_batches} ({len(batch)} components)")
+
+            for component_version in batch:
+                try:
+                    if not component_version.purl:
+                        skipped_count += 1
+                        continue
+
+                    if (
+                        component_version.latest_version_updated_at and
+                        (now - component_version.latest_version_updated_at).days < skip_recent_days
+                    ):
+                        skipped_count += 1
+                        continue
+
+                    if DEBUG_LOGGING:
+                        logger.debug(
+                            f"Processing component version "
+                            f"{component_version.component.name}:{component_version.version}"
+                        )
+                        logger.debug(f"Processing PURL: {component_version.purl}")
+
+                    latest_version = _lookup_latest_version_for_purl(component_version.purl)
+
+                    if latest_version:
+                        component_version.latest_version = latest_version
+                        component_version.latest_version_updated_at = now
+                        component_version.save(update_fields=['latest_version', 'latest_version_updated_at'])
+                        updated_count += 1
+                        logger.info(
+                            f"Updated latest version for "
+                            f"{component_version.component.name}:{component_version.version} "
+                            f"to {latest_version}"
+                        )
+                    else:
+                        skipped_count += 1
+
+                except Exception as e:
+                    error_count += 1
+                    logger.error(
+                        f"Error processing component version "
+                        f"{component_version.component.name}:{component_version.version}: {str(e)}"
+                    )
+                    continue
+
+            batch_time = time.time() - batch_start_time
+            logger.info(f"Completed batch {current_batch}/{total_batches} in {batch_time:.2f}s")
+
+        total_time = time.time() - start_time
+        logger.info(f"{task_name} completed in {total_time:.2f} seconds")
+        logger.info(f"Updated: {updated_count}, Skipped: {skipped_count}, Errors: {error_count}")
+
+        return {
+            "status": "success",
+            "task_name": task_name,
+            "total_processed": total_count,
+            "updated_count": updated_count,
+            "skipped_count": skipped_count,
+            "error_count": error_count,
+            "processing_time": total_time,
+        }
+
+    except Exception as e:
+        logger.error(f"Error updating latest versions for {task_name}: {str(e)}")
+        return {
+            "status": "error",
+            "task_name": task_name,
+            "error": str(e),
+        }
+
+
+def _is_supported_vulnerability_enrichment_target(vulnerability_id: str, vulnerability_type: str | None = None) -> bool:
+    if vulnerability_type and str(vulnerability_type).upper() == 'CVE':
+        return True
+    return bool(vulnerability_id and vulnerability_id.upper().startswith('CVE-'))
+
+
+def _dedupe_preserve_order(values):
+    seen = set()
+    deduped = []
+    for value in values:
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        deduped.append(value)
+    return deduped
+
+
+def _chunked(values, chunk_size):
+    for index in range(0, len(values), chunk_size):
+        yield values[index:index + chunk_size]
+
+
+def _build_vulnerability_data_sources(cve_details, exploit_info):
+    data_sources = []
+    if cve_details:
+        if cve_details.get('epss_data_source'):
+            data_sources.append(cve_details['epss_data_source'])
+        cve_detail_fields = {
+            'cve_details_score',
+            'cve_details_severity',
+            'cve_details_published_date',
+            'cve_details_updated_date',
+            'cve_details_summary',
+            'cve_details_references',
+        }
+        if any(cve_details.get(field) is not None for field in cve_detail_fields):
+            data_sources.append('CVE-CIRCL')
+    if exploit_info:
+        if exploit_info.get('cisa_kev_known_exploited'):
+            data_sources.append('CISA-KEV')
+        if exploit_info.get('exploit_db_available'):
+            data_sources.append('Exploit-DB')
+        if any('nvd.nist.gov' in link for link in exploit_info.get('exploit_links', [])):
+            data_sources.append('NVD')
+    return _dedupe_preserve_order(data_sources)
+
+
+def _normalize_image_digest(digest):
+    if not digest:
+        return None
+
+    normalized = str(digest).strip()
+    if not normalized:
+        return None
+
+    if '@' in normalized:
+        normalized = normalized.split('@', 1)[-1].strip()
+    if not normalized:
+        return None
+
+    if ':' not in normalized:
+        normalized = f"sha256:{normalized}"
+
+    return normalized
+
+
+def _resolve_repository_tag_image_digest(tag, image_ref, registry):
+    from .utils.registry import get_image_digest
+
+    stored_digest = getattr(tag, 'digest', None)
+    resolved_digest = _normalize_image_digest(stored_digest)
+
+    if registry:
+        try:
+            registry_digest = _normalize_image_digest(get_image_digest(registry, image_ref))
+        except Exception as exc:
+            logger.warning(
+                "Failed to resolve image digest for %s from registry %s: %s",
+                image_ref,
+                getattr(registry, 'name', 'unknown'),
+                exc,
+            )
+            registry_digest = None
+        if registry_digest:
+            resolved_digest = registry_digest
+
+    if tag is not None and resolved_digest and stored_digest != resolved_digest:
+        tag.digest = resolved_digest
+        tag.save(update_fields=['digest', 'updated_at'])
+
+    return resolved_digest
+
+
+def _has_completed_image_scan(image):
+    return (
+        image.scan_status == 'success' and
+        image.sbom_data is not None and
+        image.grype_data is not None
+    )
+
+
+def _has_completed_image_payload(image):
+    return image.sbom_data is not None and image.grype_data is not None
+
+
+def _image_identity_lock_key(name, digest):
+    normalized_digest = _normalize_image_digest(digest) or '<no-digest>'
+    lock_bytes = hashlib.blake2b(
+        f"{name}|{normalized_digest}".encode('utf-8'),
+        digest_size=8,
+    ).digest()
+    return int.from_bytes(lock_bytes, byteorder='big', signed=True)
+
+
+def _acquire_image_identity_lock(name, digest):
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT pg_advisory_xact_lock(%s)",
+            [_image_identity_lock_key(name, digest)],
+        )
+
+
+def _equivalent_images_queryset(name, digest):
+    from .models import Image
+
+    queryset = Image.objects.filter(name=name)
+    normalized_digest = _normalize_image_digest(digest)
+    if normalized_digest:
+        return queryset.filter(digest=normalized_digest)
+    return queryset.filter(Q(digest__isnull=True) | Q(digest=''))
+
+
+def _pick_preferred_image(images):
+    if not images:
+        return None
+
+    status_rank = {
+        'success': 0,
+        'in_process': 1,
+        'pending': 2,
+        'error': 3,
+        'none': 4,
+    }
+
+    return min(
+        images,
+        key=lambda image: (
+            status_rank.get(image.scan_status, 99),
+            0 if image.grype_data is not None else 1,
+            0 if image.sbom_data is not None else 1,
+            0 if image.digest else 1,
+            image.created_at,
+            str(image.pk),
+        ),
+    )
+
+
+def _get_or_create_canonical_image(name, digest=None, artifact_reference=None):
+    from .models import Image
+
+    normalized_digest = _normalize_image_digest(digest)
+
+    with transaction.atomic():
+        _acquire_image_identity_lock(name, normalized_digest)
+        matching_images = list(
+            _equivalent_images_queryset(name, normalized_digest).select_for_update()
+        )
+        image = _pick_preferred_image(matching_images)
+        created = False
+
+        if image is None and normalized_digest:
+            digestless_images = list(
+                _equivalent_images_queryset(name, None).select_for_update()
+            )
+            digestless_image = _pick_preferred_image(digestless_images)
+            conflicting_digest_exists = Image.objects.filter(name=name).exclude(
+                Q(digest=normalized_digest) | Q(digest__isnull=True) | Q(digest='')
+            ).exists()
+            if digestless_image and not conflicting_digest_exists:
+                image = digestless_image
+
+        if image is None:
+            image = Image.objects.create(
+                name=name,
+                digest=normalized_digest,
+                artifact_reference=artifact_reference,
+            )
+            created = True
+        else:
+            updated_fields = []
+            if normalized_digest and image.digest != normalized_digest:
+                image.digest = normalized_digest
+                updated_fields.append('digest')
+            if artifact_reference and not image.artifact_reference:
+                image.artifact_reference = artifact_reference
+                updated_fields.append('artifact_reference')
+            if updated_fields:
+                image.save(update_fields=updated_fields + ['updated_at'])
+
+        return image, created
+
+
+def _propagate_image_completion_to_equivalent_images(image):
+    from .models import ComponentLocation
+
+    duplicate_images = list(
+        _equivalent_images_queryset(image.name, image.digest)
+        .exclude(pk=image.pk)
+        .prefetch_related('repository_tags', 'component_versions', 'component_locations')
+    )
+    if not duplicate_images:
+        return list(image.repository_tags.values_list('pk', flat=True))
+
+    source_component_versions = list(image.component_versions.values_list('pk', flat=True))
+    source_locations = list(
+        image.component_locations.select_related('component_version').all()
+    )
+    related_tag_ids = set(image.repository_tags.values_list('pk', flat=True))
+
+    for duplicate in duplicate_images:
+        related_tag_ids.update(duplicate.repository_tags.values_list('pk', flat=True))
+
+        if source_component_versions:
+            duplicate.component_versions.add(*source_component_versions)
+        for location in source_locations:
+            ComponentLocation.objects.get_or_create(
+                component_version=location.component_version,
+                image=duplicate,
+                path=location.path,
+                defaults={
+                    'layer_id': location.layer_id,
+                    'access_path': location.access_path,
+                    'evidence_type': location.evidence_type,
+                    'annotations': location.annotations,
+                },
+            )
+
+        update_fields = []
+        if duplicate.digest != image.digest:
+            duplicate.digest = image.digest
+            update_fields.append('digest')
+        if duplicate.sbom_data != image.sbom_data:
+            duplicate.sbom_data = image.sbom_data
+            update_fields.append('sbom_data')
+        if duplicate.grype_data != image.grype_data:
+            duplicate.grype_data = image.grype_data
+            update_fields.append('grype_data')
+        if duplicate.scan_status != 'success':
+            duplicate.scan_status = 'success'
+            update_fields.append('scan_status')
+        if update_fields:
+            duplicate.save(update_fields=update_fields + ['updated_at'])
+
+    return list(related_tag_ids)
+
+
+def _merge_component_location_into_image(source_location, target_image):
+    from .models import ComponentLocation
+
+    target_location, created = ComponentLocation.objects.get_or_create(
+        component_version=source_location.component_version,
+        image=target_image,
+        path=source_location.path,
+        defaults={
+            'layer_id': source_location.layer_id,
+            'access_path': source_location.access_path,
+            'evidence_type': source_location.evidence_type,
+            'annotations': source_location.annotations,
+        },
+    )
+    if created:
+        return True
+
+    updated_fields = []
+    for field_name in ('layer_id', 'access_path', 'evidence_type', 'annotations'):
+        current_value = getattr(target_location, field_name)
+        incoming_value = getattr(source_location, field_name)
+        if not current_value and incoming_value:
+            setattr(target_location, field_name, incoming_value)
+            updated_fields.append(field_name)
+    if updated_fields:
+        target_location.save(update_fields=updated_fields)
+
+    return False
+
+
+def _merge_duplicate_image_group(images, normalized_digest):
+    if len(images) <= 1:
+        return None
+
+    status_rank = {
+        'success': 0,
+        'in_process': 1,
+        'pending': 2,
+        'error': 3,
+        'none': 4,
+    }
+
+    primary = _pick_preferred_image(images)
+    duplicate_images = [image for image in images if image.pk != primary.pk]
+    if not duplicate_images:
+        return None
+
+    related_tag_ids = set(primary.repository_tags.values_list('pk', flat=True))
+    primary_tag_ids = set(related_tag_ids)
+    primary_component_version_ids = set(primary.component_versions.values_list('pk', flat=True))
+
+    merged_tag_links = 0
+    merged_component_links = 0
+    merged_locations = 0
+    normalized_images = 0
+    deleted_images = 0
+
+    update_fields = []
+    if primary.digest != normalized_digest:
+        primary.digest = normalized_digest
+        update_fields.append('digest')
+        normalized_images += 1
+
+    for duplicate in duplicate_images:
+        duplicate_tag_ids = set(duplicate.repository_tags.values_list('pk', flat=True))
+        new_tag_ids = list(duplicate_tag_ids - primary_tag_ids)
+        if new_tag_ids:
+            primary.repository_tags.add(*new_tag_ids)
+            merged_tag_links += len(new_tag_ids)
+            primary_tag_ids.update(new_tag_ids)
+        related_tag_ids.update(duplicate_tag_ids)
+
+        duplicate_component_version_ids = set(
+            duplicate.component_versions.values_list('pk', flat=True)
+        )
+        new_component_version_ids = list(
+            duplicate_component_version_ids - primary_component_version_ids
+        )
+        if new_component_version_ids:
+            primary.component_versions.add(*new_component_version_ids)
+            merged_component_links += len(new_component_version_ids)
+            primary_component_version_ids.update(new_component_version_ids)
+
+        for location in duplicate.component_locations.select_related('component_version').all():
+            if _merge_component_location_into_image(location, primary):
+                merged_locations += 1
+
+        if not primary.artifact_reference and duplicate.artifact_reference:
+            primary.artifact_reference = duplicate.artifact_reference
+            update_fields.append('artifact_reference')
+        if primary.sbom_data is None and duplicate.sbom_data is not None:
+            primary.sbom_data = duplicate.sbom_data
+            update_fields.append('sbom_data')
+        if primary.grype_data is None and duplicate.grype_data is not None:
+            primary.grype_data = duplicate.grype_data
+            update_fields.append('grype_data')
+        if duplicate.digest != normalized_digest:
+            duplicate.digest = normalized_digest
+            duplicate.save(update_fields=['digest', 'updated_at'])
+            normalized_images += 1
+        if status_rank.get(duplicate.scan_status, 99) < status_rank.get(primary.scan_status, 99):
+            primary.scan_status = duplicate.scan_status
+            update_fields.append('scan_status')
+
+    if update_fields:
+        primary.save(update_fields=sorted(set(update_fields)) + ['updated_at'])
+
+    for duplicate in duplicate_images:
+        duplicate.delete()
+        deleted_images += 1
+
+    if related_tag_ids:
+        _sync_repository_tag_processing_statuses(list(related_tag_ids))
+
+    return {
+        'primary_image_uuid': str(primary.uuid),
+        'duplicate_groups_merged': 1,
+        'duplicate_images_deleted': deleted_images,
+        'repository_tag_links_merged': merged_tag_links,
+        'component_version_links_merged': merged_component_links,
+        'component_locations_merged': merged_locations,
+        'images_normalized': normalized_images,
+    }
+
+
+def _sync_repository_tag_processing_statuses(tag_ids):
+    from .models import RepositoryTag
+
+    if not tag_ids:
+        return {}
+
+    status_rows = RepositoryTag.objects.filter(
+        pk__in=tag_ids
+    ).annotate(
+        total_images_count=Count('images', distinct=True),
+        pending_images_count=Count('images', filter=Q(images__scan_status='pending'), distinct=True),
+        in_process_images_count=Count('images', filter=Q(images__scan_status='in_process'), distinct=True),
+        error_images_count=Count('images', filter=Q(images__scan_status='error'), distinct=True),
+        success_images_count=Count('images', filter=Q(images__scan_status='success'), distinct=True),
+    ).only('uuid', 'processing_status')
+
+    now = timezone.now()
+    updated_tags = []
+    resolved_statuses = {}
+
+    for tag in status_rows:
+        new_status = resolve_repository_tag_processing_status(
+            tag.processing_status,
+            tag.total_images_count or 0,
+            tag.pending_images_count or 0,
+            tag.in_process_images_count or 0,
+            tag.error_images_count or 0,
+            tag.success_images_count or 0,
+        )
+        resolved_statuses[str(tag.pk)] = new_status
+        if tag.processing_status != new_status:
+            tag.processing_status = new_status
+            tag.updated_at = now
+            updated_tags.append(tag)
+
+    if updated_tags:
+        RepositoryTag.objects.bulk_update(updated_tags, ['processing_status', 'updated_at'])
+
+    return resolved_statuses
 
 @celery_app.task(bind=True, max_retries=1, name="Generate SBOM and Create Components")
 def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="docker"):
@@ -43,7 +943,7 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
     import json
     import tempfile
     import os
-    from .utils.acr import get_bearer_token, get_acr_image_digest
+    from .utils.registry import get_bearer_token, get_image_digest
 
     logger.info(f"Starting SBOM generation for image {image_uuid}")
     
@@ -81,31 +981,41 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
             raise ValueError("Unsafe image reference")
 
         # Get registry token if available
+        registry = None
         token = None
         if image.repository_tags.exists():
             registry = image.repository_tags.first().repository.container_registry
             if registry:
-                token = get_bearer_token(registry.api_url, registry.login, registry.password)
+                token = get_bearer_token(registry)
 
         # Try to pull image
         try:
             logger.info(f"Pulling image {image_ref}")
             subprocess.run(["docker", "pull", image_ref], capture_output=True, check=True)
         except subprocess.CalledProcessError as e:
-            if token:
+            if token and registry:
                 # Try with registry authentication
                 registry_host = image_ref.split('/')[0]
                 logger.info(f"First pull failed, trying with registry authentication for {registry_host}")
-                
-                # Docker login
-                login_process = subprocess.Popen(
-                    ["docker", "login", registry_host, "-u", "00000000-0000-0000-0000-000000000000", "--password-stdin"],
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True
-                )
-                _, stderr = login_process.communicate(input=token)
+                # Artifactory uses username/password; ACR uses token with special username
+                if getattr(registry, 'provider', None) == 'jfrog':
+                    login_process = subprocess.Popen(
+                        ["docker", "login", registry_host, "-u", registry.login, "--password-stdin"],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True
+                    )
+                    _, stderr = login_process.communicate(input=registry.password)
+                else:
+                    login_process = subprocess.Popen(
+                        ["docker", "login", registry_host, "-u", "00000000-0000-0000-0000-000000000000", "--password-stdin"],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True
+                    )
+                    _, stderr = login_process.communicate(input=token)
                 
                 # Check if login failed
                 if login_process.returncode != 0:
@@ -176,7 +1086,9 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
             # Read and save SBOM data
             with open(temp_file_path, 'r') as f:
                 image.sbom_data = json.load(f)
-            image.scan_status = 'success'
+            # Reset stale Grype data so the follow-up vulnerability scan is always rerun.
+            image.grype_data = None
+            image.scan_status = 'in_process'
             image.save()
             
             logger.info(f"Successfully generated SBOM for image {image_uuid}")
@@ -231,6 +1143,9 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
             image = Image.objects.get(uuid=image_uuid)
             image.scan_status = 'error'
             image.save()
+            _sync_repository_tag_processing_statuses(
+                list(image.repository_tags.values_list('pk', flat=True))
+            )
         except Exception as save_error:
             logger.error(f"Failed to update image status: {str(save_error)}")
         
@@ -254,100 +1169,94 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
 @celery_app.task(name="Periodic Repository Scan")
 def periodic_repository_scan():
     """
-    Periodic task that scans all active repositories for new tags.
-    This task should be scheduled to run daily.
+    Queue latest-only scans for all active repositories.
+    Intended to be scheduled via django-celery-beat / Django admin.
     """
-    from .models import Repository, RepositoryTag, ContainerRegistry
-    from .utils.acr import get_tags, get_bearer_token, get_manifest, is_helm_chart
-    from datetime import datetime
-
-    logger.info("Starting periodic repository scan")
+    from .models import Repository
+    logger.info("Starting periodic repository scan for active repositories (latest_only=True)")
     results = []
     active_repositories = Repository.objects.filter(status=True).select_related('container_registry')
     logger.info(f"Found {active_repositories.count()} active repositories")
 
     for repository in active_repositories:
         try:
-            logger.info(f"Processing repository: {repository.name}")
+            logger.info(f"Queueing latest-tag scan for repository: {repository.name}")
 
-            # Get registry and token
-            registry = repository.container_registry
-            if not registry:
-                logger.warning(f"No registry found for repository {repository.name}, skipping")
+            if not repository.container_registry:
+                logger.warning(f"No registry configured for repository {repository.name}, skipping")
+                results.append({
+                    "repository": repository.name,
+                    "repository_uuid": str(repository.uuid),
+                    "status": "skipped",
+                    "reason": "no_container_registry",
+                })
                 continue
 
-            token = get_bearer_token(registry.api_url, registry.login, registry.password)
+            if repository.scan_status == 'in_process':
+                logger.info(f"Repository {repository.name} is already being scanned, skipping")
+                results.append({
+                    "repository": repository.name,
+                    "repository_uuid": str(repository.uuid),
+                    "status": "skipped",
+                    "reason": "scan_already_in_process",
+                })
+                continue
 
-            # Get all tags from registry 
-            all_tags = list(get_tags(registry.api_url, token, repository.name, limit=10))
-            logger.info(f"Found {len(all_tags)} tags for repository {repository.name}")
-
-            # Determine repository type if unknown
-            if repository.repository_type in ('none', 'Unknown') and all_tags:
-                first_tag = all_tags[0]
-                manifest, _ = get_manifest(registry.api_url, token, repository.name, first_tag)
-                if manifest:
-                    if is_helm_chart(manifest):
-                        repository.repository_type = 'helm'
-                    else:
-                        repository.repository_type = 'docker'
-                    repository.save()
-
-            tags_to_scan = all_tags[-10:] if all_tags else []
-            logger.info(f"Found {len(tags_to_scan)} tags to scan for repository {repository.name}")
-
-            # Get existing tags from database
-            existing_tags = set(repository.tags.values_list('tag', flat=True))
-            logger.info(f"Found {len(existing_tags)} existing tags in database for repository {repository.name}")
-
-            # Find new tags
-            new_tags = [tag for tag in tags_to_scan if tag not in existing_tags]
-            logger.info(f"Found {len(new_tags)} new tags for repository {repository.name}")
-
-            # Create new tags
-            for tag in new_tags:
-                RepositoryTag.objects.create(
-                    repository=repository,
-                    tag=tag
-                )
-
-            # Update repository last scanned timestamp
-            repository.last_scanned = datetime.now()
+            repository.scan_status = 'pending'
             repository.save()
+
+            async_result = scan_repository_tags.apply_async(
+                args=[str(repository.uuid)],
+                kwargs={
+                    'latest_only': True,
+                    'process_existing': True,
+                },
+            )
 
             results.append({
                 "repository": repository.name,
-                "status": "success",
-                "new_tags": len(new_tags)
+                "repository_uuid": str(repository.uuid),
+                "status": "queued",
+                "task_id": async_result.id,
+                "latest_only": True,
+                "process_existing": True,
             })
 
         except Exception as e:
-            logger.error(f"Error processing repository {repository.name}: {str(e)}")
+            logger.error(f"Error queueing repository {repository.name}: {str(e)}")
+            try:
+                repository.scan_status = 'error'
+                repository.save()
+            except Exception:
+                pass
             results.append({
                 "repository": repository.name,
+                "repository_uuid": str(repository.uuid),
                 "status": "error",
-                "error": str(e)
+                "error": str(e),
             })
 
-    # Calculate summary statistics
     total_repositories = len(results)
-    successful_repositories = len([r for r in results if r['status'] == 'success'])
+    queued_repositories = len([r for r in results if r['status'] == 'queued'])
+    skipped_repositories = len([r for r in results if r['status'] == 'skipped'])
     failed_repositories = len([r for r in results if r['status'] == 'error'])
-    total_new_tags = sum([r.get('new_tags', 0) for r in results if r['status'] == 'success'])
-    
+
     return {
-        "status": "completed",
+        "status": "queued",
         "task_name": "Periodic Repository Scan",
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": timezone.now().isoformat(),
         "summary": {
-            "total_repositories_processed": total_repositories,
-            "successful_repositories": successful_repositories,
+            "total_repositories_seen": active_repositories.count(),
+            "repositories_handled": total_repositories,
+            "queued_repositories": queued_repositories,
+            "skipped_repositories": skipped_repositories,
             "failed_repositories": failed_repositories,
-            "total_new_tags_discovered": total_new_tags,
-            "success_rate": f"{(successful_repositories / total_repositories * 100):.1f}%" if total_repositories > 0 else "0%"
         },
         "results": results,
-        "message": f"Periodic scan completed: {successful_repositories}/{total_repositories} repositories processed successfully, {total_new_tags} new tags discovered"
+        "message": (
+            f"Periodic latest-tag scan queued for {queued_repositories} repositories; "
+            f"{skipped_repositories} skipped, {failed_repositories} failed to queue"
+        ),
     }
 
 @celery_app.task(name="Scan Repository")
@@ -356,7 +1265,7 @@ def scan_repository(repository_name: str, repository_url: str, scan_option: str)
     Scan a repository for tags and determine its type (Helm or Docker).
     """
     from .models import Repository, RepositoryTag, ContainerRegistry
-    from .utils.acr import get_tags, get_manifest, is_helm_chart, get_bearer_token
+    from .utils.registry import get_tags, get_manifest, is_helm_chart, get_bearer_token
     from datetime import datetime
 
     logger.info(f"Starting repository scan for {repository_name}")
@@ -367,11 +1276,13 @@ def scan_repository(repository_name: str, repository_url: str, scan_option: str)
         try:
             registry = ContainerRegistry.objects.get(api_url__contains=registry_name)
         except ContainerRegistry.DoesNotExist:
-            logger.warning(f"No ContainerRegistry found for {registry_name}, using default ACR")
-            registry = ContainerRegistry.objects.get(provider='acr')
-
-        # Get token for registry
-        token = get_bearer_token(registry.api_url, registry.login, registry.password)
+            # Fallback: try ACR then Artifactory so both registries are supported
+            try:
+                registry = ContainerRegistry.objects.get(provider='acr')
+                logger.warning(f"No ContainerRegistry found for {registry_name}, using default ACR")
+            except ContainerRegistry.DoesNotExist:
+                registry = ContainerRegistry.objects.get(provider='jfrog')
+                logger.warning(f"No ContainerRegistry found for {registry_name}, using default Artifactory")
 
         # Get or create repository
         repository, created = Repository.objects.get_or_create(
@@ -390,8 +1301,8 @@ def scan_repository(repository_name: str, repository_url: str, scan_option: str)
             repository.status = True
             repository.save()
 
-        # Get all tags
-        all_tags = list(get_tags(registry.api_url, token, repository_name, limit=30))
+        # Get all tags (ACR or Artifactory)
+        all_tags = list(get_tags(registry, repository_name, limit=30))
         if scan_option == 'last':
             tags_to_scan = all_tags[-1:] if all_tags else []
         elif scan_option == 'last10':
@@ -404,18 +1315,25 @@ def scan_repository(repository_name: str, repository_url: str, scan_option: str)
         # Check repository type using the first tag
         if tags_to_scan:
             first_tag = tags_to_scan[0]
-            manifest, _ = get_manifest(registry.api_url, token, repository_name, first_tag)
+            manifest, _ = get_manifest(registry, repository_name, first_tag)
             if manifest and is_helm_chart(manifest):
                 repository.repository_type = 'helm'
                 repository.save()
                 logger.info(f"Repository {repository_name} identified as Helm chart")
 
-        # Create tags
-        for tag_name in tags_to_scan:
-            RepositoryTag.objects.get_or_create(
-                tag=tag_name,
-                repository=repository
+        # Create tags in bulk (skip existing)
+        if tags_to_scan:
+            existing_tags = set(
+                RepositoryTag.objects.filter(
+                    repository=repository, tag__in=tags_to_scan
+                ).values_list('tag', flat=True)
             )
+            new_tag_objs = [
+                RepositoryTag(tag=t, repository=repository)
+                for t in tags_to_scan if t not in existing_tags
+            ]
+            if new_tag_objs:
+                RepositoryTag.objects.bulk_create(new_tag_objs, ignore_conflicts=True)
 
         repository.last_scanned = datetime.now()
         repository.save()
@@ -455,12 +1373,28 @@ def process_all_tags():
     This task can be manually triggered.
     """
     from .models import Repository, RepositoryTag, Image
-    from .utils.acr import get_manifest, is_helm_chart, get_chart_digest, get_helm_images, get_bearer_token, get_acr_image_digest
+    from .utils.registry import (
+        get_manifest,
+        is_helm_chart,
+        get_chart_digest,
+        get_helm_images,
+        get_helm_chart_url,
+        get_helm_images_from_native_chart,
+        get_bearer_token,
+        get_image_digest,
+        build_fallback_image_ref,
+        image_ref_repo_key,
+    )
 
     logger.info("Starting processing of all tags from active repositories")
 
     results = []
-    active_repositories = Repository.objects.filter(status=True).select_related('container_registry')
+    active_repositories = Repository.objects.filter(status=True).select_related(
+        'container_registry'
+    ).prefetch_related(
+        'image_fallback_repositories',
+        'image_fallback_repositories__container_registry',
+    )
     logger.info(f"Found {active_repositories.count()} active repositories")
 
     for repository in active_repositories:
@@ -469,103 +1403,118 @@ def process_all_tags():
             repository_tags = RepositoryTag.objects.filter(repository=repository).select_related('repository')
             logger.info(f"Found {repository_tags.count()} tags for repository {repository.name}")
 
-            # Get registry token if available
-            token = None
-            if repository.container_registry:
-                token = get_bearer_token(
-                    repository.container_registry.api_url,
-                    repository.container_registry.login,
-                    repository.container_registry.password
-                )
+            # Get registry (for token and provider-specific digest)
+            registry = repository.container_registry
 
             processed_tags = []
             for repo_tag in repository_tags:
                 # For Docker images, just create the record
                 if repository.repository_type == 'docker':
-                    image_ref = f"{repository.url}:{repo_tag.tag}"
-                    image, created = Image.objects.get_or_create(
+                    image_ref = _repository_tag_image_ref(repository, repo_tag, registry)
+                    image_digest = _resolve_repository_tag_image_digest(
+                        repo_tag,
+                        image_ref,
+                        registry,
+                    )
+                    image, created = _get_or_create_canonical_image(
                         name=image_ref,
-                        defaults={
-                            'artifact_reference': image_ref
-                        }
+                        digest=image_digest,
+                        artifact_reference=image_ref,
                     )
                     image.repository_tags.add(repo_tag)
                     logger.info(f"{'Created' if created else 'Linked'} Docker image {image_ref}")
                 else:
-                    # For Helm charts, get manifest to extract images and digest
-                    manifest, digest = get_manifest(
-                        repository.container_registry.api_url if repository.container_registry else None,
-                        token,
-                        repository.name,
-                        repo_tag.tag
-                    )
+                    # For Helm: native Helm (Artifactory) or OCI manifest
+                    image_refs = []
+                    if repository.repository_type == 'helm' and registry.provider == 'jfrog':
+                        if repository.repo_key:
+                            rk = repository.repo_key
+                            chart_name = repository.name[len(rk) + 1:] if repository.name.startswith(rk + '/') else repository.name
+                        else:
+                            chart_name = (getattr(repo_tag, 'image_path', None) or '').strip()
+                        helm_repo_key = repository.repo_key or repository.name
+                        chart_url = get_helm_chart_url(registry, helm_repo_key, chart_name, repo_tag.tag)
+                        if chart_url:
+                            image_refs = get_helm_images_from_native_chart(registry, chart_url)
+                    else:
+                        if repository.repo_key:
+                            rk = repository.repo_key
+                            img_name = repository.name[len(rk) + 1:] if repository.name.startswith(rk + '/') else repository.name
+                        else:
+                            img_name = getattr(repo_tag, 'image_path', None) or None
+                        repo_for_manifest = repository.repo_key or repository.name
+                        manifest, digest = get_manifest(registry, repo_for_manifest, repo_tag.tag, image_name=img_name)
+                        if not manifest:
+                            logger.warning(f"Could not get manifest for {repository.name}:{repo_tag.tag}")
+                            continue
+                        if is_helm_chart(manifest):
+                            chart_digest = get_chart_digest(manifest)
+                            if chart_digest:
+                                image_refs = list(get_helm_images(registry, repository.name, chart_digest))
 
-                    if not manifest:
-                        logger.warning(f"Could not get manifest for {repository.name}:{repo_tag.tag}")
-                        continue
-
-                    if is_helm_chart(manifest):
-                        chart_digest = get_chart_digest(manifest)
-                        if chart_digest:
-                            for image_ref in get_helm_images(
-                                repository.container_registry.api_url if repository.container_registry else None,
-                                token,
-                                repository.name,
-                                chart_digest
-                            ):
-                                # Get image digest from ACR
-                                image_digest = None
-                                if repository.container_registry and repository.container_registry.provider == 'acr':
-                                    image_digest = get_acr_image_digest(
-                                        repository.container_registry.api_url,
-                                        token,
-                                        image_ref
-                                    )
-                                
-                                # Create or get image with proper digest
-                                # image_ref from get_helm_images already contains name:tag, which should be unique
-                                # Use name+digest combination for unique identification when digest is available
-                                # If digest is not available, use name only (since image_ref already contains tag)
-                                artifact_ref = f"{repository.url}:{repo_tag.tag}"
-                                if image_digest:
-                                    # Try to find image by name and digest (same name but different digest = different image)
-                                    image = Image.objects.filter(name=image_ref, digest=image_digest).first()
-                                    if image:
-                                        created = False
-                                    else:
-                                        # Check if image with same name but different digest exists
-                                        existing_image = Image.objects.filter(name=image_ref).exclude(digest=image_digest).first()
-                                        if existing_image:
-                                            # Same name but different digest - create new image
-                                            image = Image.objects.create(
-                                                name=image_ref,
-                                                digest=image_digest,
-                                                artifact_reference=artifact_ref
-                                            )
-                                            created = True
-                                        else:
-                                            # No existing image with this name, create new one
-                                            image = Image.objects.create(
-                                                name=image_ref,
-                                                digest=image_digest,
-                                                artifact_reference=artifact_ref
-                                            )
-                                            created = True
-                                else:
-                                    # If no digest, use name only (image_ref already contains name:tag which is unique)
-                                    # But check if image already exists with this name
-                                    image = Image.objects.filter(name=image_ref).first()
-                                    if image:
-                                        created = False
-                                    else:
-                                        image = Image.objects.create(
-                                            name=image_ref,
-                                            digest=None,
-                                            artifact_reference=artifact_ref
+                    for image_ref in image_refs:
+                        # Get image digest; for Helm skip primary when ref doesn't contain registry base or points at Helm repo
+                        image_digest = None
+                        if registry and repository.repository_type == 'helm':
+                            ref_repo_key = image_ref_repo_key(registry.api_url or '', image_ref)
+                            helm_key = repository.repo_key or repository.name
+                            if ref_repo_key == helm_key:
+                                pass
+                            elif ref_repo_key is not None:
+                                image_digest = get_image_digest(registry, image_ref)
+                        elif registry:
+                            image_digest = get_image_digest(registry, image_ref)
+                        if image_digest is None and repository.repository_type == 'helm':
+                            for fb_repo in repository.image_fallback_repositories.filter(
+                                repository_type='docker',
+                                container_registry__isnull=False
+                            ).select_related('container_registry'):
+                                if not fb_repo.container_registry:
+                                    continue
+                                candidate_ref = build_fallback_image_ref(fb_repo, image_ref)
+                                if candidate_ref:
+                                    image_digest = get_image_digest(fb_repo.container_registry, candidate_ref)
+                                    if image_digest:
+                                        logger.info(
+                                            "Resolved Helm image %s via fallback repo %s as %s",
+                                            image_ref, fb_repo.name, candidate_ref
                                         )
-                                        created = True
-                                image.repository_tags.add(repo_tag)
-                                logger.info(f"{'Created' if created else 'Linked'} Helm image {image_ref} with digest {image_digest}")
+                                        break
+                        # Create or get image with proper digest
+                        artifact_ref = f"{repository.url}:{repo_tag.tag}"
+                        if image_digest:
+                            image = Image.objects.filter(name=image_ref, digest=image_digest).first()
+                            if image:
+                                created = False
+                            else:
+                                existing_image = Image.objects.filter(name=image_ref).exclude(digest=image_digest).first()
+                                if existing_image:
+                                    image = Image.objects.create(
+                                        name=image_ref,
+                                        digest=image_digest,
+                                        artifact_reference=artifact_ref
+                                    )
+                                    created = True
+                                else:
+                                    image = Image.objects.create(
+                                        name=image_ref,
+                                        digest=image_digest,
+                                        artifact_reference=artifact_ref
+                                    )
+                                    created = True
+                        else:
+                            image = Image.objects.filter(name=image_ref).first()
+                            if image:
+                                created = False
+                            else:
+                                image = Image.objects.create(
+                                    name=image_ref,
+                                    digest=None,
+                                    artifact_reference=artifact_ref
+                                )
+                                created = True
+                        image.repository_tags.add(repo_tag)
+                        logger.info(f"{'Created' if created else 'Linked'} Helm image {image_ref} with digest {image_digest}")
 
                 processed_tags.append(repo_tag.tag)
 
@@ -639,7 +1588,7 @@ def parse_sbom_and_create_components(image_uuid: str):
                 "timestamp": timezone.now().isoformat()
             }
 
-        if image.scan_status != 'success':
+        if image.scan_status not in ['success', 'in_process']:
             logger.warning(f"Image {image_uuid} scan status is not success: {image.scan_status}")
             return {
                 "status": "error",
@@ -678,7 +1627,7 @@ def parse_sbom_and_create_components(image_uuid: str):
             for artifact in batch:
                 name = artifact.get('name')
                 version = artifact.get('version')
-                type = artifact.get('type', 'unknown')
+                component_type = artifact.get('type', 'unknown')
                 purl = artifact.get('purl')
                 cpes = artifact.get('cpes', [])
 
@@ -689,7 +1638,7 @@ def parse_sbom_and_create_components(image_uuid: str):
                 if name not in component_data:
                     component_data[name] = {
                         'name': name,
-                        'type': type,
+                        'type': component_type,
                         'versions': {},
                         'purl': purl
                     }
@@ -711,15 +1660,6 @@ def parse_sbom_and_create_components(image_uuid: str):
                 )
             }
             logger.info(f"Found {len(existing_components)} existing components in batch {current_batch}")
-
-            # Get existing component versions
-            existing_versions = {
-                f"{cv.component.name}:{cv.version}": cv 
-                for cv in ComponentVersion.objects.filter(
-                    component__name__in=component_data.keys()
-                ).select_related('component')
-            }
-            logger.info(f"Found {len(existing_versions)} existing component versions in batch {current_batch}")
 
             # Initialize lists for bulk operations
             components_to_create = []
@@ -761,6 +1701,20 @@ def parse_sbom_and_create_components(image_uuid: str):
                     components_updated += len(components_to_update)
                     logger.info(f"Updated {len(components_to_update)} existing components in batch {current_batch}")
 
+                batch_versions = {
+                    version
+                    for data in component_data.values()
+                    for version in data['versions'].keys()
+                }
+                existing_versions = {
+                    f"{cv.component.name}:{cv.version}": cv
+                    for cv in ComponentVersion.objects.filter(
+                        component_id__in=[component.pk for component in existing_components.values()],
+                        version__in=batch_versions,
+                    ).select_related('component')
+                }
+                logger.info(f"Found {len(existing_versions)} existing component versions in batch {current_batch}")
+
                 # Prepare component versions
                 for name, data in component_data.items():
                     component = existing_components[name]
@@ -786,25 +1740,50 @@ def parse_sbom_and_create_components(image_uuid: str):
 
                 # Bulk create component versions
                 if component_versions_to_create:
-                    created_versions = ComponentVersion.objects.bulk_create(component_versions_to_create)
-                    versions_created += len(created_versions)
-                    logger.info(f"Created {len(created_versions)} new component versions in batch {current_batch}")
-                    # Add new versions to existing_versions dict
-                    existing_versions.update({
-                        f"{cv.component.name}:{cv.version}": cv 
-                        for cv in created_versions
-                    })
+                    version_keys_before = set(existing_versions.keys())
+                    ComponentVersion.objects.bulk_create(
+                        component_versions_to_create,
+                        ignore_conflicts=True,
+                    )
+                    logger.info(
+                        f"Attempted to create {len(component_versions_to_create)} component versions in batch {current_batch}"
+                    )
+
+                if component_versions_to_update:
+                    versions_to_update_by_pk = {cv.pk: cv for cv in component_versions_to_update}
+                    ComponentVersion.objects.bulk_update(
+                        list(versions_to_update_by_pk.values()),
+                        ['purl', 'cpes'],
+                    )
+                    logger.info(
+                        f"Updated {len(versions_to_update_by_pk)} existing component versions in batch {current_batch}"
+                    )
+
+                refreshed_versions = {
+                    f"{cv.component.name}:{cv.version}": cv
+                    for cv in ComponentVersion.objects.filter(
+                        component_id__in=[component.pk for component in existing_components.values()],
+                        version__in=batch_versions,
+                    ).select_related('component')
+                }
+                if component_versions_to_create:
+                    versions_created += len(set(refreshed_versions.keys()) - version_keys_before)
+                    logger.info(
+                        f"Resolved {len(refreshed_versions)} component versions after create in batch {current_batch}"
+                    )
+                existing_versions = refreshed_versions
 
                 # Link image to component versions
-                image_versions = image.component_versions.all()
+                image_version_pks = set(image.component_versions.values_list('pk', flat=True))
                 links_created = 0
                 for name, data in component_data.items():
                     component = existing_components[name]
                     for version, version_data in data['versions'].items():
                         version_key = f"{name}:{version}"
                         version_obj = existing_versions[version_key]
-                        if version_obj not in image_versions:
+                        if version_obj.pk not in image_version_pks:
                             version_obj.images.add(image)
+                            image_version_pks.add(version_obj.pk)
                             links_created += 1
 
             batch_time = time.time() - batch_start_time
@@ -857,6 +1836,15 @@ def parse_sbom_and_create_components(image_uuid: str):
         }
     except Exception as e:
         logger.error(f"Error parsing SBOM for image {image_uuid}: {str(e)}")
+        try:
+            image = Image.objects.get(uuid=image_uuid)
+            image.scan_status = 'error'
+            image.save(update_fields=['scan_status', 'updated_at'])
+            _sync_repository_tag_processing_statuses(
+                list(image.repository_tags.values_list('pk', flat=True))
+            )
+        except Exception as save_error:
+            logger.error(f"Failed to update image status after SBOM parsing error: {str(save_error)}")
         return {
             "status": "error",
             "task_name": "Parse SBOM and Create Components",
@@ -875,23 +1863,22 @@ def update_components_latest_versions(image_uuid: str):
     This task can be triggered manually through the API.
     """
     from .models import Image, ComponentVersion
-    import time
-    import requests
-    import subprocess
-    from packaging.version import parse as parse_version
 
     logger.info(f"Starting latest versions update for image {image_uuid}")
     start_time = time.time()
 
     try:
-        image = Image.objects.prefetch_related('component_versions').get(uuid=image_uuid)
-        component_versions = image.component_versions.all()
-        logger.info(f"Found {component_versions.count()} component versions to process")
+        image = Image.objects.prefetch_related(
+            'component_versions__component'
+        ).get(uuid=image_uuid)
+        component_versions = list(image.component_versions.all())
+        total_component_versions = len(component_versions)
+        logger.info(f"Found {len(component_versions)} component versions to process")
         updated_count = 0
+        versions_to_update = []
         for component_version in component_versions:
             try:
                 now = timezone.now()
-                # Skip update if already updated within the last 4 days
                 if (
                     component_version.latest_version_updated_at and
                     (now - component_version.latest_version_updated_at).days <= 4
@@ -904,65 +1891,13 @@ def update_components_latest_versions(image_uuid: str):
                     logger.info(f"No PURL found for component version {component_version.component.name}:{component_version.version}")
                     continue
                 logger.info(f"Processing component version {component_version.component.name}:{component_version.version}")
-                parts = component_version.purl.split("/")
-                if len(parts) < 2:
-                    continue
-                package_type = parts[0].split(":")[1] if ":" in parts[0] else None
-                if not package_type:
-                    continue
-                package_name = parts[1].lower()
-                if len(parts) > 2:
-                    package_name = f"{package_name}/{parts[2].lower()}"
-                if "@" in package_name:
-                    package_name = package_name.split("@")[0]
                 if DEBUG_LOGGING:
                     logger.debug(f"Processing PURL: {component_version.purl}")
-                    logger.debug(f"Package type: {package_type}, Package name: {package_name}")
-                latest_version = None
-                if package_type == "pypi":
-                    url = f"https://pypi.org/pypi/{package_name}/json"
-                    r = requests.get(url, timeout=5)
-                    if r.ok:
-                        latest_version = r.json()["info"]["version"]
-                elif package_type == "npm":
-                    url = f"https://registry.npmjs.org/{package_name}"
-                    r = requests.get(url, timeout=5)
-                    if r.ok:
-                        latest_version = r.json()["dist-tags"]["latest"]
-                elif package_type == "nuget":
-                    url = f"https://api.nuget.org/v3-flatcontainer/{package_name}/index.json"
-                    r = requests.get(url, timeout=5)
-                    if r.ok:
-                        versions = r.json().get("versions", [])
-                        latest_version = versions[-1] if versions else None
-                elif package_type == "deb":
-                    try:
-                        output = subprocess.check_output(["apt-cache", "policy", package_name], text=True, timeout=5)
-                        for line in output.splitlines():
-                            if "Candidate:" in line:
-                                latest_version = line.split(":")[1].strip()
-                                break
-                    except Exception:
-                        continue
-                elif package_type == "golang":
-                    if package_name == "stdlib":
-                        url = "https://golang.org/dl/?mode=json"
-                        r = requests.get(url, timeout=5)
-                        if r.ok:
-                            versions = r.json()
-                            stable_versions = [v['version'] for v in versions if not v['version'].endswith('beta') and not v['version'].endswith('rc')]
-                            if stable_versions:
-                                latest_version = max(stable_versions).replace('go', '')
-                    else:
-                        url = f"https://proxy.golang.org/{package_name}/@latest"
-                        r = requests.get(url, timeout=5)
-                        if r.ok:
-                            data = r.json()
-                            latest_version = data.get('Version', '').replace('v', '')
+                latest_version = _lookup_latest_version_for_purl(component_version.purl)
                 if latest_version:
                     component_version.latest_version = latest_version
                     component_version.latest_version_updated_at = now
-                    component_version.save()
+                    versions_to_update.append(component_version)
                     updated_count += 1
                     logger.info(
                         f"Updated latest version for {component_version.component.name}:{component_version.version} to {latest_version} (updated_at={now})"
@@ -972,6 +1907,12 @@ def update_components_latest_versions(image_uuid: str):
                     f"Error processing component version {component_version.component.name}:{component_version.version}: {str(e)}"
                 )
                 continue
+        if versions_to_update:
+            ComponentVersion.objects.bulk_update(
+                versions_to_update,
+                ['latest_version', 'latest_version_updated_at'],
+                batch_size=200
+            )
         total_time = time.time() - start_time
         logger.info(f"Latest versions update completed in {total_time:.2f} seconds")
         logger.info(f"Updated latest versions for {updated_count} component versions")
@@ -981,10 +1922,10 @@ def update_components_latest_versions(image_uuid: str):
             "image_uuid": str(image_uuid),
             "image_name": image.name,
             "summary": {
-                "total_component_versions_processed": component_versions.count(),
+                "total_component_versions_processed": total_component_versions,
                 "component_versions_updated": updated_count,
-                "component_versions_skipped": component_versions.count() - updated_count,
-                "update_rate": f"{(updated_count / component_versions.count() * 100):.1f}%" if component_versions.count() > 0 else "0%"
+                "component_versions_skipped": total_component_versions - updated_count,
+                "update_rate": f"{(updated_count / total_component_versions * 100):.1f}%" if total_component_versions > 0 else "0%"
             },
             "processing_time": total_time,
             "processing_time_formatted": f"{total_time:.2f} seconds",
@@ -1087,6 +2028,9 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
                 version__in=[nv.version for nv in new_versions]
             ).select_related('component')})
 
+        # Pre-load component versions already linked to this image to avoid per-match EXISTS queries
+        _linked_cv_pks = set(image.component_versions.values_list('pk', flat=True))
+
         # Process each match
         for match in matches:
             vulnerability_data = match.get('vulnerability', {})
@@ -1108,12 +2052,6 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
                 epss_score = epss_data[0].get('epss', 0.0)
             elif isinstance(epss_data, (int, float)):
                 epss_score = float(epss_data)
-            fix_data = vulnerability_data.get('fix', {})
-            fix_versions = fix_data.get('versions', []) if isinstance(fix_data, dict) else []
-            fix_state = fix_data.get('state', '') if isinstance(fix_data, dict) else ''
-            fixable = bool(fix_versions) or (bool(fix_state) and fix_state.lower() not in ['wont-fix', 'not-fixed', ''])
-            fixable = bool(fixable)
-            fix_str = ', '.join(fix_versions) if fix_versions else (fix_state or '')
 
             # Get or create vulnerability (safe for parallel)
             vulnerability, _ = Vulnerability.objects.get_or_create(
@@ -1173,9 +2111,13 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
                     updated = True
                 if updated:
                     component_version_obj.save()
-                # Link image to component version
-                if not component_version_obj.images.filter(pk=image.pk).exists():
+
+                fix_metadata = _determine_fix_metadata(component_version_obj, vulnerability_data)
+
+                # Link image to component version (use in-memory set to skip DB check)
+                if component_version_obj.pk not in _linked_cv_pks:
                     component_version_obj.images.add(image)
+                    _linked_cv_pks.add(component_version_obj.pk)
                     logger.info(f"Linked component version {component_version} to image {image.name}")
                 
                 # Process component locations
@@ -1211,23 +2153,23 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
                 cvv, _ = ComponentVersionVulnerability.objects.get_or_create(
                     component_version=component_version_obj,
                     vulnerability=vulnerability,
-                    defaults={'fixable': fixable, 'fix': fix_str}
+                    defaults=fix_metadata,
                 )
                 # Update fix info if needed
                 if not _:
                     updated = False
-                    if cvv.fixable != fixable:
-                        cvv.fixable = fixable
-                        updated = True
-                    if cvv.fix != fix_str:
-                        cvv.fix = fix_str
-                        updated = True
+                    for field_name, field_value in fix_metadata.items():
+                        if getattr(cvv, field_name) != field_value:
+                            setattr(cvv, field_name, field_value)
+                            updated = True
                     if updated:
-                        cvv.save()
+                        cvv.save(update_fields=['fixable', 'fix', 'fix_state', 'fix_status', 'fix_versions', 'updated_at'])
 
         # Set status to success only after all matches are processed
         image.scan_status = 'success'
-        image.save()
+        image.save(update_fields=['scan_status', 'updated_at'])
+        related_tag_ids = _propagate_image_completion_to_equivalent_images(image)
+        _sync_repository_tag_processing_statuses(related_tag_ids)
         logger.info(f"Successfully processed Grype scan results for image {image_uuid}")
         logger.info(f"Total matches processed: {len(matches)}")
         # Calculate summary statistics
@@ -1270,6 +2212,9 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
             image = Image.objects.get(uuid=image_uuid)
             image.scan_status = 'error'
             image.save()
+            _sync_repository_tag_processing_statuses(
+                list(image.repository_tags.values_list('pk', flat=True))
+            )
         except Exception as save_error:
             logger.error(f"Failed to update image status: {str(save_error)}")
         
@@ -1300,8 +2245,9 @@ def scan_image_with_grype(self, image_uuid: str):
         # Get image
         image = Image.objects.get(uuid=image_uuid)
         
-        # Check if already in process
-        if image.scan_status == 'in_process':
+        # Allow the normal Syft -> Parse SBOM -> Grype pipeline to continue while the image
+        # is already marked in_process; only skip if another Grype run has already produced data.
+        if image.scan_status == 'in_process' and image.grype_data:
             logger.warning(f"Image {image_uuid} is already being scanned")
             return {"status": "skipped", "reason": "already in process"}
 
@@ -1310,6 +2256,9 @@ def scan_image_with_grype(self, image_uuid: str):
             logger.error(f"No SBOM data found for image {image_uuid}")
             image.scan_status = 'error'
             image.save()
+            _sync_repository_tag_processing_statuses(
+                list(image.repository_tags.values_list('pk', flat=True))
+            )
             return {
                 "status": "error",
                 "error": "No SBOM data found"
@@ -1381,6 +2330,9 @@ def scan_image_with_grype(self, image_uuid: str):
             image = Image.objects.get(uuid=image_uuid)
             image.scan_status = 'error'
             image.save()
+            _sync_repository_tag_processing_statuses(
+                list(image.repository_tags.values_list('pk', flat=True))
+            )
         except Exception as save_error:
             logger.error(f"Failed to update image status: {str(save_error)}")
         
@@ -1540,16 +2492,97 @@ def monitor_mass_rescan_progress():
         }
 
 
-@celery_app.task(name="Scan Repository Tags")
-def scan_repository_tags(repository_uuid: str):
+def _repository_tag_image_ref(repository, repo_tag, registry=None):
+    """Build docker image reference. For Artifactory, use repo_key (or legacy image_path) and pull base."""
+    if registry and getattr(registry, 'provider', None) == 'jfrog':
+        from urllib.parse import urlparse
+        parsed = urlparse(registry.api_url or '')
+        host = parsed.netloc or ''
+        if not host and repository.url:
+            host = (repository.url or '').split('/')[0].split('://')[-1]
+
+        # New unified model: repo_key is set, name = repo_key/image_name
+        if repository.repo_key:
+            rk = repository.repo_key
+            image_name = repository.name[len(rk) + 1:] if repository.name.startswith(rk + '/') else repository.name
+            pull_base = f"{rk}.{host}" if host else (repository.url or repository.name)
+            return f"{pull_base}/{image_name}:{repo_tag.tag}"
+
+        # Legacy collection model: image_path on tag
+        image_path = (getattr(repo_tag, 'image_path', None) or '').strip()
+        if image_path:
+            pull_base = f"{repository.name}.{host}" if host else (repository.url or repository.name)
+            return f"{pull_base}/{image_path}:{repo_tag.tag}"
+
+    return f"{repository.url}:{repo_tag.tag}"
+
+
+# Scan task: allow 1 hour for large Artifactory repos (catalog + many images/tags)
+SCAN_REPOSITORY_TAGS_TIME_LIMIT = 3600
+SCAN_REPOSITORY_TAGS_SOFT_LIMIT = 3540
+
+# When latest_only: max images to consider; pick one tag per image by highest version number
+SCAN_LATEST_ONLY_MAX_IMAGES = 500
+
+# Regex to extract leading semantic version (v1.2.3 or 1.2.3 or 2.0)
+_VERSION_PREFIX_RE = re.compile(r'^v?(\d+(?:\.\d+)*)', re.IGNORECASE)
+
+
+def _version_sort_key(tag: str):
     """
-    Task that scans a single repository for new tags.
+    Return a tuple suitable for sorting tags by version (higher = newer).
+    Parse v1.2.3 / 1.2.3 style; unparseable tags get (0,); literal 'latest' gets high fallback.
+    """
+    tag = (tag or '').strip()
+    if not tag:
+        return (0,)
+    if tag.lower() == 'latest':
+        return (999999,)  # prefer when no version-like tags exist
+    m = _VERSION_PREFIX_RE.match(tag)
+    if m:
+        parts = [int(x) for x in m.group(1).split('.')]
+        return tuple(parts)
+    return (0,)
+
+
+def _pick_latest_tag_by_version(tags):
+    """Given a list of tag names, return the one considered 'latest' by version number."""
+    if not tags:
+        return None
+    return max(tags, key=_version_sort_key)
+
+
+@celery_app.task(
+    name="Scan Repository Tags",
+    time_limit=SCAN_REPOSITORY_TAGS_TIME_LIMIT,
+    soft_time_limit=SCAN_REPOSITORY_TAGS_SOFT_LIMIT,
+)
+def scan_repository_tags(
+    repository_uuid: str,
+    latest_only: bool = False,
+    process_existing: bool = False,
+):
+    """
+    Task that scans a single repository for tags.
+    For Artifactory repo keys: lists images via catalog, then tags per image.
+    When latest_only=True, only one tag per image is collected (highest version by number).
+    When process_existing=True, already-known tags discovered by this scan are re-queued
+    for the standard processing pipeline as long as they are not already pending/in process.
     """
     from .models import Repository, RepositoryTag, ContainerRegistry
-    from .utils.acr import get_tags, get_bearer_token, get_manifest, is_helm_chart
-    from datetime import datetime
-
-    logger.info(f"Starting repository tags scan for repository {repository_uuid}")
+    from .utils.registry import (
+        get_tags,
+        get_catalog,
+        get_manifest,
+        get_helm_chart_versions,
+        is_helm_chart,
+    )
+    logger.info(
+        "Starting repository tags scan for repository %s (latest_only=%s, process_existing=%s)",
+        repository_uuid,
+        latest_only,
+        process_existing,
+    )
     
     try:
         repository = Repository.objects.select_related('container_registry').get(uuid=repository_uuid)
@@ -1558,7 +2591,7 @@ def scan_repository_tags(repository_uuid: str):
         repository.scan_status = 'in_process'
         repository.save()
 
-        # Get registry and token
+        # Get registry
         registry = repository.container_registry
         if not registry:
             logger.warning(f"No registry found for repository {repository.name}")
@@ -1566,55 +2599,181 @@ def scan_repository_tags(repository_uuid: str):
             repository.save()
             return
 
-        token = get_bearer_token(registry.api_url, registry.login, registry.password)
+        all_tag_tuples = []  # (tag_name, image_path or None)
+        jfrog_new_style = registry.provider == 'jfrog' and repository.repo_key
 
-        # Get all tags from registry 
-        all_tags = list(get_tags(registry.api_url, token, repository.name, limit=10))
-        logger.info(f"Found {len(all_tags)} tags for repository {repository.name}")
+        if registry.provider == 'jfrog' and jfrog_new_style:
+            # ---- Unified per-component repo (repo_key set) ----
+            # repo.name = 'repo_key/image_name'; extract image_name
+            rk = repository.repo_key
+            image_name = repository.name[len(rk) + 1:] if repository.name.startswith(rk + '/') else repository.name
 
-        # Determine repository type if unknown
-        if repository.repository_type in ('none', 'Unknown') and all_tags:
-            first_tag = all_tags[0]
-            manifest, _ = get_manifest(registry.api_url, token, repository.name, first_tag)
-            if manifest:
-                if is_helm_chart(manifest):
-                    repository.repository_type = 'helm'
-                else:
+            if repository.repository_type == 'helm':
+                try:
+                    helm_entries = get_helm_chart_versions(registry, rk)
+                except Exception as e:
+                    logger.error(f"Failed to get Helm index for {repository.name}: {e}")
+                    repository.scan_status = 'error'
+                    repository.save()
+                    return
+                # Filter for this specific chart only
+                helm_entries = [(ver, chart) for ver, chart in helm_entries if chart == image_name]
+                if latest_only and helm_entries:
+                    best_ver = max(helm_entries, key=lambda x: _version_sort_key(x[0]))[0]
+                    helm_entries = [(best_ver, image_name)]
+                all_tag_tuples = [(ver, None) for ver, _chart in helm_entries]
+                logger.info(f"Found {len(all_tag_tuples)} Helm chart versions for {repository.name}" + (" (latest_only)" if latest_only else ""))
+            else:
+                # Docker: single image within repo key
+                try:
+                    tags = list(get_tags(registry, rk, limit=100 if not latest_only else 50, image_name=image_name))
+                except Exception as e:
+                    logger.error(f"Failed to get tags for {repository.name}: {e}")
+                    repository.scan_status = 'error'
+                    repository.save()
+                    return
+                if latest_only and tags:
+                    chosen = _pick_latest_tag_by_version(tags)
+                    tags = [chosen]
+                all_tag_tuples = [(t, None) for t in tags]
+                logger.info(f"Found {len(all_tag_tuples)} tags for {repository.name}" + (" (latest_only)" if latest_only else ""))
+                if all_tag_tuples and repository.repository_type in ('none', 'Unknown'):
                     repository.repository_type = 'docker'
-                repository.save()
+                    repository.save()
 
-        # Process each tag
-        for tag_name in all_tags:
-            try:
-                # Check if tag already exists
-                if not RepositoryTag.objects.filter(repository=repository, tag=tag_name).exists():
-                    # Get manifest for the tag
-                    manifest, digest = get_manifest(registry.api_url, token, repository.name, tag_name)
-                    if digest:
-                        digest = digest.replace('sha256:', '')
+        elif registry.provider == 'jfrog':
+            # ---- Legacy collection-style repo (no repo_key) ----
+            if repository.repository_type == 'helm':
+                try:
+                    helm_entries = get_helm_chart_versions(registry, repository.name)
+                except Exception as e:
+                    logger.error(f"Failed to get Helm index for {repository.name}: {e}")
+                    repository.scan_status = 'error'
+                    repository.save()
+                    return
+                if latest_only and helm_entries:
+                    by_chart = {}
+                    for ver, chart in helm_entries:
+                        if chart not in by_chart or _version_sort_key(ver) > _version_sort_key(by_chart[chart]):
+                            by_chart[chart] = ver
+                    helm_entries = [(by_chart[c], c) for c in by_chart]
+                all_tag_tuples = [(ver, chart) for ver, chart in helm_entries]
+                logger.info(f"Found {len(all_tag_tuples)} Helm chart versions in {repository.name}" + (" (latest_only)" if latest_only else ""))
+            else:
+                try:
+                    image_names, _ = get_catalog(registry, repository.name, page_size=500)
+                except Exception as e:
+                    logger.error(f"Failed to get catalog for {repository.name}: {e}")
+                    repository.scan_status = 'error'
+                    repository.save()
+                    return
+                if latest_only:
+                    image_names = image_names[:SCAN_LATEST_ONLY_MAX_IMAGES]
+                logger.info(f"Found {len(image_names)} images in Artifactory repo {repository.name}" + (" (latest_only)" if latest_only else ""))
+                for img in image_names:
+                    try:
+                        tags = list(get_tags(registry, repository.name, limit=100 if not latest_only else 50, image_name=img))
+                        if latest_only and tags:
+                            chosen = _pick_latest_tag_by_version(tags)
+                            all_tag_tuples.append((chosen, img))
+                        else:
+                            for tag_name in tags:
+                                all_tag_tuples.append((tag_name, img))
+                    except Exception as e:
+                        logger.warning(f"Failed to get tags for image {img}: {e}")
+                if all_tag_tuples and repository.repository_type in ('none', 'Unknown'):
+                    repository.repository_type = 'docker'
+                    repository.save()
+        else:
+            # ACR or single-image: tags for this repository name
+            all_tags = list(get_tags(registry, repository.name, limit=500))
+            if latest_only and all_tags:
+                chosen = _pick_latest_tag_by_version(all_tags)
+                all_tags = [chosen]
+            all_tag_tuples = [(t, None) for t in all_tags]
+            logger.info(f"Found {len(all_tags)} tags for repository {repository.name}" + (" (latest_only)" if latest_only else ""))
+            if repository.repository_type in ('none', 'Unknown') and all_tags:
+                first_tag = all_tags[0]
+                manifest, _ = get_manifest(registry, repository.name, first_tag)
+                if manifest:
+                    if is_helm_chart(manifest):
+                        repository.repository_type = 'helm'
                     else:
-                        digest = ''
-                    # Create new tag
-                    RepositoryTag.objects.create(
+                        repository.repository_type = 'docker'
+                    repository.save()
+
+        # Process each (tag_name, image_path)
+        new_count = 0
+        new_tag_uuids = []
+        existing_tag_uuids_to_process = []
+        existing_tags_already_running = 0
+        for tag_name, image_path in all_tag_tuples:
+            try:
+                image_path_val = (image_path or '').strip()
+                existing_tag = RepositoryTag.objects.filter(
+                    repository=repository,
+                    tag=tag_name,
+                    image_path=image_path_val,
+                ).only('uuid', 'processing_status').first()
+                if existing_tag is None:
+                    digest = ''
+                    # Native Helm repos (packageType=helm) have no Docker manifest; skip digest
+                    if not (repository.repository_type == 'helm' and registry.provider == 'jfrog'):
+                        if jfrog_new_style:
+                            # Per-component repo: use repo_key + image_name for manifest
+                            rk = repository.repo_key
+                            img = repository.name[len(rk) + 1:] if repository.name.startswith(rk + '/') else repository.name
+                            manifest, d = get_manifest(registry, rk, tag_name, image_name=img)
+                            if d:
+                                digest = _normalize_image_digest(d)
+                        elif registry.provider != 'jfrog' or not image_path_val:
+                            manifest, d = get_manifest(registry, repository.name, tag_name)
+                            if d:
+                                digest = _normalize_image_digest(d)
+                        else:
+                            manifest, d = get_manifest(registry, repository.name, tag_name, image_name=image_path_val)
+                            if d:
+                                digest = _normalize_image_digest(d)
+                    rt = RepositoryTag.objects.create(
                         repository=repository,
                         tag=tag_name,
-                        digest=digest
+                        digest=digest or None,
+                        image_path=image_path_val
                     )
-                    logger.info(f"Created new tag {tag_name} for repository {repository.name}")
+                    new_count += 1
+                    new_tag_uuids.append(str(rt.uuid))
+                    logger.info(f"Created tag {tag_name}" + (f" for image {image_path_val}" if image_path_val else ""))
+                elif process_existing:
+                    if existing_tag.processing_status in ['pending', 'in_process']:
+                        existing_tags_already_running += 1
+                    else:
+                        existing_tag_uuids_to_process.append(str(existing_tag.uuid))
             except Exception as e:
-                logger.error(f"Error processing tag {tag_name} for repository {repository.name}: {str(e)}")
+                logger.error(f"Error processing tag {tag_name}: {str(e)}")
                 continue
 
         # Update repository status
         repository.scan_status = 'success'
-        repository.last_scanned = datetime.now()
+        repository.last_scanned = timezone.now()
         repository.save()
-        logger.info(f"Successfully completed repository tags scan for {repository.name}")
+        logger.info(f"Successfully completed repository tags scan for {repository.name} ({new_count} new tags)")
+
+        # Schedule processing (create Images, SBOM) for each new tag
+        tags_to_process = new_tag_uuids + existing_tag_uuids_to_process
+        if tags_to_process:
+            from .tasks import process_single_tag
+            for tag_uuid in tags_to_process:
+                process_single_tag.apply_async(args=[tag_uuid], task_name="Process Single Tag")
+            logger.info(
+                "Scheduled process_single_tag for %s tags (%s new, %s existing)",
+                len(tags_to_process),
+                len(new_tag_uuids),
+                len(existing_tag_uuids_to_process),
+            )
         
-        # Calculate summary statistics
-        existing_tags_before = RepositoryTag.objects.filter(repository=repository).count()
-        new_tags_created = RepositoryTag.objects.filter(repository=repository, tag__in=all_tags).count()
-        tags_skipped = len(all_tags) - new_tags_created
+        existing_tags_before = RepositoryTag.objects.filter(repository=repository).count() - new_count
+        new_tags_created = new_count
+        tags_skipped = len(all_tag_tuples) - new_count
         
         return {
             "status": "success",
@@ -1624,10 +2783,13 @@ def scan_repository_tags(repository_uuid: str):
             "repository_url": repository.url,
             "repository_type": repository.repository_type,
             "summary": {
-                "total_tags_found": len(all_tags),
+                "total_tags_found": len(all_tag_tuples),
                 "new_tags_created": new_tags_created,
                 "existing_tags_before": existing_tags_before,
                 "tags_skipped": tags_skipped,
+                "existing_tags_requeued": len(existing_tag_uuids_to_process),
+                "existing_tags_already_running": existing_tags_already_running,
+                "tags_scheduled_for_processing": len(tags_to_process),
                 "scan_status_updated": True,
                 "last_scanned_updated": True
             },
@@ -1637,7 +2799,7 @@ def scan_repository_tags(repository_uuid: str):
                 "registry_name": registry.name
             },
             "scan_details": {
-                "scan_timestamp": datetime.now().isoformat(),
+                "scan_timestamp": timezone.now().isoformat(),
                 "scan_duration": "completed",
                 "repository_type_determined": repository.repository_type not in ('none', 'Unknown')
             },
@@ -1688,141 +2850,170 @@ def process_single_tag(tag_uuid: str):
     After processing, trigger SBOM scan for all images linked to this tag.
     """
     from .models import RepositoryTag, Image
-    from .utils.acr import get_manifest, is_helm_chart, get_chart_digest, get_helm_images, get_bearer_token, get_acr_image_digest
+    from .utils.registry import (
+        get_manifest,
+        is_helm_chart,
+        get_chart_digest,
+        get_helm_images,
+        get_helm_chart_url,
+        get_helm_images_from_native_chart,
+        get_bearer_token,
+        get_image_digest,
+        build_fallback_image_ref,
+        image_ref_repo_key,
+    )
     from .tasks import generate_sbom_and_create_components
 
     logger.info(f"Starting processing of tag {tag_uuid}")
 
     try:
-        tag = RepositoryTag.objects.select_related('repository', 'repository__container_registry').get(uuid=tag_uuid)
+        tag = RepositoryTag.objects.select_related(
+            'repository', 'repository__container_registry'
+        ).prefetch_related(
+            'repository__image_fallback_repositories',
+            'repository__image_fallback_repositories__container_registry',
+        ).get(uuid=tag_uuid)
         # Set status to in_process
         tag.processing_status = 'in_process'
         tag.save()
         repository = tag.repository
+        registry = repository.container_registry
         logger.info(f"Processing tag {tag.tag} from repository {repository.name}")
-
-        # Get registry token if available
-        token = None
-        if repository.container_registry:
-            token = get_bearer_token(
-                repository.container_registry.api_url,
-                repository.container_registry.login,
-                repository.container_registry.password
-            )
 
         # For Docker images, just create the record
         if repository.repository_type == 'docker':
-            image_ref = f"{repository.url}:{tag.tag}"
-            image, created = Image.objects.get_or_create(
+            image_ref = _repository_tag_image_ref(repository, tag, registry)
+            image_digest = _resolve_repository_tag_image_digest(
+                tag,
+                image_ref,
+                registry,
+            )
+            image, created = _get_or_create_canonical_image(
                 name=image_ref,
-                defaults={
-                    'artifact_reference': image_ref
-                }
+                digest=image_digest,
+                artifact_reference=image_ref,
             )
             image.repository_tags.add(tag)
             logger.info(f"{'Created' if created else 'Linked'} Docker image {image_ref}")
         else:
-            # For Helm charts, get manifest to extract images and digest
-            manifest, digest = get_manifest(
-                repository.container_registry.api_url if repository.container_registry else None,
-                token,
-                repository.name,
-                tag.tag
-            )
+            # For Helm charts: native Helm (Artifactory index.yaml) or OCI manifest (Docker/ACR)
+            image_refs = []
+            chart_digest = None
 
-            if not manifest:
-                logger.warning(f"Could not get manifest for {repository.name}:{tag.tag}")
-                tag.processing_status = 'error'
-                tag.save()
-                return
+            if repository.repository_type == 'helm' and registry.provider == 'jfrog':
+                # Native Helm repo: do not call get_manifest (Helm repos don't expose Docker API).
+                if repository.repo_key:
+                    rk = repository.repo_key
+                    chart_name = repository.name[len(rk) + 1:] if repository.name.startswith(rk + '/') else repository.name
+                else:
+                    chart_name = (getattr(tag, 'image_path', None) or '').strip()
+                helm_repo_key = repository.repo_key or repository.name
+                chart_url = get_helm_chart_url(registry, helm_repo_key, chart_name, tag.tag)
+                if chart_url:
+                    image_refs = get_helm_images_from_native_chart(registry, chart_url)
+                else:
+                    logger.warning(f"Could not get chart URL for {repository.name} {chart_name}@{tag.tag}")
+            else:
+                if repository.repo_key:
+                    rk = repository.repo_key
+                    img_name = repository.name[len(rk) + 1:] if repository.name.startswith(rk + '/') else repository.name
+                else:
+                    img_name = getattr(tag, 'image_path', None) or None
+                repo_for_manifest = repository.repo_key or repository.name
+                manifest, digest = get_manifest(registry, repo_for_manifest, tag.tag, image_name=img_name)
+                if manifest and is_helm_chart(manifest):
+                    chart_digest = get_chart_digest(manifest)
+                    if chart_digest:
+                        image_refs = list(get_helm_images(registry, repository.name, chart_digest))
+                elif not manifest:
+                    logger.warning(f"Could not get manifest for {repository.name}:{tag.tag}")
+                    tag.processing_status = 'error'
+                    tag.save()
+                    return
 
-            if is_helm_chart(manifest):
-                chart_digest = get_chart_digest(manifest)
-                if chart_digest:
-                    for image_ref in get_helm_images(
-                        repository.container_registry.api_url if repository.container_registry else None,
-                        token,
-                        repository.name,
-                        chart_digest
-                    ):
-                        # Get image digest from ACR
-                        image_digest = None
-                        if repository.container_registry and repository.container_registry.provider == 'acr':
-                            image_digest = get_acr_image_digest(
-                                repository.container_registry.api_url,
-                                token,
-                                image_ref
-                            )
-                        
-                        # Create or get image with proper digest
-                        # image_ref from get_helm_images already contains name:tag, which should be unique
-                        # Use name+digest combination for unique identification when digest is available
-                        # If digest is not available, use name only (since image_ref already contains tag)
-                        artifact_ref = f"{repository.url}:{tag.tag}"
-                        if image_digest:
-                            # Try to find image by name and digest (same name but different digest = different image)
-                            image = Image.objects.filter(name=image_ref, digest=image_digest).first()
-                            if image:
-                                created = False
-                            else:
-                                # Check if image with same name but different digest exists
-                                existing_image = Image.objects.filter(name=image_ref).exclude(digest=image_digest).first()
-                                if existing_image:
-                                    # Same name but different digest - create new image
-                                    image = Image.objects.create(
-                                        name=image_ref,
-                                        digest=image_digest,
-                                        artifact_reference=artifact_ref
-                                    )
-                                    created = True
-                                else:
-                                    # No existing image with this name, create new one
-                                    image = Image.objects.create(
-                                        name=image_ref,
-                                        digest=image_digest,
-                                        artifact_reference=artifact_ref
-                                    )
-                                    created = True
-                        else:
-                            # If no digest, use name only (image_ref already contains name:tag which is unique)
-                            # But check if image already exists with this name
-                            image = Image.objects.filter(name=image_ref).first()
-                            if image:
-                                created = False
-                            else:
-                                image = Image.objects.create(
-                                    name=image_ref,
-                                    digest=None,
-                                    artifact_reference=artifact_ref
+            for image_ref in image_refs:
+                # Get image digest (ACR or Artifactory). For Helm: skip primary when ref doesn't
+                # contain our registry base (e.g. a8n-docker.repo.com.int.zone/...) or when ref
+                # points at this Helm repo (Helm repos don't expose Docker API).
+                image_digest = None
+                if registry and repository.repository_type == 'helm':
+                    ref_repo_key = image_ref_repo_key(registry.api_url or '', image_ref)
+                    helm_key = repository.repo_key or repository.name
+                    if ref_repo_key == helm_key:
+                        pass  # ref points at Helm repo; use fallback only
+                    elif ref_repo_key is not None:
+                        # ref contains our registry base (e.g. repo.com/artifactory/docker-repo/...); try primary
+                        image_digest = get_image_digest(registry, image_ref)
+                    # else: ref is different host (e.g. a8n-docker.repo.com.int.zone/...); skip primary, use fallback
+                elif registry:
+                    image_digest = get_image_digest(registry, image_ref)
+                if image_digest is None and repository.repository_type == 'helm':
+                    fallback_repos = list(
+                        repository.image_fallback_repositories.filter(
+                            repository_type='docker',
+                            container_registry__isnull=False
+                        ).select_related('container_registry')
+                    )
+                    for fb_repo in fallback_repos:
+                        if not fb_repo.container_registry:
+                            continue
+                        candidate_ref = build_fallback_image_ref(fb_repo, image_ref)
+                        if candidate_ref:
+                            image_digest = get_image_digest(fb_repo.container_registry, candidate_ref)
+                            if image_digest:
+                                logger.info(
+                                    "Resolved Helm image %s via fallback repo %s as %s",
+                                    image_ref, fb_repo.name, candidate_ref
                                 )
-                                created = True
-                        image.repository_tags.add(tag)
-                        logger.info(f"{'Created' if created else 'Linked'} Helm image {image_ref} with digest {image_digest}")
-
-        # Set status to success
-        tag.processing_status = 'success'
-        tag.save()
+                                break
+                artifact_ref = f"{repository.url}:{tag.tag}"
+                image, created = _get_or_create_canonical_image(
+                    name=image_ref,
+                    digest=image_digest,
+                    artifact_reference=artifact_ref,
+                )
+                image.repository_tags.add(tag)
+                logger.info(f"{'Created' if created else 'Linked'} Helm image {image_ref} with digest {image_digest}")
 
         # Trigger SBOM scan for all images linked to this tag
         images = tag.images.all()
         started = 0
+        repaired_tag_ids = set()
         for image in images:
-            if image.scan_status not in ['in_process', 'pending']:
-                image.scan_status = 'pending'
-                image.save()
-                repo_tag = image.repository_tags.first()
-                art_type = repo_tag.repository.repository_type if repo_tag else 'docker'
-                generate_sbom_and_create_components.delay(
-                    image_uuid=str(image.uuid),
-                    art_type=art_type
-                )
-                started += 1
+            if image.scan_status in ['in_process', 'pending'] and _has_completed_image_payload(image):
+                image.scan_status = 'success'
+                image.save(update_fields=['scan_status', 'updated_at'])
+                repaired_tag_ids.update(_propagate_image_completion_to_equivalent_images(image))
+                continue
+            if image.scan_status in ['in_process', 'pending']:
+                continue
+            if _has_completed_image_scan(image):
+                continue
+
+            image.scan_status = 'pending'
+            image.save(update_fields=['scan_status', 'updated_at'])
+            repo_tag = image.repository_tags.first()
+            art_type = repo_tag.repository.repository_type if repo_tag else 'docker'
+            generate_sbom_and_create_components.delay(
+                image_uuid=str(image.uuid),
+                art_type=art_type
+            )
+            started += 1
         logger.info(f"Triggered SBOM scan for {started} images for tag {tag.tag}")
 
         # Calculate summary statistics
         total_images_linked = images.count()
         images_pending_before = images.filter(scan_status='pending').count()
         images_in_process_before = images.filter(scan_status='in_process').count()
+
+        if total_images_linked == 0:
+            tag.processing_status = 'success'
+            tag.save(update_fields=['processing_status', 'updated_at'])
+        else:
+            synced_statuses = _sync_repository_tag_processing_statuses(
+                list({tag.pk, *repaired_tag_ids})
+            )
+            tag.processing_status = synced_statuses.get(str(tag.pk), tag.processing_status)
         
         return {
             "status": "success",
@@ -1839,7 +3030,7 @@ def process_single_tag(tag_uuid: str):
                 "images_pending_before": images_pending_before,
                 "images_in_process_before": images_in_process_before,
                 "sbom_scans_triggered": started,
-                "tag_processing_status": "success"
+                "tag_processing_status": tag.processing_status
             },
             "processing_details": {
                 "repository_type": repository.repository_type,
@@ -1890,6 +3081,116 @@ def process_single_tag(tag_uuid: str):
             },
             "timestamp": timezone.now().isoformat()
         }
+
+
+@celery_app.task(name="Deduplicate Images by Identity")
+def deduplicate_images_by_identity():
+    """
+    Repair historical duplicate Image rows that represent the same logical image.
+    Images are considered duplicates when they share the same name and normalized digest.
+    """
+    from .models import Image
+
+    digest_filter = ~Q(digest__isnull=True) & ~Q(digest='')
+    names_with_multiple_images = set(
+        Image.objects.filter(digest_filter)
+        .values('name')
+        .annotate(image_count=Count('uuid'))
+        .filter(image_count__gt=1)
+        .values_list('name', flat=True)
+    )
+    names_with_unnormalized_digest = set(
+        Image.objects.filter(digest_filter)
+        .exclude(digest__startswith='sha256:')
+        .values_list('name', flat=True)
+    )
+    candidate_names = sorted(names_with_multiple_images | names_with_unnormalized_digest)
+
+    summary = {
+        'candidate_names_seen': len(candidate_names),
+        'duplicate_groups_merged': 0,
+        'duplicate_images_deleted': 0,
+        'repository_tag_links_merged': 0,
+        'component_version_links_merged': 0,
+        'component_locations_merged': 0,
+        'images_normalized': 0,
+    }
+    affected_primary_images = []
+
+    for image_name in candidate_names:
+        image_rows = list(
+            Image.objects.filter(name=image_name)
+            .filter(digest_filter)
+            .prefetch_related(
+                'repository_tags',
+                'component_versions',
+                'component_locations__component_version',
+            )
+        )
+        grouped_by_digest = {}
+        for image in image_rows:
+            normalized_digest = _normalize_image_digest(image.digest)
+            if not normalized_digest:
+                continue
+            grouped_by_digest.setdefault(normalized_digest, []).append(image)
+
+        for normalized_digest, grouped_images in grouped_by_digest.items():
+            if len(grouped_images) == 1 and grouped_images[0].digest == normalized_digest:
+                continue
+
+            with transaction.atomic():
+                _acquire_image_identity_lock(image_name, normalized_digest)
+                locked_images = list(
+                    Image.objects.filter(pk__in=[image.pk for image in grouped_images])
+                    .select_for_update()
+                    .prefetch_related(
+                        'repository_tags',
+                        'component_versions',
+                        'component_locations__component_version',
+                    )
+                )
+                locked_images = [
+                    image for image in locked_images
+                    if _normalize_image_digest(image.digest) == normalized_digest
+                ]
+
+                if len(locked_images) == 1:
+                    image = locked_images[0]
+                    if image.digest != normalized_digest:
+                        image.digest = normalized_digest
+                        image.save(update_fields=['digest', 'updated_at'])
+                        summary['images_normalized'] += 1
+                    continue
+
+                merge_result = _merge_duplicate_image_group(locked_images, normalized_digest)
+                if not merge_result:
+                    continue
+
+                affected_primary_images.append(merge_result['primary_image_uuid'])
+                for key in (
+                    'duplicate_groups_merged',
+                    'duplicate_images_deleted',
+                    'repository_tag_links_merged',
+                    'component_version_links_merged',
+                    'component_locations_merged',
+                    'images_normalized',
+                ):
+                    summary[key] += merge_result[key]
+
+    return {
+        "status": "success",
+        "task_name": "Deduplicate Images by Identity",
+        "summary": summary,
+        "details": {
+            "affected_primary_images": affected_primary_images,
+        },
+        "message": (
+            f"Image deduplication completed: {summary['duplicate_images_deleted']} duplicate "
+            f"images removed across {summary['duplicate_groups_merged']} identity groups"
+        ),
+        "timestamp": timezone.now().isoformat(),
+    }
+
 
 @celery_app.task(name="Delete Old Repository Tags")
 def delete_old_repository_tags(days: int = 1):
@@ -1944,11 +3245,30 @@ def update_vulnerability_details(vulnerability_uuid: str):
 
     try:
         vulnerability = Vulnerability.objects.get(uuid=vulnerability_uuid)
+        if not _is_supported_vulnerability_enrichment_target(
+            vulnerability.vulnerability_id,
+            vulnerability.vulnerability_type,
+        ):
+            logger.info(
+                f"Skipping vulnerability enrichment for unsupported identifier {vulnerability.vulnerability_id}"
+            )
+            return {
+                "status": "skipped",
+                "task_name": "Update Vulnerability Details",
+                "vulnerability_id": vulnerability.vulnerability_id,
+                "vulnerability_uuid": str(vulnerability_uuid),
+                "reason": "unsupported vulnerability identifier",
+                "message": f"Vulnerability {vulnerability.vulnerability_id} is not supported by the current enrichment sources",
+                "timestamp": timezone.now().isoformat(),
+            }
         
         # Skip if already updated recently (within 24 hours)
         try:
             existing_details = vulnerability.details
-            if existing_details.last_updated and (timezone.now() - existing_details.last_updated).days < 1:
+            if (
+                existing_details.last_updated and
+                (timezone.now() - existing_details.last_updated) < timedelta(hours=VULNERABILITY_DETAILS_FRESHNESS_HOURS)
+            ):
                 logger.info(f"Skipping {vulnerability.vulnerability_id} - updated recently")
                 return {
                     "status": "skipped",
@@ -1969,6 +3289,8 @@ def update_vulnerability_details(vulnerability_uuid: str):
 
         # Collect data from external sources
         cve_details, exploit_info = collect_vulnerability_data(vulnerability.vulnerability_id)
+        now = timezone.now()
+        data_sources = _build_vulnerability_data_sources(cve_details, exploit_info)
         
         # Use transaction to ensure atomicity
         with transaction.atomic():
@@ -1983,46 +3305,25 @@ def update_vulnerability_details(vulnerability_uuid: str):
             # Update CVE details if available
             if cve_details:
                 for field, value in cve_details.items():
-                    if value is not None:
-                        # Handle EPSS fields specifically
-                        if field.startswith('epss_'):
-                            setattr(details, field, value)
-                        else:
-                            # Handle other CVE fields
-                            setattr(details, field, value)
+                    if value is not None and hasattr(details, field):
+                        setattr(details, field, value)
 
             # Update exploit information if available
             if exploit_info:
                 for field, value in exploit_info.items():
-                    if value is not None:
+                    if value is not None and hasattr(details, field):
                         setattr(details, field, value)
 
-            # Update data source with current sources
-            data_sources = []
-            if cve_details:
-                # Check if EPSS data was collected
-                if cve_details.get('epss_data_source'):
-                    data_sources.append(cve_details['epss_data_source'])
-                data_sources.append('CVE-CIRCL')
-            if exploit_info:
-                # Check CISA KEV
-                if exploit_info.get('cisa_kev_known_exploited'):
-                    data_sources.append('CISA-KEV')
-                
-                # Check Exploit-DB (separate tracking)
-                if exploit_info.get('exploit_db_available'):
-                    data_sources.append('Exploit-DB')
-                
-                # Check NVD (for reference links)
-                if any('nvd' in link for link in exploit_info.get('exploit_links', [])):
-                    data_sources.append('NVD')
-            
-            if data_sources:
-                details.data_source = ' + '.join(data_sources)
+            details.data_source = ' + '.join(data_sources) if data_sources else 'manual'
 
             # Always update the last_updated timestamp
-            details.last_updated = timezone.now()
+            details.last_updated = now
             details.save()
+
+            if details.epss_score is not None and vulnerability.epss != details.epss_score:
+                vulnerability.epss = details.epss_score
+                vulnerability.updated_at = now
+                vulnerability.save(update_fields=['epss', 'updated_at'])
 
         processing_time = time.time() - start_time
         logger.info(f"Updated vulnerability details for {vulnerability.vulnerability_id} in {processing_time:.2f}s")
@@ -2084,44 +3385,63 @@ def update_all_vulnerability_details():
     to avoid blocking the worker. Use monitor_bulk_update_progress() to check progress.
     """
     from .models import Vulnerability
-    from django.db import transaction
-    import time
     from django.core.cache import cache
 
     logger.info("Starting bulk vulnerability details update")
     start_time = time.time()
 
     try:
-        # Get all vulnerabilities that need updating
-        vulnerabilities = Vulnerability.objects.all()
-        total_vulnerabilities = vulnerabilities.count()
+        cutoff_time = timezone.now() - timedelta(hours=VULNERABILITY_DETAILS_FRESHNESS_HOURS)
+        vulnerabilities = list(
+            Vulnerability.objects.exclude(
+                details__last_updated__gte=cutoff_time
+            ).only('uuid', 'vulnerability_id', 'vulnerability_type')
+        )
+        eligible_vulnerabilities = [
+            vulnerability for vulnerability in vulnerabilities
+            if _is_supported_vulnerability_enrichment_target(
+                vulnerability.vulnerability_id,
+                vulnerability.vulnerability_type,
+            )
+        ]
+        total_vulnerabilities = len(eligible_vulnerabilities)
         
         logger.info(f"Found {total_vulnerabilities} vulnerabilities to process")
-        
-        # Process vulnerabilities in batches to avoid memory issues
-        BATCH_SIZE = 100  # Increased batch size for better performance
+
+        if not eligible_vulnerabilities:
+            return {
+                "status": "completed",
+                "task_name": "Update All Vulnerability Details",
+                "summary": {
+                    "total_vulnerabilities": 0,
+                    "scheduled_count": 0,
+                    "total_batches": 0,
+                    "batch_size": ENRICHMENT_BATCH_SIZE,
+                },
+                "message": "No vulnerabilities require enrichment at the moment",
+                "timestamp": timezone.now().isoformat(),
+            }
+
         processed_count = 0
-        task_ids = []  # Store task IDs for monitoring
-        
-        for i in range(0, total_vulnerabilities, BATCH_SIZE):
-            batch = vulnerabilities[i:i + BATCH_SIZE]
-            batch_start_time = time.time()
-            
-            logger.info(f"Processing batch {i//BATCH_SIZE + 1}/{(total_vulnerabilities + BATCH_SIZE - 1)//BATCH_SIZE}")
-            
-            # Schedule tasks for this batch asynchronously
-            for vulnerability in batch:
-                # Schedule individual task asynchronously - don't wait for result
-                task = update_vulnerability_details.delay(str(vulnerability.uuid))
-                task_ids.append(task.id)
-                processed_count += 1
-            
-            batch_time = time.time() - batch_start_time
-            logger.info(f"Scheduled batch in {batch_time:.2f}s")
+        task_ids = []
+        uuid_batches = [
+            [str(vulnerability.uuid) for vulnerability in batch]
+            for batch in _chunked(eligible_vulnerabilities, ENRICHMENT_BATCH_SIZE)
+        ]
+
+        for index, batch in enumerate(uuid_batches, start=1):
+            logger.info(f"Scheduling enrichment batch {index}/{len(uuid_batches)} ({len(batch)} vulnerabilities)")
+            task = update_vulnerability_details_bulk.apply_async(
+                args=[batch],
+                kwargs={'batch_size': min(50, len(batch))},
+                task_name="Update Vulnerability Details (Bulk)",
+            )
+            task_ids.append(task.id)
+            processed_count += len(batch)
 
         total_time = time.time() - start_time
         logger.info(f"Bulk vulnerability update scheduling completed in {total_time:.2f}s")
-        logger.info(f"Scheduled {processed_count} tasks for processing")
+        logger.info(f"Scheduled {len(task_ids)} batch tasks for processing {processed_count} vulnerabilities")
         
         # Store task IDs in cache for monitoring (expires in 24 hours)
         cache_key = f"bulk_update_tasks_{int(start_time)}"
@@ -2133,8 +3453,8 @@ def update_all_vulnerability_details():
         }, timeout=86400)  # 24 hours
 
         # Calculate summary statistics
-        total_batches = (total_vulnerabilities + BATCH_SIZE - 1) // BATCH_SIZE
-        estimated_completion_time = total_vulnerabilities * 2  # Rough estimate: 2 seconds per vulnerability
+        total_batches = len(uuid_batches)
+        estimated_completion_time = total_vulnerabilities * 0.5
         
         return {
             "status": "scheduled",
@@ -2143,20 +3463,20 @@ def update_all_vulnerability_details():
                 "total_vulnerabilities": total_vulnerabilities,
                 "scheduled_count": processed_count,
                 "total_batches": total_batches,
-                "batch_size": BATCH_SIZE,
+                "batch_size": ENRICHMENT_BATCH_SIZE,
                 "estimated_completion_time_seconds": estimated_completion_time,
                 "estimated_completion_time_formatted": f"{estimated_completion_time // 3600}h {(estimated_completion_time % 3600) // 60}m"
             },
             "processing_time": total_time,
             "processing_time_formatted": f"{total_time:.2f} seconds",
-            "message": f"Bulk update scheduled: {processed_count} vulnerability tasks queued for processing",
+            "message": f"Bulk update scheduled: {len(task_ids)} enrichment batches queued for processing",
             "monitor_key": cache_key,
             "monitoring": {
                 "cache_expires_in": "24 hours",
                 "progress_function": "monitor_bulk_update_progress()",
                 "note": "Use monitor_bulk_update_progress() to check progress"
             },
-            "next_steps": ["Monitor progress using monitor_bulk_update_progress()", "Individual tasks will update vulnerability details"],
+            "next_steps": ["Monitor progress using monitor_bulk_update_progress()", "Batch tasks will update vulnerability details"],
             "timestamp": timezone.now().isoformat()
         }
 
@@ -2176,9 +3496,9 @@ def update_critical_vulnerability_details():
     This task should be scheduled to run more frequently than the full update.
     """
     from .models import Vulnerability
+    from django.core.cache import cache
     from django.utils import timezone
     from datetime import timedelta
-    import time
 
     logger.info("Starting critical vulnerability details update")
     start_time = time.time()
@@ -2196,26 +3516,50 @@ def update_critical_vulnerability_details():
         )
         
         # Combine and deduplicate
-        vulnerabilities = (critical_vulns | old_vulns).distinct()
-        total_vulnerabilities = vulnerabilities.count()
+        vulnerabilities = [
+            vulnerability
+            for vulnerability in (critical_vulns | old_vulns).distinct().only('uuid', 'vulnerability_id', 'vulnerability_type')
+            if _is_supported_vulnerability_enrichment_target(
+                vulnerability.vulnerability_id,
+                vulnerability.vulnerability_type,
+            )
+        ]
+        total_vulnerabilities = len(vulnerabilities)
         
         logger.info(f"Found {total_vulnerabilities} critical/old vulnerabilities to process")
-        
+
+        if not vulnerabilities:
+            return {
+                "status": "completed",
+                "task_name": "Update Critical Vulnerability Details",
+                "message": "No critical or stale CVEs need updating",
+                "summary": {
+                    "total_vulnerabilities": 0,
+                    "critical_severity_count": critical_vulns.count(),
+                    "old_vulnerabilities_count": old_vulns.count(),
+                    "scheduled_count": 0,
+                    "total_batches": 0,
+                    "batch_size": CRITICAL_ENRICHMENT_BATCH_SIZE,
+                },
+                "timestamp": timezone.now().isoformat(),
+            }
+
         processed_count = 0
-        task_ids = []  # Store task IDs for monitoring
-        
-        # Process in batches for better performance
-        BATCH_SIZE = 50
-        
-        for i in range(0, total_vulnerabilities, BATCH_SIZE):
-            batch = vulnerabilities[i:i + BATCH_SIZE]
-            
-            # Schedule tasks for this batch asynchronously
-            for vulnerability in batch:
-                # Schedule individual task asynchronously - don't wait for result
-                task = update_vulnerability_details.delay(str(vulnerability.uuid))
-                task_ids.append(task.id)
-                processed_count += 1
+        task_ids = []
+        uuid_batches = [
+            [str(vulnerability.uuid) for vulnerability in batch]
+            for batch in _chunked(vulnerabilities, CRITICAL_ENRICHMENT_BATCH_SIZE)
+        ]
+
+        for index, batch in enumerate(uuid_batches, start=1):
+            logger.info(f"Scheduling critical enrichment batch {index}/{len(uuid_batches)} ({len(batch)} vulnerabilities)")
+            task = update_vulnerability_details_bulk.apply_async(
+                args=[batch],
+                kwargs={'batch_size': min(25, len(batch))},
+                task_name="Update Vulnerability Details (Bulk)",
+            )
+            task_ids.append(task.id)
+            processed_count += len(batch)
 
         total_time = time.time() - start_time
         logger.info(f"Critical vulnerability update scheduling completed in {total_time:.2f}s")
@@ -2223,8 +3567,8 @@ def update_critical_vulnerability_details():
         # Calculate summary statistics
         critical_count = critical_vulns.count()
         old_count = old_vulns.count()
-        total_batches = (total_vulnerabilities + BATCH_SIZE - 1) // BATCH_SIZE
-        estimated_completion_time = total_vulnerabilities * 1.5  # Critical vulns are usually faster to process
+        total_batches = len(uuid_batches)
+        estimated_completion_time = total_vulnerabilities * 0.4
         
         # Store task IDs in cache for monitoring (expires in 24 hours)
         cache_key = f"critical_update_tasks_{int(start_time)}"
@@ -2244,13 +3588,13 @@ def update_critical_vulnerability_details():
                 "old_vulnerabilities_count": old_count,
                 "scheduled_count": processed_count,
                 "total_batches": total_batches,
-                "batch_size": BATCH_SIZE,
+                "batch_size": CRITICAL_ENRICHMENT_BATCH_SIZE,
                 "estimated_completion_time_seconds": estimated_completion_time,
                 "estimated_completion_time_formatted": f"{estimated_completion_time // 3600}h {(estimated_completion_time % 3600) // 60}m"
             },
             "processing_time": total_time,
             "processing_time_formatted": f"{total_time:.2f} seconds",
-            "message": f"Critical vulnerability update scheduled: {processed_count} tasks queued for processing",
+            "message": f"Critical vulnerability update scheduled: {len(task_ids)} enrichment batches queued for processing",
             "monitor_key": cache_key,
             "monitoring": {
                 "cache_expires_in": "24 hours",
@@ -2285,11 +3629,13 @@ def cleanup_old_vulnerability_data():
     logger.info("Starting vulnerability data cleanup")
 
     try:
-        # Remove details for vulnerabilities that haven't been updated in 30 days
-        cutoff_date = timezone.now() - timedelta(days=30)
+        # Only delete cached detail records for stale orphaned vulnerabilities.
+        cutoff_date = timezone.now() - timedelta(days=90)
         old_details = VulnerabilityDetails.objects.filter(
             last_updated__lt=cutoff_date
-        )
+        ).annotate(
+            linked_components=Count('vulnerability__component_versions', distinct=True)
+        ).filter(linked_components=0)
         
         deleted_count = old_details.count()
         old_details.delete()
@@ -2298,7 +3644,7 @@ def cleanup_old_vulnerability_data():
         
         # Calculate cleanup statistics
         cutoff_date_formatted = cutoff_date.strftime("%Y-%m-%d")
-        days_threshold = 30
+        days_threshold = 90
         space_saved_estimate = deleted_count * 0.5  # Rough estimate: 0.5 KB per record
         
         return {
@@ -2309,18 +3655,18 @@ def cleanup_old_vulnerability_data():
                 "cutoff_date": cutoff_date_formatted,
                 "days_threshold": days_threshold,
                 "space_saved_kb": round(space_saved_estimate, 2),
-                "cleanup_type": "old_vulnerability_details"
+                "cleanup_type": "old_orphaned_vulnerability_details"
             },
-            "message": f"Cleanup completed: {deleted_count} old vulnerability detail records removed",
+            "message": f"Cleanup completed: {deleted_count} stale orphaned vulnerability detail records removed",
             "details": {
-                "cutoff_criteria": f"Records older than {days_threshold} days",
+                "cutoff_criteria": f"Orphaned records older than {days_threshold} days",
                 "cutoff_timestamp": cutoff_date.isoformat(),
                 "cleanup_timestamp": timezone.now().isoformat()
             },
             "maintenance": {
                 "frequency": "weekly",
                 "next_recommended_run": (timezone.now() + timedelta(days=7)).isoformat(),
-                "note": "This task helps maintain database performance by removing outdated data"
+                "note": "This task helps maintain database performance without deleting useful cached enrichment data"
             },
             "timestamp": timezone.now().isoformat()
         }
@@ -2345,11 +3691,56 @@ def update_vulnerability_details_bulk(vulnerability_uuids: List[str], batch_size
     start_time = time.time()
     
     try:
-        # Get vulnerabilities with select_related to optimize queries
-        vulnerabilities = Vulnerability.objects.filter(uuid__in=vulnerability_uuids).select_related()
-        total_count = vulnerabilities.count()
+        from .models import Vulnerability, VulnerabilityDetails
+        from .utils.vulnerability_sources import collect_vulnerability_data_bulk
+
+        ordered_uuid_strings = list(dict.fromkeys(str(vulnerability_uuid) for vulnerability_uuid in vulnerability_uuids))
+        vulnerabilities_by_uuid = {
+            str(vulnerability.uuid): vulnerability
+            for vulnerability in Vulnerability.objects.filter(uuid__in=ordered_uuid_strings).only(
+                'uuid',
+                'vulnerability_id',
+                'vulnerability_type',
+                'epss',
+                'updated_at',
+            )
+        }
+        vulnerabilities = [
+            vulnerabilities_by_uuid[uuid_string]
+            for uuid_string in ordered_uuid_strings
+            if uuid_string in vulnerabilities_by_uuid
+        ]
+        supported_vulnerabilities = [
+            vulnerability for vulnerability in vulnerabilities
+            if _is_supported_vulnerability_enrichment_target(
+                vulnerability.vulnerability_id,
+                vulnerability.vulnerability_type,
+            )
+        ]
+        skipped_count = len(vulnerabilities) - len(supported_vulnerabilities)
+        total_count = len(supported_vulnerabilities)
         
         logger.info(f"Starting bulk update for {total_count} vulnerabilities")
+        if not supported_vulnerabilities:
+            return {
+                'status': 'completed',
+                'task_name': 'Update Vulnerability Details (Bulk)',
+                'summary': {
+                    'total_vulnerabilities': 0,
+                    'processed_count': 0,
+                    'success_count': 0,
+                    'error_count': 0,
+                    'skipped_count': skipped_count,
+                    'success_rate': "0.0%",
+                    'error_rate': "0.0%",
+                    'total_batches': 0,
+                    'batch_size': batch_size
+                },
+                'processing_time': time.time() - start_time,
+                'processing_time_formatted': f"{time.time() - start_time:.2f} seconds",
+                'message': 'No supported CVE identifiers were supplied for enrichment',
+                'timestamp': timezone.now().isoformat()
+            }
         
         processed_count = 0
         success_count = 0
@@ -2357,84 +3748,96 @@ def update_vulnerability_details_bulk(vulnerability_uuids: List[str], batch_size
         
         # Process in batches
         for i in range(0, total_count, batch_size):
-            batch_vulnerabilities = vulnerabilities[i:i + batch_size]
+            batch_vulnerabilities = supported_vulnerabilities[i:i + batch_size]
             batch_cve_ids = [v.vulnerability_id for v in batch_vulnerabilities]
             
             logger.info(f"Processing batch {i//batch_size + 1}: {len(batch_cve_ids)} vulnerabilities")
             
             try:
-                # Collect data in bulk using optimized collector
-                from .utils.vulnerability_sources import collect_vulnerability_data_bulk
                 bulk_data = collect_vulnerability_data_bulk(batch_cve_ids)
+                batch_vulnerability_ids = [v.pk for v in batch_vulnerabilities]
+                details_by_vulnerability_id = {
+                    detail.vulnerability_id: detail
+                    for detail in VulnerabilityDetails.objects.filter(
+                        vulnerability_id__in=batch_vulnerability_ids
+                    ).select_related('vulnerability')
+                }
+
+                missing_details = [
+                    VulnerabilityDetails(vulnerability=vulnerability, data_source='manual')
+                    for vulnerability in batch_vulnerabilities
+                    if vulnerability.pk not in details_by_vulnerability_id
+                ]
+                if missing_details:
+                    VulnerabilityDetails.objects.bulk_create(
+                        missing_details,
+                        ignore_conflicts=True,
+                    )
+                    details_by_vulnerability_id = {
+                        detail.vulnerability_id: detail
+                        for detail in VulnerabilityDetails.objects.filter(
+                            vulnerability_id__in=batch_vulnerability_ids
+                        ).select_related('vulnerability')
+                    }
                 
                 # Update database with transaction for atomicity
                 with transaction.atomic():
+                    details_to_update = []
+                    update_fields_set = {'data_source', 'last_updated'}
+                    vulnerabilities_to_update = []
+                    vulnerability_update_fields = {'epss', 'updated_at'}
+                    now = timezone.now()
+
                     for vulnerability in batch_vulnerabilities:
                         try:
                             cve_details, exploit_info = bulk_data.get(vulnerability.vulnerability_id, (None, None))
-                            
-                            # Use get_or_create to avoid race conditions
-                            details, created = VulnerabilityDetails.objects.get_or_create(
-                                vulnerability=vulnerability,
-                                defaults={
-                                    'data_source': 'manual'
-                                }
-                            )
-                            
-                            # Determine data source
-                            data_sources = []
-                            if cve_details:
-                                # Check if EPSS data was collected
-                                if cve_details.get('epss_data_source'):
-                                    data_sources.append(cve_details['epss_data_source'])
-                                data_sources.append('CVE-CIRCL')
-                            if exploit_info:
-                                # Check CISA KEV
-                                if exploit_info.get('cisa_kev_known_exploited'):
-                                    data_sources.append('CISA-KEV')
-                                
-                                # Check Exploit-DB (separate tracking)
-                                if exploit_info.get('exploit_db_available'):
-                                    data_sources.append('Exploit-DB')
-                                
-                                # Check NVD (for reference links)
-                                if any('nvd' in link for link in exploit_info.get('exploit_links', [])):
-                                    data_sources.append('NVD')
-                            
-                            data_source_str = ' + '.join(data_sources) if data_sources else 'manual'
-                            
-                            # Update CVE details if available
+                            details = details_by_vulnerability_id.get(vulnerability.pk)
+                            if details is None:
+                                raise ValueError(
+                                    f"Missing VulnerabilityDetails row for {vulnerability.vulnerability_id}"
+                                )
+
                             if cve_details:
                                 for field, value in cve_details.items():
-                                    if value is not None:
-                                        # Handle EPSS fields specifically
-                                        if field.startswith('epss_'):
-                                            setattr(details, field, value)
-                                        else:
-                                            # Handle other CVE fields
-                                            setattr(details, field, value)
+                                    if value is not None and hasattr(details, field):
+                                        setattr(details, field, value)
+                                        update_fields_set.add(field)
                             
-                            # Update exploit information if available
                             if exploit_info:
                                 for field, value in exploit_info.items():
-                                    if value is not None:
+                                    if value is not None and hasattr(details, field):
                                         setattr(details, field, value)
-                            
-                            # Update data source
-                            details.data_source = data_source_str
-                            details.last_updated = timezone.now()
-                            details.save()
-                            
+                                        update_fields_set.add(field)
+
+                            data_sources = _build_vulnerability_data_sources(cve_details, exploit_info)
+                            details.data_source = ' + '.join(data_sources) if data_sources else 'manual'
+                            details.last_updated = now
+                            details_to_update.append(details)
+
+                            if details.epss_score is not None and vulnerability.epss != details.epss_score:
+                                vulnerability.epss = details.epss_score
+                                vulnerability.updated_at = now
+                                vulnerabilities_to_update.append(vulnerability)
                             success_count += 1
                             
                         except Exception as e:
                             logger.error(f"Error updating vulnerability {vulnerability.vulnerability_id}: {str(e)}")
                             error_count += 1
+
+                    if details_to_update:
+                        VulnerabilityDetails.objects.bulk_update(
+                            details_to_update,
+                            list(update_fields_set),
+                            batch_size=200
+                        )
+                    if vulnerabilities_to_update:
+                        Vulnerability.objects.bulk_update(
+                            vulnerabilities_to_update,
+                            list(vulnerability_update_fields),
+                            batch_size=200,
+                        )
                 
                 processed_count += len(batch_vulnerabilities)
-                
-                # Rate limiting between batches (reduced for better performance)
-                time.sleep(1)
                 
             except Exception as e:
                 logger.error(f"Error processing batch {i//batch_size + 1}: {str(e)}")
@@ -2456,6 +3859,7 @@ def update_vulnerability_details_bulk(vulnerability_uuids: List[str], batch_size
                 'processed_count': processed_count,
                 'success_count': success_count,
                 'error_count': error_count,
+                'skipped_count': skipped_count,
                 'success_rate': f"{success_rate:.1f}%",
                 'error_rate': f"{error_rate:.1f}%",
                 'total_batches': total_batches,
@@ -2688,10 +4092,16 @@ def update_cisa_kev_vulnerabilities():
         
         collector = VulnerabilityDataCollector()
         
-        # Get all vulnerabilities
-        all_vulnerabilities = Vulnerability.objects.all()
-        all_cve_ids = list(all_vulnerabilities.values_list('vulnerability_id', flat=True))
-        
+        all_vulnerabilities = Vulnerability.objects.only('uuid', 'vulnerability_id', 'vulnerability_type')
+        cve_vulnerabilities = [
+            vulnerability for vulnerability in all_vulnerabilities
+            if _is_supported_vulnerability_enrichment_target(
+                vulnerability.vulnerability_id,
+                vulnerability.vulnerability_type,
+            )
+        ]
+        all_cve_ids = [vulnerability.vulnerability_id for vulnerability in cve_vulnerabilities]
+
         logger.info(f"Checking {len(all_cve_ids)} vulnerabilities against CISA KEV")
         
         # Check which CVEs are in CISA KEV
@@ -2718,8 +4128,11 @@ def update_cisa_kev_vulnerabilities():
             }
         
         # Get UUIDs for KEV vulnerabilities
-        kev_vulnerabilities = Vulnerability.objects.filter(vulnerability_id__in=kev_cve_ids)
-        vulnerability_uuids = list(kev_vulnerabilities.values_list('uuid', flat=True))
+        kev_vulnerabilities = [
+            vulnerability for vulnerability in cve_vulnerabilities
+            if vulnerability.vulnerability_id in kev_cve_ids
+        ]
+        vulnerability_uuids = [str(vulnerability.uuid) for vulnerability in kev_vulnerabilities]
         
         logger.info(f"Found {len(vulnerability_uuids)} vulnerabilities in CISA KEV")
         
@@ -2887,161 +4300,166 @@ def update_all_components_latest_versions():
     - Processes in batches of 50 components
     """
     from .models import ComponentVersion
-    import time
-    import requests
-    import subprocess
-    from packaging.version import parse as parse_version
-    from django.utils import timezone
-    from datetime import timedelta
+    return _run_bulk_component_latest_version_update(
+        ComponentVersion.objects.all(),
+        task_name="Update All Components Latest Versions",
+        skip_recent_days=30,
+        batch_size=50,
+    )
 
-    logger.info("Starting latest versions update for all components")
+
+@celery_app.task(name="Update Deb Components Latest Versions")
+def update_deb_components_latest_versions():
+    """
+    Update latest versions only for deb packages already stored in the database.
+    This is useful when backfilling distro-aware latest-version data.
+    """
+    from .models import ComponentVersion
+
+    return _run_bulk_component_latest_version_update(
+        ComponentVersion.objects.filter(component__type='deb'),
+        task_name="Update Deb Components Latest Versions",
+        skip_recent_days=30,
+        batch_size=50,
+    )
+
+
+@celery_app.task(name="Recalculate Vulnerability Fix Availability")
+def recalculate_vulnerability_fix_availability():
+    """
+    Recalculate fix availability metadata for existing vulnerabilities using stored Grype data.
+    This updates current DB rows without rescanning images.
+    """
+    from .models import Image, ComponentVersionVulnerability
+
+    logger.info("Starting vulnerability fix availability recalculation")
     start_time = time.time()
 
+    images_processed = 0
+    images_with_matches = 0
+    images_without_grype_matches = 0
+    findings_seen = 0
+    duplicate_matches_skipped = 0
+    unmatched_findings = 0
+    cvvs_updated = 0
+
     try:
-        # Get all component versions that need updating
-        now = timezone.now()
-        # Skip components updated within the last 30 days (month)
-        cutoff_date = now - timedelta(days=30)
-        
-        component_versions = ComponentVersion.objects.filter(
-            purl__isnull=False
-        ).exclude(
-            latest_version_updated_at__gte=cutoff_date
-        )
-        
-        total_count = component_versions.count()
-        logger.info(f"Found {total_count} component versions to process (skipping components updated within last 30 days)")
-        
-        # Process in batches to avoid memory issues and improve performance
-        BATCH_SIZE = 50  # Reduced batch size for better memory management
-        updated_count = 0
-        skipped_count = 0
-        error_count = 0
-        
-        for i in range(0, total_count, BATCH_SIZE):
-            batch = component_versions[i:i + BATCH_SIZE]
-            batch_start_time = time.time()
-            current_batch = i//BATCH_SIZE + 1
-            total_batches = (total_count + BATCH_SIZE - 1)//BATCH_SIZE
-            
-            logger.info(f"Processing batch {current_batch}/{total_batches} ({len(batch)} components)")
-            
-            for component_version in batch:
-                try:
-                    if not component_version.purl:
-                        skipped_count += 1
-                        continue
-                    
-                    # Skip if already updated recently (double-check)
-                    if (component_version.latest_version_updated_at and 
-                        (now - component_version.latest_version_updated_at).days < 30):
-                        skipped_count += 1
-                        continue
-                    
-                    if DEBUG_LOGGING:
-                        logger.debug(f"Processing component version {component_version.component.name}:{component_version.version}")
-                    parts = component_version.purl.split("/")
-                    if len(parts) < 2:
-                        skipped_count += 1
-                        continue
-                    
-                    package_type = parts[0].split(":")[1] if ":" in parts[0] else None
-                    if not package_type:
-                        skipped_count += 1
-                        continue
-                    
-                    package_name = parts[1].lower()
-                    if len(parts) < 2:
-                        package_name = f"{package_name}/{parts[2].lower()}"
-                    if "@" in package_name:
-                        package_name = package_name.split("@")[0]
-                    
-                    if DEBUG_LOGGING:
-                        logger.debug(f"Processing PURL: {component_version.purl}")
-                        logger.debug(f"Package type: {package_type}, Package name: {package_name}")
-                    
-                    latest_version = None
-                    if package_type == "pypi":
-                        url = f"https://pypi.org/pypi/{package_name}/json"
-                        r = requests.get(url, timeout=5)
-                        if r.ok:
-                            latest_version = r.json()["info"]["version"]
-                    elif package_type == "npm":
-                        url = f"https://registry.npmjs.org/{package_name}"
-                        r = requests.get(url, timeout=5)
-                        if r.ok:
-                            latest_version = r.json()["dist-tags"]["latest"]
-                    elif package_type == "nuget":
-                        url = f"https://api.nuget.org/v3-flatcontainer/{package_name}/index.json"
-                        r = requests.get(url, timeout=5)
-                        if r.ok:
-                            versions = r.json().get("versions", [])
-                            latest_version = versions[-1] if versions else None
-                    elif package_type == "deb":
-                        try:
-                            output = subprocess.check_output(["apt-cache", "policy", package_name], text=True, timeout=5)
-                            for line in output.splitlines():
-                                if "Candidate:" in line:
-                                    latest_version = line.split(":")[1].strip()
-                                    break
-                        except Exception:
-                            continue
-                    elif package_type == "golang":
-                        if package_name == "stdlib":
-                            url = "https://golang.org/dl/?mode=json"
-                            r = requests.get(url, timeout=5)
-                            if r.ok:
-                                versions = r.json()
-                                stable_versions = [v['version'] for v in versions if not v['version'].endswith('beta') and not v['version'].endswith('rc')]
-                                if stable_versions:
-                                    latest_version = max(stable_versions).replace('go', '')
-                        else:
-                            url = f"https://proxy.golang.org/{package_name}/@latest"
-                            r = requests.get(url, timeout=5)
-                            if r.ok:
-                                data = r.json()
-                                latest_version = data.get('Version', '').replace('v', '')
-                    
-                    if latest_version:
-                        component_version.latest_version = latest_version
-                        component_version.latest_version_updated_at = now
-                        component_version.save()
-                        updated_count += 1
-                        logger.info(
-                            f"Updated latest version for {component_version.component.name}:{component_version.version} to {latest_version}"
-                        )
-                    else:
-                        skipped_count += 1
-                        
-                except Exception as e:
-                    error_count += 1
-                    logger.error(
-                        f"Error processing component version {component_version.component.name}:{component_version.version}: {str(e)}"
-                    )
+        images_qs = Image.objects.filter(grype_data__isnull=False).only('pk', 'uuid', 'grype_data')
+        total_images = images_qs.count()
+
+        for image in images_qs.iterator(chunk_size=50):
+            images_processed += 1
+            grype_data = image.grype_data if isinstance(image.grype_data, dict) else {}
+            matches = grype_data.get('matches', [])
+            if not isinstance(matches, list) or not matches:
+                images_without_grype_matches += 1
+                continue
+
+            images_with_matches += 1
+
+            component_names = set()
+            component_versions = set()
+            vulnerability_ids = set()
+
+            for match in matches:
+                artifact = match.get('artifact', {}) if isinstance(match, dict) else {}
+                vulnerability_data = match.get('vulnerability', {}) if isinstance(match, dict) else {}
+                component_name = artifact.get('name')
+                component_version = artifact.get('version')
+                vulnerability_id = vulnerability_data.get('id')
+
+                if component_name:
+                    component_names.add(component_name)
+                if component_name and component_version:
+                    component_versions.add(component_version)
+                if vulnerability_id:
+                    vulnerability_ids.add(vulnerability_id)
+
+            cvv_rows = ComponentVersionVulnerability.objects.filter(
+                component_version__images=image,
+                component_version__component__name__in=component_names,
+                component_version__version__in=component_versions,
+                vulnerability__vulnerability_id__in=vulnerability_ids,
+            ).select_related('component_version', 'component_version__component', 'vulnerability')
+
+            cvv_map = {
+                (
+                    cvv.component_version.component.name,
+                    cvv.component_version.version,
+                    cvv.vulnerability.vulnerability_id,
+                ): cvv
+                for cvv in cvv_rows
+            }
+
+            processed_keys = set()
+            cvvs_to_update = []
+            update_timestamp = timezone.now()
+
+            for match in matches:
+                artifact = match.get('artifact', {}) if isinstance(match, dict) else {}
+                vulnerability_data = match.get('vulnerability', {}) if isinstance(match, dict) else {}
+                component_name = artifact.get('name')
+                component_version = artifact.get('version')
+                vulnerability_id = vulnerability_data.get('id')
+
+                if not component_name or not component_version or not vulnerability_id:
                     continue
-            
-            # Log batch completion
-            batch_time = time.time() - batch_start_time
-            logger.info(f"Completed batch {current_batch}/{total_batches} in {batch_time:.2f}s")
-        
+
+                findings_seen += 1
+                key = (component_name, component_version, vulnerability_id)
+                if key in processed_keys:
+                    duplicate_matches_skipped += 1
+                    continue
+                processed_keys.add(key)
+
+                cvv = cvv_map.get(key)
+                if not cvv:
+                    unmatched_findings += 1
+                    continue
+
+                fix_metadata = _determine_fix_metadata(cvv.component_version, vulnerability_data)
+
+                updated = False
+                for field_name, field_value in fix_metadata.items():
+                    if getattr(cvv, field_name) != field_value:
+                        setattr(cvv, field_name, field_value)
+                        updated = True
+
+                if updated:
+                    cvv.updated_at = update_timestamp
+                    cvvs_to_update.append(cvv)
+
+            if cvvs_to_update:
+                ComponentVersionVulnerability.objects.bulk_update(
+                    cvvs_to_update,
+                    ['fixable', 'fix', 'fix_state', 'fix_status', 'fix_versions', 'updated_at'],
+                    batch_size=200,
+                )
+                cvvs_updated += len(cvvs_to_update)
+
         total_time = time.time() - start_time
-        logger.info(f"All components latest versions update completed in {total_time:.2f} seconds")
-        logger.info(f"Updated: {updated_count}, Skipped: {skipped_count}, Errors: {error_count}")
+        logger.info("Completed vulnerability fix availability recalculation")
 
         return {
             "status": "success",
-            "task_name": "Update All Components Latest Versions",
-            "total_processed": total_count,
-            "updated_count": updated_count,
-            "skipped_count": skipped_count,
-            "error_count": error_count,
-            "processing_time": total_time
+            "task_name": "Recalculate Vulnerability Fix Availability",
+            "summary": {
+                "total_images_seen": total_images,
+                "images_processed": images_processed,
+                "images_with_grype_matches": images_with_matches,
+                "images_without_grype_matches": images_without_grype_matches,
+                "findings_seen": findings_seen,
+                "duplicate_matches_skipped": duplicate_matches_skipped,
+                "unmatched_findings": unmatched_findings,
+                "cvvs_updated": cvvs_updated,
+            },
+            "processing_time": total_time,
         }
-
     except Exception as e:
-        logger.error(f"Error updating all components latest versions: {str(e)}")
+        logger.error(f"Error recalculating vulnerability fix availability: {str(e)}")
         return {
             "status": "error",
-            "task_name": "Update All Components Latest Versions",
-            "error": str(e)
+            "task_name": "Recalculate Vulnerability Fix Availability",
+            "error": str(e),
+            "error_type": type(e).__name__,
         }

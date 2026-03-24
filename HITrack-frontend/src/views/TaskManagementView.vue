@@ -1,6 +1,6 @@
 <template>
   <div class="task-management">
-    <v-container fluid>
+    <v-container fluid class="page-shell page-shell--wide">
     <v-row>
       <v-col cols="12">
         <div class="d-flex align-center justify-space-between mb-4">
@@ -71,7 +71,7 @@
             </v-row>
             
             <v-row class="mt-4">
-              <v-col cols="12" md="6">
+              <v-col cols="12" md="3">
                 <v-btn
                   block
                   color="primary"
@@ -84,7 +84,33 @@
                   Update All Components Latest Versions
                 </v-btn>
               </v-col>
-              <v-col cols="12" md="6">
+              <v-col cols="12" md="3">
+                <v-btn
+                  block
+                  color="indigo"
+                  prepend-icon="mdi-package-variant-closed"
+                  @click="updateDebComponentsLatestVersions"
+                  :loading="updateDebComponentsLoading"
+                  size="large"
+                  class="action-btn"
+                >
+                  Update Deb Latest Versions
+                </v-btn>
+              </v-col>
+              <v-col cols="12" md="3">
+                <v-btn
+                  block
+                  color="deep-orange"
+                  prepend-icon="mdi-wrench-check"
+                  @click="recalculateVulnerabilityFixAvailability"
+                  :loading="recalculateFixAvailabilityLoading"
+                  size="large"
+                  class="action-btn"
+                >
+                  Recalculate Fix Availability
+                </v-btn>
+              </v-col>
+              <v-col cols="12" md="3">
                 <v-btn
                   block
                   color="secondary"
@@ -389,7 +415,7 @@
 </template>
 
 <script lang="ts">
-import { defineComponent, ref, reactive, onMounted, watch } from 'vue'
+import { defineComponent, ref, reactive, onMounted, onUnmounted, watch, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '@/plugins/axios'
 import type { TaskResult, TaskStatistics, PeriodicTask } from '@/types/interfaces'
@@ -406,6 +432,8 @@ export default defineComponent({
     const failingTaskLoading = ref(false)
     const testEndpointLoading = ref(false)
     const updateComponentsLoading = ref(false)
+    const updateDebComponentsLoading = ref(false)
+    const recalculateFixAvailabilityLoading = ref(false)
     const stoppingTasks = ref<string[]>([])
     const tasks = ref<TaskResult[]>([])
     const periodicTasks = ref<PeriodicTask[]>([])
@@ -421,6 +449,10 @@ export default defineComponent({
     const search = ref('')
     const taskDetailsDialog = ref(false)
     const selectedTask = ref<TaskResult | null>(null)
+    const hasActiveTasks = computed(() =>
+      tasks.value.some(task => ['pending', 'in_process'].includes(task.status))
+    )
+    let refreshTimer: number | null = null
     
     const options = ref({
       page: 1,
@@ -501,13 +533,50 @@ export default defineComponent({
       }
     }
 
+    const startAutoRefresh = () => {
+      if (refreshTimer !== null) return
+      refreshTimer = window.setInterval(() => {
+        if (!loading.value) {
+          loadTasks()
+          loadStatistics()
+        }
+      }, 5000)
+    }
+
+    const stopAutoRefresh = () => {
+      if (refreshTimer === null) return
+      window.clearInterval(refreshTimer)
+      refreshTimer = null
+    }
+
+    const upsertPendingTask = (taskId: string, taskName: string) => {
+      if (!taskId) return
+
+      const pendingTask: TaskResult = {
+        task_id: taskId,
+        task_name: taskName,
+        status: 'pending',
+        created: new Date().toISOString(),
+      }
+
+      const existingIndex = tasks.value.findIndex(task => task.task_id === taskId)
+      if (existingIndex >= 0) {
+        tasks.value.splice(existingIndex, 1, { ...tasks.value[existingIndex], ...pendingTask })
+        return
+      }
+
+      tasks.value = [pendingTask, ...tasks.value].slice(0, options.value.itemsPerPage || 10)
+      totalTasks.value += 1
+    }
+
     const runTestTask = async () => {
       testTaskLoading.value = true
       try {
-        await api.post('/test-tasks/run_test_task/')
-        await loadTasks()
-        await loadStatistics()
-        notificationService.success('Test task started successfully')
+        const response = await api.post('/test-tasks/run_test_task/')
+        if (response.data?.task_id) {
+          upsertPendingTask(response.data.task_id, 'Test Task')
+        }
+        notificationService.started('Test task started.')
       } catch (error) {
         console.error('Error running test task:', error)
         notificationService.error(`Failed to start test task: ${error}`)
@@ -519,11 +588,14 @@ export default defineComponent({
     const runFailingTask = async () => {
       failingTaskLoading.value = true
       try {
-        await api.post('/test-tasks/run_failing_task/')
-        await loadTasks()
-        await loadStatistics()
+        const response = await api.post('/test-tasks/run_failing_task/')
+        if (response.data?.task_id) {
+          upsertPendingTask(response.data.task_id, 'Test Failing Task')
+        }
+        notificationService.started('Failing test task started.')
       } catch (error) {
         console.error('Error running failing task:', error)
+        notificationService.error(`Failed to start failing task: ${error}`)
       } finally {
         failingTaskLoading.value = false
       }
@@ -551,18 +623,48 @@ export default defineComponent({
     const updateAllComponentsLatestVersions = async () => {
       updateComponentsLoading.value = true
       try {
-        await api.post('/test-tasks/update_all_components_latest_versions/')
-        notificationService.success('Update all components task started successfully')
-        // Reload tasks after a short delay
-        setTimeout(async () => {
-          await loadTasks()
-          await loadStatistics()
-        }, 3000)
+        const response = await api.post('/test-tasks/update_all_components_latest_versions/')
+        if (response.data?.task_id) {
+          upsertPendingTask(response.data.task_id, 'Update All Components Latest Versions')
+        }
+        notificationService.started('Update all components task started.')
       } catch (error) {
         console.error('Error updating all components latest versions:', error)
         notificationService.error(`Failed to start update task: ${error}`)
       } finally {
         updateComponentsLoading.value = false
+      }
+    }
+
+    const updateDebComponentsLatestVersions = async () => {
+      updateDebComponentsLoading.value = true
+      try {
+        const response = await api.post('/test-tasks/update_deb_components_latest_versions/')
+        if (response.data?.task_id) {
+          upsertPendingTask(response.data.task_id, 'Update Deb Components Latest Versions')
+        }
+        notificationService.started('Update deb components task started.')
+      } catch (error) {
+        console.error('Error updating deb components latest versions:', error)
+        notificationService.error(`Failed to start deb update task: ${error}`)
+      } finally {
+        updateDebComponentsLoading.value = false
+      }
+    }
+
+    const recalculateVulnerabilityFixAvailability = async () => {
+      recalculateFixAvailabilityLoading.value = true
+      try {
+        const response = await api.post('/test-tasks/recalculate_vulnerability_fix_availability/')
+        if (response.data?.task_id) {
+          upsertPendingTask(response.data.task_id, 'Recalculate Vulnerability Fix Availability')
+        }
+        notificationService.started('Fix availability recalculation task started.')
+      } catch (error) {
+        console.error('Error recalculating vulnerability fix availability:', error)
+        notificationService.error(`Failed to start fix availability recalculation: ${error}`)
+      } finally {
+        recalculateFixAvailabilityLoading.value = false
       }
     }
 
@@ -573,10 +675,11 @@ export default defineComponent({
 
     const retryTask = async (task: TaskResult) => {
       try {
-        await api.post(`/tasks/${task.task_id}/retry_task/`)
-        await loadTasks()
-        await loadStatistics()
-        notificationService.success(`Task "${task.task_name}" retry initiated`)
+        const response = await api.post(`/tasks/${task.task_id}/retry_task/`)
+        if (response.data?.new_task_id) {
+          upsertPendingTask(response.data.new_task_id, task.task_name)
+        }
+        notificationService.queued(`Task "${task.task_name}" retry was queued.`)
       } catch (error) {
         console.error('Error retrying task:', error)
         notificationService.error(`Failed to retry task "${task.task_name}": ${error}`)
@@ -587,9 +690,11 @@ export default defineComponent({
       stoppingTasks.value.push(task.task_id)
       try {
         await api.post(`/tasks/${task.task_id}/stop_task/`)
-        await loadTasks()
-        await loadStatistics()
-        notificationService.success(`Task "${task.task_name}" stopped successfully`)
+        const existingTask = tasks.value.find(item => item.task_id === task.task_id)
+        if (existingTask) {
+          existingTask.status = 'revoked'
+        }
+        notificationService.completed(`Task "${task.task_name}" was stopped.`)
       } catch (error) {
         console.error('Error stopping task:', error)
         notificationService.error(`Failed to stop task "${task.task_name}": ${error}`)
@@ -607,6 +712,8 @@ export default defineComponent({
           return 'success'
         case 'error':
           return 'error'
+        case 'revoked':
+          return 'secondary'
         case 'pending':
           return 'warning'
         case 'in_process':
@@ -623,6 +730,7 @@ export default defineComponent({
       if (taskName.includes('Test Direct API')) return 'mdi-api'
       if (taskName.includes('Scan')) return 'mdi-magnify'
       if (taskName.includes('Update')) return 'mdi-update'
+      if (taskName.includes('Recalculate')) return 'mdi-wrench-check'
       if (taskName.includes('Process')) return 'mdi-cog'
       if (taskName.includes('Parse')) return 'mdi-file-document'
       if (taskName.includes('Delete')) return 'mdi-delete'
@@ -643,10 +751,15 @@ export default defineComponent({
 
     const runPeriodicTaskNow = async (task: PeriodicTask) => {
       try {
-        await api.post(`/periodic-tasks/${task.id}/run_now/`)
+        const response = await api.post(`/periodic-tasks/${task.id}/run_now/`)
+        if (response.data?.task_id) {
+          upsertPendingTask(response.data.task_id, task.name || task.task)
+        }
         await loadPeriodicTasks()
+        notificationService.started(`Periodic task "${task.name}" started.`)
       } catch (error) {
         console.error('Error running periodic task now:', error)
+        notificationService.error(`Failed to run periodic task "${task.name}"`)
       }
     }
 
@@ -659,10 +772,20 @@ export default defineComponent({
       loadTasks()
     }, { deep: true })
 
+    watch(hasActiveTasks, (isActive) => {
+      if (isActive) {
+        startAutoRefresh()
+      } else {
+        stopAutoRefresh()
+      }
+    }, { immediate: true })
+
     onMounted(() => {
-      loadTasks()
-      loadStatistics()
-      loadPeriodicTasks()
+      Promise.all([loadTasks(), loadStatistics(), loadPeriodicTasks()])
+    })
+
+    onUnmounted(() => {
+      stopAutoRefresh()
     })
 
 
@@ -676,6 +799,8 @@ export default defineComponent({
           failingTaskLoading,
           testEndpointLoading,
           updateComponentsLoading,
+          updateDebComponentsLoading,
+          recalculateFixAvailabilityLoading,
           stoppingTasks,
           tasks,
           periodicTasks,
@@ -683,6 +808,7 @@ export default defineComponent({
           search,
           taskDetailsDialog,
           selectedTask,
+          hasActiveTasks,
           options,
           totalTasks,
           headers,
@@ -695,6 +821,8 @@ export default defineComponent({
           testEndpoint,
           testDirectAPI,
           updateAllComponentsLatestVersions,
+          updateDebComponentsLatestVersions,
+          recalculateVulnerabilityFixAvailability,
           viewTaskDetails,
           retryTask,
           stopTask,

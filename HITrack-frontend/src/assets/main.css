@@ -45,6 +45,46 @@ body {
   background-color: #ffffff !important;
 }
 
+/* Shared page shell utilities for dense data views */
+.v-container.page-shell {
+  width: 100%;
+  margin-left: auto;
+  margin-right: auto;
+  padding-left: clamp(16px, 2vw, 32px) !important;
+  padding-right: clamp(16px, 2vw, 32px) !important;
+}
+
+.v-container.page-shell--wide {
+  max-width: min(1880px, calc(100vw - 32px)) !important;
+}
+
+.page-shell--wide .v-data-table,
+.page-shell--wide .v-data-table-server,
+.page-shell--wide .v-table {
+  width: 100%;
+}
+
+.page-shell--wide .v-table__wrapper,
+.page-shell--wide .v-data-table__wrapper {
+  overflow-x: auto;
+}
+
+.page-shell--wide .v-table__wrapper > table,
+.page-shell--wide .v-data-table__wrapper > table {
+  width: 100%;
+}
+
+@media (max-width: 960px) {
+  .v-container.page-shell--wide {
+    max-width: calc(100vw - 16px) !important;
+  }
+
+  .v-container.page-shell {
+    padding-left: 12px !important;
+    padding-right: 12px !important;
+  }
+}
+
 /* Matrix theme - only main containers should have black background */
 .v-theme--matrix .v-main {
   background-color: #000000 !important;

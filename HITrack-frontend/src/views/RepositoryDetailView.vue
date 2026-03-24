@@ -1,5 +1,5 @@
 <template>
-  <v-container>
+  <v-container fluid class="page-shell page-shell--wide">
     <v-row>
       <v-col cols="12">
         <v-btn variant="text" @click="goBack" class="mb-2">
@@ -18,6 +18,43 @@
           <v-chip class="mr-2">Tags: {{ repository?.tag_count }}</v-chip>
           <v-chip class="mr-2">URL: {{ repository?.url }}</v-chip>
         </div>
+        <!-- Helm: Image fallback Docker repositories (when chart image refs fail) -->
+        <v-row v-if="repository?.repository_type === 'helm'" class="mt-4">
+          <v-col cols="12">
+            <v-card variant="outlined" class="pa-4">
+              <v-card-title class="text-subtitle-1 font-weight-bold pb-2">
+                Image fallback repositories
+              </v-card-title>
+              <v-card-subtitle class="text-caption pb-3">
+                When chart image refs fail to resolve, try these Docker repositories to download the same image.
+              </v-card-subtitle>
+              <v-select
+                v-model="selectedFallbackRepoUuids"
+                :items="dockerReposForFallback"
+                item-title="name"
+                item-value="uuid"
+                label="Docker repositories"
+                multiple
+                chips
+                closable-chips
+                density="comfortable"
+                variant="outlined"
+                hide-details
+                class="mb-3"
+                :loading="dockerReposLoading"
+              />
+              <v-btn
+                color="primary"
+                size="small"
+                :loading="savingFallback"
+                :disabled="savingFallback || fallbackUnchanged"
+                @click="saveFallbackRepositories"
+              >
+                Save fallback list
+              </v-btn>
+            </v-card>
+          </v-col>
+        </v-row>
       </v-col>
     </v-row>
     <v-row>
@@ -107,7 +144,7 @@
                   color="primary"
                   :disabled="isScanDisabled()"
                   :loading="scanning"
-                  @click="onScanRepository"
+                  @click="openScanDialog"
                   class="ml-2"
                 />
               </div>
@@ -133,14 +170,15 @@
           :page="tagsPage"
           :server-items-length="tagsTotal"
           hide-default-footer
+          class="tag-table"
           item-class="clickable-row"
           @click:row="onTagRowClick"
           @update:sort-by="onSortChange"
         >
           <template #item.tag="{ item }">
-            <div class="d-flex align-center">
-              <span class="font-weight-medium">{{ item.tag }}</span>
-              <div v-if="item.releases && item.releases.length > 0" class="ml-2 d-flex gap-1">
+            <div class="tag-label-cell">
+              <span class="font-weight-medium tag-value">{{ item.tag }}</span>
+              <div v-if="item.releases && item.releases.length > 0" class="tag-release-list">
                 <v-chip
                   v-for="release in item.releases"
                   :key="release.uuid"
@@ -152,6 +190,50 @@
                   {{ release.name }}
                 </v-chip>
               </div>
+            </div>
+          </template>
+          <template #item.name="{ item }">
+            <div class="tag-images-cell">
+              <div v-if="getTagImageCount(item)" class="tag-images-meta">
+                <v-chip
+                  size="x-small"
+                  color="secondary"
+                  variant="tonal"
+                  class="tag-images-count"
+                >
+                  {{ getTagImageCount(item) }} image{{ getTagImageCount(item) === 1 ? '' : 's' }}
+                </v-chip>
+              </div>
+              <div v-if="getTagImageCount(item)" class="tag-images-list">
+                <v-tooltip
+                  v-for="entry in getVisibleTagImageEntries(item)"
+                  :key="entry.label"
+                  location="top"
+                >
+                  <template #activator="{ props }">
+                    <v-chip
+                      v-bind="props"
+                      size="x-small"
+                      :variant="entry.primary ? 'tonal' : 'outlined'"
+                      :color="entry.primary ? 'primary' : 'secondary'"
+                      class="tag-image-chip"
+                    >
+                      {{ entry.label }}
+                    </v-chip>
+                  </template>
+                  <span>{{ entry.label }}</span>
+                </v-tooltip>
+                <v-chip
+                  v-if="getHiddenTagImageCount(item)"
+                  size="x-small"
+                  variant="outlined"
+                  color="grey-darken-1"
+                  class="tag-image-chip tag-image-chip--summary"
+                >
+                  +{{ getHiddenTagImageCount(item) }} more
+                </v-chip>
+              </div>
+              <span v-else class="text-caption text-grey">—</span>
             </div>
           </template>
           <template #item.processing_status="{ item }">
@@ -166,62 +248,65 @@
             </v-chip>
           </template>
           <template #item.actions="{ item }">
-            <v-tooltip :text="getActionTooltip(item, 'process')">
-              <template v-slot:activator="{ props }">
-                <v-btn
-                  v-bind="props"
-                  icon="mdi-code-tags"
-                  variant="tonal"
-                  size="x-small"
-                  color="primary"
-                  :disabled="isActionDisabled(item, 'process')"
-                  @click.stop="onProcessTag(item)"
-                />
-              </template>
-            </v-tooltip>
-            <v-tooltip :text="getActionTooltip(item, 'rescan')">
-              <template v-slot:activator="{ props }">
-                <v-btn
-                  v-bind="props"
-                  icon="mdi-cog-refresh"
-                  variant="tonal"
-                  size="x-small"
-                  color="info"
-                  class="ml-2"
-                  :disabled="isActionDisabled(item, 'rescan')"
-                  @click.stop="onRescanTagImages(item)"
-                />
-              </template>
-            </v-tooltip>
-            <v-tooltip text="Reanalyze SBOM for all images in this tag">
-              <template v-slot:activator="{ props }">
-                <v-btn
-                  v-bind="props"
-                  icon="mdi-file-document-refresh"
-                  variant="tonal"
-                  size="x-small"
-                  color="warning"
-                  class="ml-2"
-                  :disabled="isActionDisabled(item, 'rescan')"
-                  :loading="reanalyzingSbom === item.uuid"
-                  @click.stop="onReanalyzeSbom(item)"
-                />
-              </template>
-            </v-tooltip>
-            <v-tooltip text="Delete tag">
-              <template v-slot:activator="{ props }">
-                <v-btn
-                  v-bind="props"
-                  icon="mdi-delete"
-                  variant="tonal"
-                  size="x-small"
-                  color="error"
-                  class="ml-2"
-                  :loading="deletingTag === item.uuid"
-                  @click.stop="onDeleteTag(item)"
-                />
-              </template>
-            </v-tooltip>
+            <div class="tag-actions" @click.stop>
+              <v-tooltip :text="getActionTooltip(item, 'process')">
+                <template v-slot:activator="{ props }">
+                  <v-btn
+                    v-bind="props"
+                    icon="mdi-code-tags"
+                    variant="tonal"
+                    size="x-small"
+                    color="primary"
+                    class="tag-action-btn"
+                    :disabled="isActionDisabled(item, 'process')"
+                    @click.stop="onProcessTag(item)"
+                  />
+                </template>
+              </v-tooltip>
+              <v-tooltip :text="getActionTooltip(item, 'rescan')">
+                <template v-slot:activator="{ props }">
+                  <v-btn
+                    v-bind="props"
+                    icon="mdi-cog-refresh"
+                    variant="tonal"
+                    size="x-small"
+                    color="info"
+                    class="tag-action-btn"
+                    :disabled="isActionDisabled(item, 'rescan')"
+                    @click.stop="onRescanTagImages(item)"
+                  />
+                </template>
+              </v-tooltip>
+              <v-tooltip text="Reanalyze SBOM for all images in this tag">
+                <template v-slot:activator="{ props }">
+                  <v-btn
+                    v-bind="props"
+                    icon="mdi-file-document-refresh"
+                    variant="tonal"
+                    size="x-small"
+                    color="warning"
+                    class="tag-action-btn"
+                    :disabled="isActionDisabled(item, 'rescan')"
+                    :loading="reanalyzingSbom === item.uuid"
+                    @click.stop="onReanalyzeSbom(item)"
+                  />
+                </template>
+              </v-tooltip>
+              <v-tooltip text="Delete tag">
+                <template v-slot:activator="{ props }">
+                  <v-btn
+                    v-bind="props"
+                    icon="mdi-delete"
+                    variant="tonal"
+                    size="x-small"
+                    color="error"
+                    class="tag-action-btn"
+                    :loading="deletingTag === item.uuid"
+                    @click.stop="onDeleteTag(item)"
+                  />
+                </template>
+              </v-tooltip>
+            </div>
           </template>
           <template v-slot:item.updated_at="{ item }">
             {{ $formatDate(item.updated_at) }}
@@ -292,6 +377,32 @@
       </v-card>
     </v-dialog>
 
+    <!-- Scan Repository Dialog -->
+    <v-dialog v-model="showScanDialog" max-width="420px" persistent>
+      <v-card>
+        <v-card-title class="text-h6 font-weight-bold pa-4 pb-2">Scan repository</v-card-title>
+        <v-card-text class="pa-4 pt-0">
+          <span class="text-body-2">{{ repository?.name }}</span>
+          <p class="text-body-2 mt-2 mb-0">
+            <strong>Scan all tags</strong> – discovers full history (can be slow for large repos).
+          </p>
+          <p class="text-body-2 mt-1 mb-0">
+            <strong>Scan only latest</strong> – one tag per image (prefer "latest"), faster and less history.
+          </p>
+        </v-card-text>
+        <v-card-actions class="pa-4 pt-0">
+          <v-spacer></v-spacer>
+          <v-btn variant="text" @click="showScanDialog = false">Cancel</v-btn>
+          <v-btn color="primary" variant="tonal" @click="runScan(true)" :loading="scanning">
+            Scan only latest
+          </v-btn>
+          <v-btn color="primary" variant="elevated" @click="runScan(false)" :loading="scanning">
+            Scan all tags
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
     <!-- Delete Tag Confirmation Dialog -->
     <v-dialog 
       v-model="showDeleteDialog" 
@@ -335,7 +446,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, computed, watch } from 'vue'
+import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import api from '../plugins/axios'
 import { notificationService } from '../plugins/notifications'
@@ -376,14 +487,16 @@ const loading = ref(true)
 const repositoryLoading = ref(true)
 const tagsLoading = ref(true)
 const chartsLoading = ref(true)
+const MAX_VISIBLE_TAG_IMAGES = 3
 
 const headers = [
-  { title: 'Tag', key: 'tag', sortable: false },
-  { title: 'Status', key: 'processing_status', sortable: false },
-  { title: 'Vulnerabilities', key: 'findings', sortable: false },
-  { title: 'Components', key: 'components', sortable: false },
-  { title: 'Updated', key: 'updated_at', sortable: false },
-  { title: 'Actions', key: 'actions', sortable: false }
+  { title: 'Tag', key: 'tag', sortable: false, width: '170px' },
+  { title: 'Images', key: 'name', sortable: false },
+  { title: 'Status', key: 'processing_status', sortable: false, width: '190px' },
+  { title: 'Vulnerabilities', key: 'findings', sortable: false, width: '120px' },
+  { title: 'Components', key: 'components', sortable: false, width: '120px' },
+  { title: 'Updated', key: 'updated_at', sortable: false, width: '160px' },
+  { title: 'Actions', key: 'actions', sortable: false, width: '172px' }
 ]
 
 const tags = ref<any[]>([])
@@ -394,6 +507,10 @@ const tagsTotal = ref(0)
 interface SortItem { key: string; order: 'asc' | 'desc' }
 const tagsSortBy = ref<SortItem[]>([{ key: 'tag', order: 'desc' }])
 const tagsPageCount = computed(() => Math.ceil(tagsTotal.value / tagsPerPage.value) || 1)
+const hasActiveTagProcessing = computed(() =>
+  tags.value.some(tag => ['pending', 'in_process'].includes(tag.processing_status || 'none'))
+)
+let tagsRefreshTimer: number | null = null
 
 const tagsForCharts = ref<any[]>([])
 const showOnlyVulnerableVersions = ref(false)
@@ -406,9 +523,45 @@ const newTagName = ref('')
 const newTagDescription = ref('')
 const addTagForm = ref<any>(null)
 const deletingTag = ref<string | null>(null)
+
+const getTagImageEntries = (item: any) => {
+  const entries: Array<{ label: string; primary: boolean }> = []
+  const seen = new Set<string>()
+
+  const addEntry = (label: string | undefined, primary: boolean) => {
+    if (!label || seen.has(label)) return
+    seen.add(label)
+    entries.push({ label, primary })
+  }
+
+  addEntry(item.image_path, true)
+  for (const imageName of item.image_names || []) {
+    addEntry(imageName, false)
+  }
+
+  return entries
+}
+
+const getVisibleTagImageEntries = (item: any) => {
+  return getTagImageEntries(item).slice(0, MAX_VISIBLE_TAG_IMAGES)
+}
+
+const getTagImageCount = (item: any) => {
+  return getTagImageEntries(item).length
+}
+
+const getHiddenTagImageCount = (item: any) => {
+  return Math.max(0, getTagImageCount(item) - MAX_VISIBLE_TAG_IMAGES)
+}
 const showDeleteDialog = ref(false)
 const tagToDelete = ref<any>(null)
 const scanning = ref(false)
+const showScanDialog = ref(false)
+// Helm: image fallback Docker repositories
+const dockerReposForFallback = ref<{ uuid: string; name: string }[]>([])
+const dockerReposLoading = ref(false)
+const selectedFallbackRepoUuids = ref<string[]>([])
+const savingFallback = ref(false)
 
 const tagNameRules = [
   (v: string) => !!v || 'Tag name is required',
@@ -671,20 +824,80 @@ const fetchTags = async () => {
   }
 }
 
+const startTagsAutoRefresh = () => {
+  if (tagsRefreshTimer !== null) return
+  tagsRefreshTimer = window.setInterval(() => {
+    if (!tagsLoading.value) {
+      fetchTags()
+    }
+  }, 5000)
+}
+
+const stopTagsAutoRefresh = () => {
+  if (tagsRefreshTimer === null) return
+  window.clearInterval(tagsRefreshTimer)
+  tagsRefreshTimer = null
+}
+
 watch([tagSearch], () => {
   tagsPage.value = 1
   fetchTags()
 })
 watch([tagsPage, tagsPerPage], fetchTags)
+watch(hasActiveTagProcessing, (isActive) => {
+  if (isActive) {
+    startTagsAutoRefresh()
+  } else {
+    stopTagsAutoRefresh()
+  }
+}, { immediate: true })
 
 const fetchRepository = async () => {
   repositoryLoading.value = true
   try {
     const resp = await api.get(`repositories/${route.params.uuid}/`)
     repository.value = resp.data
+    if (resp.data?.repository_type === 'helm') {
+      selectedFallbackRepoUuids.value = (resp.data.image_fallback_repositories || []).map((r: { uuid: string }) => r.uuid)
+      loadDockerRepos()
+    }
   } finally {
     repositoryLoading.value = false
     loading.value = false
+  }
+}
+
+const loadDockerRepos = async () => {
+  dockerReposLoading.value = true
+  try {
+    const resp = await api.get('repositories/names/', { params: { repository_type: 'docker' } })
+    dockerReposForFallback.value = (resp.data || []).map((r: any) => ({ uuid: r.uuid, name: r.name }))
+  } catch (e: any) {
+    notificationService.error(e?.response?.data?.error || 'Failed to load Docker repositories')
+  } finally {
+    dockerReposLoading.value = false
+  }
+}
+
+const fallbackUnchanged = computed(() => {
+  const current = (repository.value?.image_fallback_repositories || []).map((r: { uuid: string }) => r.uuid).sort().join(',')
+  const selected = [...selectedFallbackRepoUuids.value].sort().join(',')
+  return current === selected
+})
+
+const saveFallbackRepositories = async () => {
+  if (!repository.value?.uuid) return
+  savingFallback.value = true
+  try {
+    await api.patch(`repositories/${repository.value.uuid}/`, {
+      image_fallback_repository_uuids: selectedFallbackRepoUuids.value
+    })
+    notificationService.success('Fallback repositories saved')
+    await fetchRepository()
+  } catch (e: any) {
+    notificationService.error(e?.response?.data?.error || 'Failed to save fallback list')
+  } finally {
+    savingFallback.value = false
   }
 }
 
@@ -714,32 +927,40 @@ const onProcessTag = async (tag: any) => {
     return
   }
   if (isActionDisabled(tag, 'process')) {
-    notificationService.warning(getActionTooltip(tag, 'process'))
+    notificationService.conflict(getActionTooltip(tag, 'process'))
     return
   }
+  const previousStatus = tag.processing_status
+  tag.processing_status = 'pending'
   try {
     await api.post(`repository-tags/${tag.uuid}/process/`)
-    notificationService.success('Tag processing started successfully')
-    await fetchRepository()
+    notificationService.queued('Tag processing was queued.')
+    await fetchTags()
   } catch (error: any) {
+    tag.processing_status = previousStatus
     console.error('Error processing tag:', error)
-    notificationService.error('Failed to process tag')
+    if (error.response?.status === 409) {
+      notificationService.conflict(error.response.data.error || 'Tag is already queued for processing')
+      fetchTags()
+    } else {
+      notificationService.error('Failed to process tag')
+    }
   }
 }
 
 const onRescanTagImages = async (tag: any) => {
   if (!tag.uuid) return
   if (isActionDisabled(tag, 'rescan')) {
-    notificationService.warning(getActionTooltip(tag, 'rescan'))
+    notificationService.conflict(getActionTooltip(tag, 'rescan'))
     return
   }
   try {
     const resp = await api.post(`repository-tags/${tag.uuid}/rescan-images/`)
-    notificationService.success(resp.data.message || 'Rescan started')
+    notificationService.started(resp.data.message || 'Tag image rescan started.')
     fetchTags()
   } catch (e: any) {
     if (e.response?.status === 409) {
-      notificationService.warning(e.response.data.error || 'At least one image is already being scanned or queued for scanning')
+      notificationService.conflict(e.response.data.error || 'At least one image is already being scanned or queued for scanning')
     } else if (e.response?.status === 429) {
       notificationService.warning(e.response.data.error || 'Please wait before trying again')
     } else {
@@ -751,7 +972,7 @@ const onRescanTagImages = async (tag: any) => {
 const onReanalyzeSbom = async (tag: any) => {
   if (!tag.uuid) return
   if (isActionDisabled(tag, 'rescan')) {
-    notificationService.warning(getActionTooltip(tag, 'rescan'))
+    notificationService.conflict(getActionTooltip(tag, 'rescan'))
     return
   }
   
@@ -764,9 +985,9 @@ const onReanalyzeSbom = async (tag: any) => {
       // Show success message with details about skipped images if any
       const message = resp.data.message || `Reanalysis started for ${resp.data.count} images`
       if (resp.data.skipped_count && resp.data.skipped_count > 0) {
-        notificationService.info(message)
+        notificationService.started(message, 3800, { title: 'Partial Start' })
       } else {
-        notificationService.success(message)
+        notificationService.started(message)
       }
       // Refresh tags list after a short delay to allow backend to process
       setTimeout(() => {
@@ -779,9 +1000,11 @@ const onReanalyzeSbom = async (tag: any) => {
         // Otherwise this shouldn't happen with new logic, but keep for backward compatibility
         const errorMsg = e.response.data.error || 'All images are already being scanned or queued for scanning'
         if (e.response.data.skipped_count) {
-          notificationService.info(`${errorMsg} (${e.response.data.skipped_count} images skipped)`)
+          notificationService.warning(`${errorMsg} (${e.response.data.skipped_count} images skipped)`, 4200, {
+            title: 'Partial Skip',
+          })
         } else {
-          notificationService.warning(errorMsg)
+          notificationService.conflict(errorMsg)
         }
       } else if (e.response?.status === 404) {
         notificationService.warning(e.response.data.error || 'No images with SBOM data found for this tag')
@@ -843,24 +1066,34 @@ const getScanTooltip = () => {
   return 'Scan repository for new tags'
 }
 
-const onScanRepository = async () => {
+const openScanDialog = () => {
   if (!repository.value?.uuid) {
     notificationService.error('Cannot scan repository: missing UUID')
     return
   }
   if (isScanDisabled()) {
-    notificationService.warning(getScanTooltip())
+    notificationService.conflict(getScanTooltip())
     return
   }
+  showScanDialog.value = true
+}
+
+const runScan = async (latestOnly: boolean) => {
+  if (!repository.value?.uuid) return
+  showScanDialog.value = false
   scanning.value = true
   try {
-    await api.post(`repositories/${repository.value.uuid}/scan_tags/`)
-    notificationService.success('Repository scan started successfully')
+    await api.post(`repositories/${repository.value.uuid}/scan_tags/`, { latest_only: latestOnly })
+    notificationService.queued(
+      latestOnly
+        ? 'Repository latest-tag scan was queued.'
+        : 'Repository scan was queued.'
+    )
     await fetchRepository()
     await fetchTags()
   } catch (error: any) {
     if (error.response?.status === 409) {
-      notificationService.warning(error.response.data.error || 'Repository is already being scanned')
+      notificationService.conflict(error.response.data.error || 'Repository is already being scanned')
     } else {
       console.error('Error starting repository scan:', error)
       notificationService.error('Failed to start repository scan')
@@ -871,14 +1104,15 @@ const onScanRepository = async () => {
 }
 
 onMounted(async () => {
-  // Load repository data first (lightweight)
-  await fetchRepository()
-  
-  // Load tags and charts in parallel (heavier operations)
   await Promise.all([
+    fetchRepository(),
     fetchTags(),
     fetchTagsForCharts()
   ])
+})
+
+onUnmounted(() => {
+  stopTagsAutoRefresh()
 })
 </script>
 
@@ -904,6 +1138,118 @@ onMounted(async () => {
   color: #39FF14 !important;
   background: rgba(57, 255, 20, 0.1) !important;
   border: 1px solid #39FF14 !important;
+}
+
+.tag-label-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 100%;
+}
+
+.tag-value {
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.tag-release-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.tag-images-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 100%;
+}
+
+.tag-images-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tag-images-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 100%;
+}
+
+.tag-image-chip {
+  max-width: min(100%, 320px);
+}
+
+.tag-image-chip--summary,
+.tag-images-count,
+.tag-action-btn {
+  flex-shrink: 0;
+}
+
+.tag-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  width: 100%;
+  white-space: nowrap;
+}
+
+:deep(.tag-table .v-chip__content) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:deep(.tag-table td) {
+  vertical-align: middle;
+}
+
+:deep(.tag-table td:nth-child(3)),
+:deep(.tag-table td:nth-child(4)),
+:deep(.tag-table td:nth-child(5)),
+:deep(.tag-table td:nth-child(7)) {
+  white-space: nowrap;
+}
+
+@media (min-width: 1264px) {
+  :deep(.tag-table table) {
+    table-layout: fixed;
+  }
+
+  :deep(.tag-table th:nth-child(1)),
+  :deep(.tag-table td:nth-child(1)) {
+    width: 170px;
+    min-width: 170px;
+  }
+
+  :deep(.tag-table th:nth-child(3)),
+  :deep(.tag-table td:nth-child(3)) {
+    width: 190px;
+    min-width: 190px;
+  }
+
+  :deep(.tag-table th:nth-child(4)),
+  :deep(.tag-table td:nth-child(4)),
+  :deep(.tag-table th:nth-child(5)),
+  :deep(.tag-table td:nth-child(5)) {
+    width: 120px;
+    min-width: 120px;
+  }
+
+  :deep(.tag-table th:nth-child(6)),
+  :deep(.tag-table td:nth-child(6)) {
+    width: 160px;
+    min-width: 160px;
+  }
+
+  :deep(.tag-table th:nth-child(7)),
+  :deep(.tag-table td:nth-child(7)) {
+    width: 172px;
+    min-width: 172px;
+  }
 }
 
 /* Chart filter button styles */
