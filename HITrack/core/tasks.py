@@ -306,6 +306,115 @@ def _lookup_latest_version_for_purl(purl: str) -> str | None:
     return latest_version
 
 
+def _run_bulk_component_latest_version_update(
+    queryset,
+    task_name: str,
+    skip_recent_days: int,
+    batch_size: int = 50,
+) -> dict:
+    from datetime import timedelta
+    from django.utils import timezone
+
+    logger.info(f"Starting latest versions update for {task_name}")
+    start_time = time.time()
+
+    try:
+        now = timezone.now()
+        cutoff_date = now - timedelta(days=skip_recent_days)
+
+        component_versions = queryset.filter(
+            purl__isnull=False,
+        ).exclude(
+            latest_version_updated_at__gte=cutoff_date,
+        ).select_related('component')
+
+        total_count = component_versions.count()
+        logger.info(
+            f"Found {total_count} component versions to process for {task_name} "
+            f"(skipping components updated within last {skip_recent_days} days)"
+        )
+
+        updated_count = 0
+        skipped_count = 0
+        error_count = 0
+
+        for i in range(0, total_count, batch_size):
+            batch = component_versions[i:i + batch_size]
+            batch_start_time = time.time()
+            current_batch = i // batch_size + 1
+            total_batches = (total_count + batch_size - 1) // batch_size if total_count else 0
+
+            logger.info(f"Processing batch {current_batch}/{total_batches} ({len(batch)} components)")
+
+            for component_version in batch:
+                try:
+                    if not component_version.purl:
+                        skipped_count += 1
+                        continue
+
+                    if (
+                        component_version.latest_version_updated_at and
+                        (now - component_version.latest_version_updated_at).days < skip_recent_days
+                    ):
+                        skipped_count += 1
+                        continue
+
+                    if DEBUG_LOGGING:
+                        logger.debug(
+                            f"Processing component version "
+                            f"{component_version.component.name}:{component_version.version}"
+                        )
+                        logger.debug(f"Processing PURL: {component_version.purl}")
+
+                    latest_version = _lookup_latest_version_for_purl(component_version.purl)
+
+                    if latest_version:
+                        component_version.latest_version = latest_version
+                        component_version.latest_version_updated_at = now
+                        component_version.save(update_fields=['latest_version', 'latest_version_updated_at'])
+                        updated_count += 1
+                        logger.info(
+                            f"Updated latest version for "
+                            f"{component_version.component.name}:{component_version.version} "
+                            f"to {latest_version}"
+                        )
+                    else:
+                        skipped_count += 1
+
+                except Exception as e:
+                    error_count += 1
+                    logger.error(
+                        f"Error processing component version "
+                        f"{component_version.component.name}:{component_version.version}: {str(e)}"
+                    )
+                    continue
+
+            batch_time = time.time() - batch_start_time
+            logger.info(f"Completed batch {current_batch}/{total_batches} in {batch_time:.2f}s")
+
+        total_time = time.time() - start_time
+        logger.info(f"{task_name} completed in {total_time:.2f} seconds")
+        logger.info(f"Updated: {updated_count}, Skipped: {skipped_count}, Errors: {error_count}")
+
+        return {
+            "status": "success",
+            "task_name": task_name,
+            "total_processed": total_count,
+            "updated_count": updated_count,
+            "skipped_count": skipped_count,
+            "error_count": error_count,
+            "processing_time": total_time,
+        }
+
+    except Exception as e:
+        logger.error(f"Error updating latest versions for {task_name}: {str(e)}")
+        return {
+            "status": "error",
+            "task_name": task_name,
+            "error": str(e),
+        }
+
+
 def _is_supported_vulnerability_enrichment_target(vulnerability_id: str, vulnerability_type: str | None = None) -> bool:
     if vulnerability_type and str(vulnerability_type).upper() == 'CVE':
         return True
@@ -4100,100 +4209,25 @@ def update_all_components_latest_versions():
     - Processes in batches of 50 components
     """
     from .models import ComponentVersion
-    from django.utils import timezone
-    from datetime import timedelta
+    return _run_bulk_component_latest_version_update(
+        ComponentVersion.objects.all(),
+        task_name="Update All Components Latest Versions",
+        skip_recent_days=30,
+        batch_size=50,
+    )
 
-    logger.info("Starting latest versions update for all components")
-    start_time = time.time()
 
-    try:
-        # Get all component versions that need updating
-        now = timezone.now()
-        # Skip components updated within the last 30 days (month)
-        cutoff_date = now - timedelta(days=30)
-        
-        component_versions = ComponentVersion.objects.filter(
-            purl__isnull=False
-        ).exclude(
-            latest_version_updated_at__gte=cutoff_date
-        )
-        
-        total_count = component_versions.count()
-        logger.info(f"Found {total_count} component versions to process (skipping components updated within last 30 days)")
-        
-        # Process in batches to avoid memory issues and improve performance
-        BATCH_SIZE = 50  # Reduced batch size for better memory management
-        updated_count = 0
-        skipped_count = 0
-        error_count = 0
-        
-        for i in range(0, total_count, BATCH_SIZE):
-            batch = component_versions[i:i + BATCH_SIZE]
-            batch_start_time = time.time()
-            current_batch = i//BATCH_SIZE + 1
-            total_batches = (total_count + BATCH_SIZE - 1)//BATCH_SIZE
-            
-            logger.info(f"Processing batch {current_batch}/{total_batches} ({len(batch)} components)")
-            
-            for component_version in batch:
-                try:
-                    if not component_version.purl:
-                        skipped_count += 1
-                        continue
-                    
-                    # Skip if already updated recently (double-check)
-                    if (component_version.latest_version_updated_at and 
-                        (now - component_version.latest_version_updated_at).days < 30):
-                        skipped_count += 1
-                        continue
-                    
-                    if DEBUG_LOGGING:
-                        logger.debug(f"Processing component version {component_version.component.name}:{component_version.version}")
-                    if DEBUG_LOGGING:
-                        logger.debug(f"Processing PURL: {component_version.purl}")
-                    
-                    latest_version = _lookup_latest_version_for_purl(component_version.purl)
-                    
-                    if latest_version:
-                        component_version.latest_version = latest_version
-                        component_version.latest_version_updated_at = now
-                        component_version.save()
-                        updated_count += 1
-                        logger.info(
-                            f"Updated latest version for {component_version.component.name}:{component_version.version} to {latest_version}"
-                        )
-                    else:
-                        skipped_count += 1
-                        
-                except Exception as e:
-                    error_count += 1
-                    logger.error(
-                        f"Error processing component version {component_version.component.name}:{component_version.version}: {str(e)}"
-                    )
-                    continue
-            
-            # Log batch completion
-            batch_time = time.time() - batch_start_time
-            logger.info(f"Completed batch {current_batch}/{total_batches} in {batch_time:.2f}s")
-        
-        total_time = time.time() - start_time
-        logger.info(f"All components latest versions update completed in {total_time:.2f} seconds")
-        logger.info(f"Updated: {updated_count}, Skipped: {skipped_count}, Errors: {error_count}")
+@celery_app.task(name="Update Deb Components Latest Versions")
+def update_deb_components_latest_versions():
+    """
+    Update latest versions only for deb packages already stored in the database.
+    This is useful when backfilling distro-aware latest-version data.
+    """
+    from .models import ComponentVersion
 
-        return {
-            "status": "success",
-            "task_name": "Update All Components Latest Versions",
-            "total_processed": total_count,
-            "updated_count": updated_count,
-            "skipped_count": skipped_count,
-            "error_count": error_count,
-            "processing_time": total_time
-        }
-
-    except Exception as e:
-        logger.error(f"Error updating all components latest versions: {str(e)}")
-        return {
-            "status": "error",
-            "task_name": "Update All Components Latest Versions",
-            "error": str(e)
-        }
+    return _run_bulk_component_latest_version_update(
+        ComponentVersion.objects.filter(component__type='deb'),
+        task_name="Update Deb Components Latest Versions",
+        skip_recent_days=30,
+        batch_size=50,
+    )

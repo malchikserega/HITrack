@@ -71,7 +71,7 @@
             </v-row>
             
             <v-row class="mt-4">
-              <v-col cols="12" md="6">
+              <v-col cols="12" md="4">
                 <v-btn
                   block
                   color="primary"
@@ -84,7 +84,20 @@
                   Update All Components Latest Versions
                 </v-btn>
               </v-col>
-              <v-col cols="12" md="6">
+              <v-col cols="12" md="4">
+                <v-btn
+                  block
+                  color="indigo"
+                  prepend-icon="mdi-package-variant-closed"
+                  @click="updateDebComponentsLatestVersions"
+                  :loading="updateDebComponentsLoading"
+                  size="large"
+                  class="action-btn"
+                >
+                  Update Deb Latest Versions
+                </v-btn>
+              </v-col>
+              <v-col cols="12" md="4">
                 <v-btn
                   block
                   color="secondary"
@@ -406,6 +419,7 @@ export default defineComponent({
     const failingTaskLoading = ref(false)
     const testEndpointLoading = ref(false)
     const updateComponentsLoading = ref(false)
+    const updateDebComponentsLoading = ref(false)
     const stoppingTasks = ref<string[]>([])
     const tasks = ref<TaskResult[]>([])
     const periodicTasks = ref<PeriodicTask[]>([])
@@ -608,6 +622,22 @@ export default defineComponent({
       }
     }
 
+    const updateDebComponentsLatestVersions = async () => {
+      updateDebComponentsLoading.value = true
+      try {
+        const response = await api.post('/test-tasks/update_deb_components_latest_versions/')
+        if (response.data?.task_id) {
+          upsertPendingTask(response.data.task_id, 'Update Deb Components Latest Versions')
+        }
+        notificationService.started('Update deb components task started.')
+      } catch (error) {
+        console.error('Error updating deb components latest versions:', error)
+        notificationService.error(`Failed to start deb update task: ${error}`)
+      } finally {
+        updateDebComponentsLoading.value = false
+      }
+    }
+
     const viewTaskDetails = (task: TaskResult) => {
       selectedTask.value = task
       taskDetailsDialog.value = true
@@ -738,6 +768,7 @@ export default defineComponent({
           failingTaskLoading,
           testEndpointLoading,
           updateComponentsLoading,
+          updateDebComponentsLoading,
           stoppingTasks,
           tasks,
           periodicTasks,
@@ -758,6 +789,7 @@ export default defineComponent({
           testEndpoint,
           testDirectAPI,
           updateAllComponentsLatestVersions,
+          updateDebComponentsLatestVersions,
           viewTaskDetails,
           retryTask,
           stopTask,

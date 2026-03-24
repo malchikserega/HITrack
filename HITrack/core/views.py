@@ -3033,6 +3033,23 @@ class TestTaskViewSet(viewsets.ViewSet):
             )
 
     @action(detail=False, methods=['post'])
+    def update_deb_components_latest_versions(self, request):
+        """Update latest versions only for deb components in the system"""
+        from .tasks import update_deb_components_latest_versions
+
+        try:
+            result = update_deb_components_latest_versions.delay()
+            return Response({
+                'message': 'Deb components latest versions update started',
+                'task_id': result.id
+            })
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+    @action(detail=False, methods=['post'])
     def rescan_all_images_with_sbom(self, request):
         """Re-analyze all images that have SBOM data using Grype"""
         from .tasks import rescan_all_images_with_sbom
