@@ -17,11 +17,6 @@ from typing import Generator, List, Optional, Tuple
 # Third-party imports
 import requests
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
 
 # Configuration

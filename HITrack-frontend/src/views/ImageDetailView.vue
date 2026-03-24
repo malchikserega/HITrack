@@ -1,6 +1,6 @@
 <template>
   <div class="image-detail">
-    <v-container>
+    <v-container fluid class="page-shell page-shell--wide">
       <v-row>
         <v-col cols="12">
           <v-btn variant="text" @click="router.back()" class="mb-2">
@@ -446,17 +446,18 @@
                       <template v-slot:item.fixable="{ item }">
                         <v-chip
                           size="small"
-                          :color="item.fixable ? 'success' : 'error'"
+                          :color="getFixStatusColor(item)"
                           variant="tonal"
                         >
                           <v-icon size="x-small" class="mr-1">
-                            {{ item.fixable ? 'mdi-check' : 'mdi-close' }}
+                            {{ getFixStatusIcon(item) }}
                           </v-icon>
-                          {{ item.fixable ? 'Fixable' : 'Not Fixable' }}
+                          {{ getFixStatusLabel(item) }}
                         </v-chip>
                       </template>
                       <template v-slot:item.fix="{ item }">
                         <span v-if="item.fix" class="text-caption">{{ item.fix }}</span>
+                        <span v-else-if="item.fix_state" class="text-caption text-grey">{{ item.fix_state }}</span>
                         <span v-else class="text-caption text-grey">No fix available</span>
                       </template>
                     </v-data-table>
@@ -550,6 +551,63 @@ const severityColors = [
 const legendVisible = ref([true, true, true, true, true])
 
 // Color utilities imported from utils/colors.ts
+
+const getNormalizedFixStatus = (vulnerability: Vulnerability) => {
+  if (vulnerability.fix_status && vulnerability.fix_status !== 'unknown') {
+    return vulnerability.fix_status
+  }
+  return vulnerability.fixable ? 'available' : 'unknown'
+}
+
+const getFixStatusLabel = (vulnerability: Vulnerability) => {
+  switch (getNormalizedFixStatus(vulnerability)) {
+    case 'available':
+      return 'Fix Available'
+    case 'not_in_repo':
+      return 'Fix Known, Not In Repo'
+    case 'version_unknown':
+      return 'Fix Reported'
+    case 'not_fixed':
+      return 'Not Fixed'
+    case 'wont_fix':
+      return "Won't Fix"
+    default:
+      return vulnerability.fixable ? 'Fix Available' : 'Unknown'
+  }
+}
+
+const getFixStatusColor = (vulnerability: Vulnerability) => {
+  switch (getNormalizedFixStatus(vulnerability)) {
+    case 'available':
+      return 'success'
+    case 'not_in_repo':
+      return 'warning'
+    case 'version_unknown':
+      return 'info'
+    case 'not_fixed':
+    case 'wont_fix':
+      return 'error'
+    default:
+      return 'grey'
+  }
+}
+
+const getFixStatusIcon = (vulnerability: Vulnerability) => {
+  switch (getNormalizedFixStatus(vulnerability)) {
+    case 'available':
+      return 'mdi-check'
+    case 'not_in_repo':
+      return 'mdi-clock-outline'
+    case 'version_unknown':
+      return 'mdi-help-circle-outline'
+    case 'not_fixed':
+      return 'mdi-close'
+    case 'wont_fix':
+      return 'mdi-cancel'
+    default:
+      return 'mdi-help'
+  }
+}
 
 const pieChartData = computed(() => {
   if (!image.value) {
@@ -768,9 +826,11 @@ const fetchImage = async () => {
   error.value = ''
   try {
     const uuid = route.params.uuid
-    const response = await api.get(`/images/${uuid}/`)
-    image.value = response.data
-    await fetchComponents() // fetch components only after image is loaded
+    const [imageResp] = await Promise.all([
+      api.get(`/images/${uuid}/`),
+      fetchComponents()
+    ])
+    image.value = imageResp.data
   } catch (e: any) {
     error.value = e?.response?.data?.detail || 'Failed to load image details.'
   } finally {
@@ -798,16 +858,15 @@ const componentHeaders = [
 ] as const
 
 const fetchComponents = async () => {
-  if (!image.value || !image.value.uuid) {
+  const imageUuid = image.value?.uuid || route.params.uuid
+  if (!imageUuid) {
     return;
   }
   componentsLoading.value = true
   try {
-    // Get the first sort field and direction
     const sortField = componentsSortBy.value[0]
     const sortDesc = componentsSortDesc.value[0]
     
-    // Build ordering parameter
     let ordering = undefined
     if (sortField) {
       const prefix = sortDesc ? '-' : ''
@@ -815,7 +874,7 @@ const fetchComponents = async () => {
     }
 
     const params = {
-      images: image.value.uuid,
+      images: imageUuid,
       page: componentsPage.value,
       page_size: componentsPerPage.value,
       ordering,

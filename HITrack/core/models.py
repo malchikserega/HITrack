@@ -48,12 +48,26 @@ class Repository(models.Model):
         default='none'
     )
     container_registry = models.ForeignKey('ContainerRegistry', on_delete=models.CASCADE, related_name='repositories', blank=True, null=True, to_field='uuid')
+    # For JFrog: the Artifactory repo key (e.g. a8n-docker-local). Empty for ACR.
+    repo_key = models.CharField(max_length=255, blank=True, default='')
+    # For Helm repos: Docker repos to try when resolving chart image refs fails (bad links in chart).
+    image_fallback_repositories = models.ManyToManyField(
+        'self',
+        symmetrical=False,
+        blank=True,
+        related_name='helm_repos_using_as_fallback',
+        help_text='Docker repositories to use when resolving Helm chart image refs fails.'
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         verbose_name_plural = "Repositories"
         unique_together = ('name', 'url')
+        indexes = [
+            models.Index(fields=['scan_status']),
+            models.Index(fields=['repository_type']),
+        ]
 
     def __str__(self):
         return self.name
@@ -64,6 +78,8 @@ class RepositoryTag(models.Model):
     tag = models.CharField(max_length=255)
     digest = models.CharField(max_length=255, blank=True, null=True)
     repository = models.ForeignKey(Repository, on_delete=models.CASCADE, related_name='tags', to_field='uuid')
+    # For Artifactory repo keys: image path within the repo (e.g. com.ingrammicro.foo). Blank for ACR/single-image repos.
+    image_path = models.CharField(max_length=512, blank=True, default='')
     processing_status = models.CharField(
         max_length=32,
         choices=[
@@ -79,7 +95,10 @@ class RepositoryTag(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        unique_together = ['tag', 'repository']
+        unique_together = [['repository', 'tag', 'image_path']]
+        indexes = [
+            models.Index(fields=['processing_status']),
+        ]
 
     def __str__(self):
         return f"{self.repository.name}:{self.tag}"
@@ -106,6 +125,11 @@ class Image(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['scan_status']),
+        ]
 
     def __str__(self):
         return f"{self.name}"
@@ -171,6 +195,10 @@ class Vulnerability(models.Model):
         unique_together = ['vulnerability_id']
         verbose_name = 'Vulnerability'
         verbose_name_plural = 'Vulnerabilities'
+        indexes = [
+            models.Index(fields=['severity']),
+            models.Index(fields=['epss']),
+        ]
 
     def __str__(self):
         return f"{self.vulnerability_id} ({self.severity})"
@@ -233,6 +261,12 @@ class VulnerabilityDetails(models.Model):
     class Meta:
         verbose_name = 'Vulnerability Details'
         verbose_name_plural = 'Vulnerability Details'
+        indexes = [
+            models.Index(fields=['last_updated']),
+            models.Index(fields=['exploit_available']),
+            models.Index(fields=['cisa_kev_known_exploited']),
+            models.Index(fields=['cisa_kev_ransomware_use']),
+        ]
     
     def __str__(self):
         return f"Details for {self.vulnerability.vulnerability_id}"
@@ -243,6 +277,9 @@ class ComponentVersionVulnerability(models.Model):
     vulnerability = models.ForeignKey('Vulnerability', on_delete=models.CASCADE)
     fixable = models.BooleanField(default=False, help_text='True if a fix is available for this vulnerability in this component version')
     fix = models.CharField(max_length=255, blank=True, null=True, help_text='Fix version(s) or state from Grype report')
+    fix_state = models.CharField(max_length=64, blank=True, null=True, help_text='Raw fix state reported by Grype')
+    fix_status = models.CharField(max_length=32, default='unknown', help_text='Normalized fix availability status')
+    fix_versions = models.JSONField(default=list, blank=True, help_text='Structured fixed-in versions reported by Grype')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -250,6 +287,10 @@ class ComponentVersionVulnerability(models.Model):
         unique_together = ['component_version', 'vulnerability']
         verbose_name = 'Component Version Vulnerability Link'
         verbose_name_plural = 'Component Version Vulnerability Links'
+        indexes = [
+            models.Index(fields=['vulnerability', 'component_version']),
+        ]
+
     def __str__(self):
         return f"{self.component_version} <-> {self.vulnerability}"
 

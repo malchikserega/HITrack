@@ -80,7 +80,7 @@ class ComponentAdmin(admin.ModelAdmin):
 class ComponentVersionVulnerabilityInline(admin.TabularInline):
     model = ComponentVersionVulnerability
     extra = 0
-    fields = ('vulnerability', 'fixable', 'fix', 'created_at', 'updated_at')
+    fields = ('vulnerability', 'fixable', 'fix_status', 'fix', 'fix_state', 'created_at', 'updated_at')
     readonly_fields = ('created_at', 'updated_at')
     autocomplete_fields = ('vulnerability',)
 
@@ -372,9 +372,9 @@ class VulnerabilityDetailsAdmin(admin.ModelAdmin):
 
 @admin.register(ComponentVersionVulnerability)
 class ComponentVersionVulnerabilityAdmin(admin.ModelAdmin):
-    list_display = ('component_version', 'vulnerability', 'fixable', 'fix', 'created_at')
+    list_display = ('component_version', 'vulnerability', 'fixable', 'fix_status', 'fix', 'created_at')
     search_fields = ('component_version__component__name', 'vulnerability__vulnerability_id')
-    list_filter = ('fixable',)
+    list_filter = ('fixable', 'fix_status')
     raw_id_fields = ('component_version', 'vulnerability')
 
 

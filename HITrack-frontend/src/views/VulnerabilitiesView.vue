@@ -1,11 +1,27 @@
 <template>
   <div class="vulnerabilities">
-    <v-container>
+    <v-container fluid class="page-shell page-shell--wide">
       <v-row>
         <v-col cols="12">
           <div class="d-flex align-center justify-space-between mb-4">
             <h1 class="text-h4 font-weight-black">Vulnerabilities</h1>
-            <div v-if="activeFilter" class="d-flex align-center">
+            <div class="d-flex align-center gap-2">
+              <v-tooltip text="Remove vulnerabilities that have no linked components or images (e.g. after deleting images)" location="bottom">
+                <template v-slot:activator="{ props }">
+                  <v-btn
+                    v-bind="props"
+                    color="secondary"
+                    variant="tonal"
+                    size="small"
+                    prepend-icon="mdi-broom"
+                    :loading="cleanupOrphanedLoading"
+                    @click="openCleanupOrphanedDialog"
+                  >
+                    Cleanup orphaned
+                  </v-btn>
+                </template>
+              </v-tooltip>
+              <div v-if="activeFilter" class="d-flex align-center">
               <v-chip 
                 :color="getFilterColor()" 
                 size="small" 
@@ -17,9 +33,25 @@
                 {{ activeFilter }}
               </v-chip>
             </div>
+            </div>
           </div>
         </v-col>
       </v-row>
+
+      <!-- Cleanup orphaned confirmation dialog -->
+      <v-dialog v-model="cleanupOrphanedDialog" max-width="420" persistent>
+        <v-card>
+          <v-card-title class="text-subtitle-1 font-weight-bold">Cleanup orphaned vulnerabilities</v-card-title>
+          <v-card-text>
+            Remove vulnerabilities that have no linked components or images (e.g. after deleting images). This will update statistics. This action cannot be undone.
+          </v-card-text>
+          <v-card-actions>
+            <v-spacer></v-spacer>
+            <v-btn variant="text" @click="cleanupOrphanedDialog = false" :disabled="cleanupOrphanedLoading">Cancel</v-btn>
+            <v-btn color="primary" @click="confirmCleanupOrphaned" :loading="cleanupOrphanedLoading">Remove orphaned</v-btn>
+          </v-card-actions>
+        </v-card>
+      </v-dialog>
 
       <v-row>
         <v-col cols="12">
@@ -107,20 +139,21 @@
             </v-card-text>
           </v-card>
 
-          <!-- Vulnerabilities Table -->
+          <!-- Vulnerabilities Table (server-side: sort and pagination are applied on the API) -->
           <v-card>
-            <v-data-table
+            <v-data-table-server
               :headers="headers"
               :items="vulnerabilities"
+              :items-length="total"
               :loading="loading"
               :items-per-page="itemsPerPage"
               :page="currentPage"
-              :sort-by="sortBy"
-              :sort-desc="sortDesc"
+              v-model:sort-by="sortBy"
               hide-default-footer
               class="elevation-1"
               hover
               density="comfortable"
+              @update:options="onTableOptionsUpdate"
               @click:row="onVulnerabilityRowClick"
               :no-data-text="searchQuery ? 'No vulnerabilities found matching your search' : 'No vulnerabilities found'"
             >
@@ -235,7 +268,7 @@
                   </div>
                 </div>
               </template>
-            </v-data-table>
+            </v-data-table-server>
 
             <!-- Pagination -->
             <div class="d-flex align-center justify-end mt-4 gap-4 pa-4">
@@ -272,7 +305,8 @@ import { notificationService } from '../plugins/notifications'
 import { debounce } from '../utils/debounce'
 import { getVulnerabilityTypeColor, getSeverityColor, getEpssColor, getEpssSourceColor, getEpssSourceIcon, getEpssSourceDisplay } from '../utils/colors'
 import type { Vulnerability, PaginatedResponse } from '../types/interfaces'
-import type { DataTableSortItem } from 'vuetify'
+
+interface SortItem { key: string; order: 'asc' | 'desc' }
 
 const router = useRouter()
 const route = useRoute()
@@ -287,9 +321,8 @@ const currentPage = ref(1)
 const itemsPerPage = ref(20)
 const pageCount = computed(() => Math.ceil(total.value / itemsPerPage.value))
 
-// Sorting state
-const sortBy = ref<readonly DataTableSortItem[]>([])
-const sortDesc = ref<boolean[]>([])
+// Sorting state (server-side)
+const sortBy = ref<SortItem[]>([])
 
 // Search and filter state
 const searchQuery = ref('')
@@ -297,6 +330,10 @@ const severityFilter = ref('')
 const typeFilter = ref('')
 const fixableFilter = ref(false)
 const activeFilter = ref('')
+
+// Cleanup orphaned
+const cleanupOrphanedDialog = ref(false)
+const cleanupOrphanedLoading = ref(false)
 
 // Filter options
 const severityOptions = [
@@ -327,6 +364,25 @@ const headers = [
   { title: 'Description', key: 'description', sortable: false }
 ] as const
 
+const openCleanupOrphanedDialog = () => {
+  cleanupOrphanedDialog.value = true
+}
+
+const confirmCleanupOrphaned = async () => {
+  cleanupOrphanedLoading.value = true
+  try {
+    const resp = await api.post<{ deleted: number; message: string }>('vulnerabilities/cleanup-orphaned/')
+    const deleted = resp.data?.deleted ?? 0
+    notificationService.success(resp.data?.message ?? `Removed ${deleted} orphaned vulnerability(ies).`)
+    cleanupOrphanedDialog.value = false
+    await fetchVulnerabilities()
+  } catch (e: any) {
+    notificationService.error(e?.response?.data?.error ?? 'Failed to cleanup orphaned vulnerabilities')
+  } finally {
+    cleanupOrphanedLoading.value = false
+  }
+}
+
 // Fetch vulnerabilities with optimized parameters
 const fetchVulnerabilities = async () => {
   loading.value = true
@@ -337,11 +393,10 @@ const fetchVulnerabilities = async () => {
       page_size: itemsPerPage.value
     }
 
-    // Add sorting
-    const sortField = sortBy.value[0]
-    const sortDescValue = sortDesc.value[0]
-    if (sortField) {
-      params.ordering = `${sortDescValue ? '-' : ''}${sortField}`
+    // Add sorting (server-side)
+    const s = sortBy.value[0]
+    if (s?.key) {
+      params.ordering = s.order === 'desc' ? `-${s.key}` : s.key
     }
 
     // Add search and filters
@@ -415,6 +470,14 @@ const onItemsPerPageChange = (val: number) => {
   fetchVulnerabilities()
 }
 
+// Server table: when user changes sort/page/itemsPerPage in the table, we refetch
+const onTableOptionsUpdate = (options: { page: number; itemsPerPage: number; sortBy: SortItem[] }) => {
+  currentPage.value = options.page
+  itemsPerPage.value = options.itemsPerPage
+  sortBy.value = options.sortBy?.length ? options.sortBy : []
+  fetchVulnerabilities()
+}
+
 // Helper function to get description with fallback to CVE Details
 const getDescriptionWithFallback = (item: Vulnerability): string => {
   // First try to get the main description
@@ -451,13 +514,8 @@ const onFilterChange = () => {
 
 // Color utilities imported from utils/colors.ts
 
-// Watchers
-watch([
-  currentPage,
-  itemsPerPage,
-  sortBy,
-  sortDesc
-], fetchVulnerabilities)
+// Watchers (pagination controls update page/itemsPerPage and trigger fetch)
+watch([currentPage, itemsPerPage], fetchVulnerabilities)
 
 watch(searchQuery, () => {
   currentPage.value = 1

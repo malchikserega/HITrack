@@ -1,6 +1,6 @@
 <template>
   <div class="repositories">
-    <v-container>
+    <v-container fluid class="page-shell page-shell--wide">
       <v-row>
         <v-col cols="12">
           <h1 class="text-h4 mb-4 font-weight-black">Repositories</h1>
@@ -64,6 +64,16 @@
                   </v-chip>
                 </td>
                 <td>{{ item.url }}</td>
+                <td>
+                  <v-chip
+                    size="x-small"
+                    :color="repoStatusColor(item.scan_status)"
+                    variant="tonal"
+                    style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;"
+                  >
+                    {{ getScanStatusTooltip(item.scan_status) }}
+                  </v-chip>
+                </td>
                 <td>
                   <v-chip
                     size="small"
@@ -198,6 +208,30 @@
           </v-card-actions>
         </v-card>
       </v-dialog>
+
+      <v-dialog v-model="scanDialog" max-width="420px" persistent>
+        <v-card title="Scan repository">
+          <v-card-text>
+            <span class="text-body-2">{{ repoToScan?.name }}</span>
+            <p class="text-body-2 mt-2 mb-0">
+              <strong>Scan all tags</strong> – discovers full history (can be slow for large repos).
+            </p>
+            <p class="text-body-2 mt-1 mb-0">
+              <strong>Scan only latest</strong> – one tag per image (prefer "latest"), faster and less history.
+            </p>
+          </v-card-text>
+          <v-card-actions>
+            <v-spacer></v-spacer>
+            <v-btn variant="text" @click="scanDialog = false">Cancel</v-btn>
+            <v-btn color="primary" variant="tonal" @click="runScan(true)">
+              Scan only latest
+            </v-btn>
+            <v-btn color="primary" variant="elevated" @click="runScan(false)">
+              Scan all tags
+            </v-btn>
+          </v-card-actions>
+        </v-card>
+      </v-dialog>
     </v-container>
   </div>
 </template>
@@ -219,10 +253,14 @@ const itemsPerPage = ref(25)
 const totalItems = ref(0)
 const sortBy = ref<SortItem[]>([{ key: 'name', order: 'asc' }])
 const repositoriesSearch = ref('')
+const hasActiveRepositoryScans = computed(() =>
+  repositories.value.some(repo => ['pending', 'in_process'].includes(repo.scan_status || 'none'))
+)
 const saving = ref(false)
 const deleting = ref(false)
 const dialog = ref(false)
 const dialogDelete = ref(false)
+let refreshTimer: number | null = null
 const defaultItem = {
   id: undefined,
   uuid: '',
@@ -240,6 +278,7 @@ const itemToDelete = ref<Repository | null>(null)
 const headers: any[] = [
   { title: 'Name', key: 'name', sortable: true },
   { title: 'URL', key: 'url', sortable: true },
+  { title: 'Status', key: 'scan_status', sortable: false, width: '190px' },
   { title: 'Tags', key: 'tag_count', align: 'center', sortable: true },
   { title: 'Created', key: 'created_at', sortable: true },
   { title: 'Updated', key: 'updated_at', sortable: true },
@@ -282,6 +321,21 @@ const fetchRepositories = async () => {
   }
 }
 
+const startAutoRefresh = () => {
+  if (refreshTimer !== null) return
+  refreshTimer = window.setInterval(() => {
+    if (!loading.value) {
+      fetchRepositories()
+    }
+  }, 5000)
+}
+
+const stopAutoRefresh = () => {
+  if (refreshTimer === null) return
+  window.clearInterval(refreshTimer)
+  refreshTimer = null
+}
+
 // Debounced fetch function to prevent multiple rapid requests
 let fetchTimeout: number | null = null
 let isInitialized = false
@@ -299,6 +353,13 @@ const debouncedFetchRepositories = () => {
 
 // Watch for changes and use debounced fetch
 watch([page, itemsPerPage, repositoriesSearch, sortBy], debouncedFetchRepositories, { flush: 'post' })
+watch(hasActiveRepositoryScans, (isActive) => {
+  if (isActive) {
+    startAutoRefresh()
+  } else {
+    stopAutoRefresh()
+  }
+}, { immediate: true })
 
 const onPageChange = (newPage: number) => {
   page.value = newPage
@@ -423,37 +484,69 @@ const getScanStatusTooltip = (status: string) => {
   return statusMap[status] || 'Start scan'
 }
 
+const repoStatusColor = (status: string) => {
+  const statusMap: Record<string, string> = {
+    pending: 'grey',
+    in_process: 'info',
+    success: 'success',
+    error: 'error',
+    none: 'default'
+  }
+  return statusMap[status] || 'default'
+}
+
 const isScanDisabled = (repo: Repository) => {
-  return repo.scan_status === 'in_process'
+  return ['pending', 'in_process'].includes(repo.scan_status)
 }
 
 const getScanTooltip = (repo: Repository) => {
-  if (repo.scan_status === 'in_process') {
+  if (['pending', 'in_process'].includes(repo.scan_status)) {
     return 'Repository is already being scanned'
   }
   return 'Scan repository'
 }
 
-const onScan = async (repo: Repository) => {
+const scanDialog = ref(false)
+const repoToScan = ref<Repository | null>(null)
+
+const onScan = (repo: Repository) => {
   if (!repo.uuid) {
     notificationService.error('Cannot scan repository: missing UUID')
     return
   }
   if (isScanDisabled(repo)) {
-    notificationService.warning(getScanTooltip(repo))
+    notificationService.conflict(getScanTooltip(repo))
     return
   }
+  repoToScan.value = repo
+  scanDialog.value = true
+}
+
+const runScan = async (latestOnly: boolean) => {
+  const repo = repoToScan.value
+  scanDialog.value = false
+  if (!repo?.uuid) return
+  const previousStatus = repo.scan_status
+  repo.scan_status = 'pending'
   try {
-    await api.post(`repositories/${repo.uuid}/scan_tags/`)
-    notificationService.success('Repository scan started successfully')
+    await api.post(`repositories/${repo.uuid}/scan_tags/`, { latest_only: latestOnly })
+    notificationService.queued(
+      latestOnly
+        ? 'Repository latest-tag scan was queued.'
+        : 'Repository scan was queued.'
+    )
     await fetchRepositories()
   } catch (error: any) {
+    repo.scan_status = previousStatus
     if (error.response?.status === 409) {
-      notificationService.warning(error.response.data.error || 'Repository is already being scanned')
+      notificationService.conflict(error.response.data.error || 'Repository is already being scanned')
+      fetchRepositories()
     } else {
       console.error('Error starting repository scan:', error)
       notificationService.error('Failed to start repository scan')
     }
+  } finally {
+    repoToScan.value = null
   }
 }
 
@@ -466,6 +559,7 @@ onUnmounted(() => {
   if (fetchTimeout) {
     clearTimeout(fetchTimeout)
   }
+  stopAutoRefresh()
 })
 </script>
 

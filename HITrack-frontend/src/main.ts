@@ -32,7 +32,6 @@ app.config.warnHandler = (msg: string, vm: any, trace: string) => {
 }
 
 // Add global properties
-app.config.globalProperties.$notify = notificationPlugin
 app.config.globalProperties.$formatDate = formatDate
 
 // Register global components
