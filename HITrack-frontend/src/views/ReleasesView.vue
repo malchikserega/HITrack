@@ -183,40 +183,168 @@
     </v-dialog>
 
     <!-- Release Details Dialog -->
-    <v-dialog v-model="detailsDialog" max-width="800px">
+    <v-dialog v-model="detailsDialog" max-width="1280px">
       <v-card>
-        <v-card-title class="text-h6 pa-4">
-          Release Details: {{ selectedRelease?.name }}
+        <v-card-title class="text-h6 pa-4 d-flex align-center">
+          <span>Release Details: {{ selectedRelease?.name }}</span>
+          <v-spacer />
+          <v-btn
+            variant="text"
+            color="primary"
+            prepend-icon="mdi-refresh"
+            :disabled="!selectedRelease"
+            @click="refreshSelectedReleaseContents"
+          >
+            Refresh
+          </v-btn>
+          <v-btn
+            color="primary"
+            prepend-icon="mdi-play-circle-outline"
+            :loading="releaseScanStarting"
+            :disabled="!selectedRelease || releasableScanCount === 0"
+            @click="scanUnscannedReleaseTags"
+          >
+            Scan Unscanned
+          </v-btn>
         </v-card-title>
         
         <v-card-text class="pa-4">
-          <v-row>
-            <v-col cols="12" md="6">
-              <h3 class="text-h6 mb-3">Release Information</h3>
-              <div class="mb-3">
-                <strong>Name:</strong> {{ selectedRelease?.name }}
-              </div>
-              <div class="mb-3">
-                <strong>Description:</strong> {{ selectedRelease?.description || 'No description' }}
-              </div>
-              <div class="mb-3">
-                <strong>Created:</strong> {{ formatDate(selectedRelease?.created_at) }}
-              </div>
-            </v-col>
-            
-            <v-col cols="12" md="6">
-              <h3 class="text-h6 mb-3">Statistics</h3>
-              <div class="mb-3">
-                <strong>Repository Tags:</strong> {{ selectedRelease?.tag_count || 0 }}
-              </div>
-              <div class="mb-3">
-                <strong>Critical Vulnerabilities:</strong> {{ selectedRelease?.critical_vulnerabilities || 0 }}
-              </div>
-              <div class="mb-3">
-                <strong>High Vulnerabilities:</strong> {{ selectedRelease?.high_vulnerabilities || 0 }}
-              </div>
-            </v-col>
-          </v-row>
+          <div v-if="releaseContentsLoading" class="release-details-loading">
+            <v-progress-circular indeterminate color="primary" />
+          </div>
+
+          <div v-else-if="releaseContents">
+            <v-row class="mb-4">
+              <v-col cols="12" md="5">
+                <h3 class="text-h6 mb-3">Release Information</h3>
+                <div class="mb-3">
+                  <strong>Name:</strong> {{ releaseContents.release.name }}
+                </div>
+                <div class="mb-3">
+                  <strong>Description:</strong> {{ releaseContents.release.description || 'No description' }}
+                </div>
+                <div class="mb-3">
+                  <strong>Created:</strong> {{ formatDate(releaseContents.release.created_at) }}
+                </div>
+                <div class="mb-3">
+                  <strong>Repository Tags:</strong> {{ releaseSummary.total_tags }}
+                </div>
+              </v-col>
+
+              <v-col cols="12" md="7">
+                <h3 class="text-h6 mb-3">Scan Summary</h3>
+                <div class="release-summary-grid">
+                  <v-chip color="success" variant="tonal">Scanned: {{ releaseSummary.success_tags }}</v-chip>
+                  <v-chip color="info" variant="tonal">Queued: {{ releaseSummary.pending_tags }}</v-chip>
+                  <v-chip color="warning" variant="tonal">Processing: {{ releaseSummary.in_process_tags }}</v-chip>
+                  <v-chip color="error" variant="tonal">Error: {{ releaseSummary.error_tags }}</v-chip>
+                  <v-chip color="grey" variant="tonal">Not Scanned: {{ releaseSummary.unscanned_tags }}</v-chip>
+                  <v-chip color="primary" variant="tonal">Images: {{ releaseSummary.total_images }}</v-chip>
+                </div>
+
+                <v-alert
+                  :type="releaseSummary.all_tags_scanned ? 'success' : 'warning'"
+                  variant="tonal"
+                  class="mt-4"
+                >
+                  <template v-if="releaseSummary.all_tags_scanned">
+                    All tags included in this release are fully scanned.
+                  </template>
+                  <template v-else>
+                    This release still has {{ incompleteReleaseTagCount }} tag(s) that are not fully scanned yet.
+                  </template>
+                </v-alert>
+              </v-col>
+            </v-row>
+
+            <v-data-table
+              :headers="releaseTagHeaders"
+              :items="releaseTags"
+              item-value="uuid"
+              density="comfortable"
+              class="elevation-1"
+            >
+              <template #item.repository="{ item }">
+                <div class="release-tag-repository">
+                  <div class="font-weight-medium">{{ item.repository.name }}</div>
+                  <div class="text-caption text-medium-emphasis">{{ item.repository.repository_type }}</div>
+                </div>
+              </template>
+
+              <template #item.tag="{ item }">
+                <div class="release-tag-name">
+                  <v-chip size="small" color="primary" variant="tonal">{{ item.tag }}</v-chip>
+                  <span v-if="item.image_path" class="text-caption text-medium-emphasis">{{ item.image_path }}</span>
+                </div>
+              </template>
+
+              <template #item.image_names="{ item }">
+                <div class="release-image-cell">
+                  <div v-if="item.image_names.length" class="release-image-chips">
+                    <v-chip
+                      v-for="imageName in getReleaseImagePreview(item)"
+                      :key="imageName"
+                      size="x-small"
+                      variant="outlined"
+                    >
+                      {{ imageName }}
+                    </v-chip>
+                    <v-chip
+                      v-if="getHiddenReleaseImageCount(item) > 0"
+                      size="x-small"
+                      color="primary"
+                      variant="tonal"
+                    >
+                      +{{ getHiddenReleaseImageCount(item) }} more
+                    </v-chip>
+                  </div>
+                  <span v-else class="text-caption text-medium-emphasis">No linked images</span>
+                </div>
+              </template>
+
+              <template #item.processing_status="{ item }">
+                <v-chip
+                  :color="getReleaseScanStatusColor(item.processing_status)"
+                  size="small"
+                  variant="tonal"
+                >
+                  {{ formatReleaseScanStatus(item.processing_status) }}
+                </v-chip>
+              </template>
+
+              <template #item.scan_progress="{ item }">
+                <span class="text-body-2">{{ formatReleaseTagScanProgress(item) }}</span>
+              </template>
+
+              <template #item.findings="{ item }">
+                <v-chip size="small" color="error" variant="tonal">
+                  {{ item.findings }}
+                </v-chip>
+              </template>
+
+              <template #item.components="{ item }">
+                <v-chip size="small" color="info" variant="tonal">
+                  {{ item.components }}
+                </v-chip>
+              </template>
+
+              <template #item.updated_at="{ item }">
+                <span class="text-body-2">{{ formatDate(item.updated_at) }}</span>
+              </template>
+
+              <template #item.actions="{ item }">
+                <v-btn
+                  size="small"
+                  variant="text"
+                  color="primary"
+                  prepend-icon="mdi-open-in-new"
+                  @click="openReleaseTagImages(item)"
+                >
+                  Open Tag
+                </v-btn>
+              </template>
+            </v-data-table>
+          </div>
         </v-card-text>
         
         <v-card-actions class="pa-4">
@@ -545,7 +673,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { notificationService } from '@/plugins/notifications'
 import api from '@/plugins/axios'
@@ -558,6 +686,56 @@ interface Release {
   critical_vulnerabilities: number
   high_vulnerabilities: number
   created_at: string
+}
+
+interface ReleaseTagItem {
+  uuid: string
+  tag: string
+  image_path: string
+  processing_status: string
+  findings: number
+  components: number
+  vulnerabilities_count: number
+  total_images: number
+  success_images: number
+  pending_images: number
+  in_process_images: number
+  error_images: number
+  image_names: string[]
+  created_at: string
+  updated_at: string
+  repository: {
+    uuid: string
+    name: string
+    url: string
+    repository_type: string
+  }
+}
+
+interface ReleaseContentsSummary {
+  total_tags: number
+  success_tags: number
+  pending_tags: number
+  in_process_tags: number
+  error_tags: number
+  unscanned_tags: number
+  total_images: number
+  success_images: number
+  pending_images: number
+  in_process_images: number
+  error_images: number
+  all_tags_scanned: boolean
+}
+
+interface ReleaseContentsResponse {
+  release: {
+    uuid: string
+    name: string
+    description: string
+    created_at: string
+  }
+  summary: ReleaseContentsSummary
+  tags: ReleaseTagItem[]
 }
 
 const router = useRouter()
@@ -576,6 +754,10 @@ const formValid = ref(false)
 const selectedRelease = ref<Release | null>(null)
 const releaseToDelete = ref<Release | null>(null)
 const editingRelease = ref<Release | null>(null)
+const releaseContents = ref<ReleaseContentsResponse | null>(null)
+const releaseContentsLoading = ref(false)
+const releaseScanStarting = ref(false)
+const releasePollingTimer = ref<number | undefined>(undefined)
 
 // JSON Wizard variables
 const jsonWizardDialog = ref(false)
@@ -612,6 +794,18 @@ const headers = [
   { title: 'Actions', key: 'actions', sortable: false }
 ]
 
+const releaseTagHeaders = [
+  { title: 'Repository', key: 'repository', sortable: false },
+  { title: 'Tag', key: 'tag', sortable: true },
+  { title: 'Images', key: 'image_names', sortable: false },
+  { title: 'Scan Status', key: 'processing_status', sortable: true },
+  { title: 'Scan Progress', key: 'scan_progress', sortable: false },
+  { title: 'Findings', key: 'findings', sortable: true },
+  { title: 'Components', key: 'components', sortable: true },
+  { title: 'Updated', key: 'updated_at', sortable: true },
+  { title: 'Actions', key: 'actions', sortable: false }
+]
+
 // JSON Wizard table headers
 const jsonTableHeaders = [
   { title: 'Helm Tag', key: 'helm_tag', sortable: true },
@@ -637,6 +831,38 @@ const hasFoundTags = computed(() => {
     (item.tag_status === 'Found' || item.tag_uuid)
   )
 })
+
+const releaseTags = computed(() => releaseContents.value?.tags || [])
+
+const releaseSummary = computed<ReleaseContentsSummary>(() => releaseContents.value?.summary || {
+  total_tags: 0,
+  success_tags: 0,
+  pending_tags: 0,
+  in_process_tags: 0,
+  error_tags: 0,
+  unscanned_tags: 0,
+  total_images: 0,
+  success_images: 0,
+  pending_images: 0,
+  in_process_images: 0,
+  error_images: 0,
+  all_tags_scanned: false
+})
+
+const releaseHasActiveScanning = computed(() => (
+  releaseSummary.value.pending_tags > 0 ||
+  releaseSummary.value.in_process_tags > 0 ||
+  releaseSummary.value.pending_images > 0 ||
+  releaseSummary.value.in_process_images > 0
+))
+
+const incompleteReleaseTagCount = computed(() => (
+  releaseSummary.value.total_tags - releaseSummary.value.success_tags
+))
+
+const releasableScanCount = computed(() => (
+  releaseTags.value.filter(tag => !['success', 'pending', 'in_process'].includes(tag.processing_status)).length
+))
 
 // Methods
 const fetchReleases = async () => {
@@ -727,9 +953,10 @@ const saveRelease = async () => {
   }
 }
 
-const viewRelease = (release: Release) => {
+const viewRelease = async (release: Release) => {
   selectedRelease.value = release
   detailsDialog.value = true
+  await fetchReleaseContents(release.uuid)
 }
 
 const deleteRelease = (release: Release) => {
@@ -759,6 +986,140 @@ const confirmDelete = async () => {
 const formatDate = (dateString: string | undefined) => {
   if (!dateString) return ''
   return new Date(dateString).toLocaleDateString()
+}
+
+const getReleaseScanStatusColor = (status: string) => {
+  switch (status) {
+    case 'success':
+      return 'success'
+    case 'pending':
+      return 'info'
+    case 'in_process':
+      return 'warning'
+    case 'error':
+      return 'error'
+    default:
+      return 'grey'
+  }
+}
+
+const formatReleaseScanStatus = (status: string) => {
+  switch (status) {
+    case 'success':
+      return 'Scanned'
+    case 'pending':
+      return 'Queued'
+    case 'in_process':
+      return 'Processing'
+    case 'error':
+      return 'Error'
+    default:
+      return 'Not scanned'
+  }
+}
+
+const formatReleaseTagScanProgress = (tag: ReleaseTagItem) => {
+  if (!tag.total_images) {
+    return 'No linked images yet'
+  }
+
+  const parts = [`${tag.success_images}/${tag.total_images} scanned`]
+  if (tag.pending_images) {
+    parts.push(`${tag.pending_images} pending`)
+  }
+  if (tag.in_process_images) {
+    parts.push(`${tag.in_process_images} processing`)
+  }
+  if (tag.error_images) {
+    parts.push(`${tag.error_images} error`)
+  }
+
+  return parts.join(' • ')
+}
+
+const getReleaseImagePreview = (tag: ReleaseTagItem) => {
+  return (tag.image_names || []).slice(0, 2)
+}
+
+const getHiddenReleaseImageCount = (tag: ReleaseTagItem) => {
+  return Math.max((tag.image_names || []).length - getReleaseImagePreview(tag).length, 0)
+}
+
+const fetchReleaseContents = async (releaseUuid: string, showLoader = true) => {
+  if (showLoader) {
+    releaseContentsLoading.value = true
+  }
+
+  try {
+    const response = await api.get(`/releases/${releaseUuid}/contents/`)
+    releaseContents.value = response.data
+  } catch (error) {
+    console.error('Error fetching release contents:', error)
+    notificationService.error('Failed to load release contents')
+  } finally {
+    if (showLoader) {
+      releaseContentsLoading.value = false
+    }
+  }
+}
+
+const refreshSelectedReleaseContents = async () => {
+  if (!selectedRelease.value) return
+  await fetchReleaseContents(selectedRelease.value.uuid)
+}
+
+const openReleaseTagImages = (tag: ReleaseTagItem) => {
+  detailsDialog.value = false
+  router.push({ name: 'tag-images', params: { uuid: tag.uuid } })
+}
+
+const scanUnscannedReleaseTags = async () => {
+  if (!selectedRelease.value) return
+
+  releaseScanStarting.value = true
+  try {
+    const response = await api.post(`/releases/${selectedRelease.value.uuid}/scan-unscanned/`)
+    const summary = response.data.summary || {}
+
+    if (summary.queued_tags > 0) {
+      notificationService.queued(
+        `${summary.queued_tags} release tag(s) queued for scanning`,
+        3400,
+        { dedupeKey: `release-scan:${selectedRelease.value.uuid}` },
+      )
+    } else if (summary.already_running_tags > 0) {
+      notificationService.conflict('Release already has tags being processed')
+    } else {
+      notificationService.completed('All release tags are already fully scanned')
+    }
+
+    await fetchReleaseContents(selectedRelease.value.uuid, false)
+  } catch (error) {
+    console.error('Error queueing release scan:', error)
+    notificationService.error('Failed to queue release tag scanning')
+  } finally {
+    releaseScanStarting.value = false
+  }
+}
+
+const stopReleasePolling = () => {
+  if (releasePollingTimer.value) {
+    clearInterval(releasePollingTimer.value)
+    releasePollingTimer.value = undefined
+  }
+}
+
+const syncReleasePolling = () => {
+  stopReleasePolling()
+  if (!detailsDialog.value || !selectedRelease.value || !releaseHasActiveScanning.value) {
+    return
+  }
+
+  releasePollingTimer.value = window.setInterval(() => {
+    if (selectedRelease.value) {
+      fetchReleaseContents(selectedRelease.value.uuid, false)
+    }
+  }, 5000)
 }
 
 // JSON Wizard functions
@@ -1023,6 +1384,23 @@ onMounted(() => {
   fetchReleases()
   fetchReleaseNames()
 })
+
+watch(
+  () => [detailsDialog.value, selectedRelease.value?.uuid, releaseHasActiveScanning.value],
+  () => {
+    syncReleasePolling()
+  },
+)
+
+watch(detailsDialog, (isOpen) => {
+  if (!isOpen) {
+    stopReleasePolling()
+  }
+})
+
+onUnmounted(() => {
+  stopReleasePolling()
+})
 </script>
 
 <style scoped>
@@ -1035,6 +1413,39 @@ onMounted(() => {
 
 .v-data-table {
   border-radius: 8px;
+}
+
+.release-details-loading {
+  display: flex;
+  justify-content: center;
+  padding: 32px 0;
+}
+
+.release-summary-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.release-tag-repository {
+  display: flex;
+  flex-direction: column;
+}
+
+.release-tag-name {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.release-image-cell {
+  min-width: 240px;
+}
+
+.release-image-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 /* Matrix theme override */

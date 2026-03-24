@@ -35,6 +35,7 @@ from django.shortcuts import render
 import re
 import logging
 from django.conf import settings
+from .utils.status import resolve_repository_tag_processing_status
 
 logger = logging.getLogger(__name__)
 
@@ -301,6 +302,86 @@ def _attach_repository_tag_summary_data(tags):
         tag.in_process_images_count = tag_status_counts.get('in_process', 0)
         tag.error_images_count = tag_status_counts.get('error', 0)
         tag.success_images_count = tag_status_counts.get('success', 0)
+
+
+def _build_release_repository_tag_payload(tags):
+    serialized_tags = []
+    summary = {
+        'total_tags': 0,
+        'success_tags': 0,
+        'pending_tags': 0,
+        'in_process_tags': 0,
+        'error_tags': 0,
+        'unscanned_tags': 0,
+        'total_images': 0,
+        'success_images': 0,
+        'pending_images': 0,
+        'in_process_images': 0,
+        'error_images': 0,
+    }
+
+    for tag in tags:
+        total_images = getattr(tag, 'total_images_count', 0) or 0
+        pending_images = getattr(tag, 'pending_images_count', 0) or 0
+        in_process_images = getattr(tag, 'in_process_images_count', 0) or 0
+        error_images = getattr(tag, 'error_images_count', 0) or 0
+        success_images = getattr(tag, 'success_images_count', 0) or 0
+        effective_status = resolve_repository_tag_processing_status(
+            getattr(tag, 'processing_status', 'none'),
+            total_images,
+            pending_images,
+            in_process_images,
+            error_images,
+            success_images,
+        )
+
+        summary['total_tags'] += 1
+        summary['total_images'] += total_images
+        summary['success_images'] += success_images
+        summary['pending_images'] += pending_images
+        summary['in_process_images'] += in_process_images
+        summary['error_images'] += error_images
+
+        if effective_status == 'success':
+            summary['success_tags'] += 1
+        elif effective_status == 'pending':
+            summary['pending_tags'] += 1
+        elif effective_status == 'in_process':
+            summary['in_process_tags'] += 1
+        elif effective_status == 'error':
+            summary['error_tags'] += 1
+        else:
+            summary['unscanned_tags'] += 1
+
+        serialized_tags.append({
+            'uuid': str(tag.uuid),
+            'tag': tag.tag,
+            'image_path': tag.image_path,
+            'processing_status': effective_status,
+            'findings': getattr(tag, 'total_findings', 0) or 0,
+            'components': getattr(tag, 'total_components', 0) or 0,
+            'vulnerabilities_count': getattr(tag, 'total_unique_vulnerabilities', 0) or 0,
+            'total_images': total_images,
+            'success_images': success_images,
+            'pending_images': pending_images,
+            'in_process_images': in_process_images,
+            'error_images': error_images,
+            'image_names': getattr(tag, 'image_names_data', []) or [],
+            'created_at': tag.created_at,
+            'updated_at': tag.updated_at,
+            'repository': {
+                'uuid': str(tag.repository.uuid),
+                'name': tag.repository.name,
+                'url': tag.repository.url,
+                'repository_type': tag.repository.repository_type,
+            },
+        })
+
+    summary['all_tags_scanned'] = (
+        summary['total_tags'] > 0 and summary['success_tags'] == summary['total_tags']
+    )
+
+    return serialized_tags, summary
 
 class BaseViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
@@ -1574,6 +1655,91 @@ class ReleaseViewSet(BaseViewSet):
         """Get only release names and UUIDs for validation purposes"""
         releases = Release.objects.values('uuid', 'name').order_by('name')
         return Response(list(releases))
+
+    @action(detail=True, methods=['get'])
+    def contents(self, request, uuid=None):
+        """Return all repository tags included in the release with scan status summary."""
+        release = self.get_object()
+        tags = list(
+            RepositoryTag.objects.filter(releases__release=release)
+            .select_related('repository')
+            .order_by('repository__name', '-updated_at', 'tag')
+        )
+        _attach_repository_tag_summary_data(tags)
+        serialized_tags, summary = _build_release_repository_tag_payload(tags)
+
+        return Response({
+            'release': {
+                'uuid': str(release.uuid),
+                'name': release.name,
+                'description': release.description,
+                'created_at': release.created_at,
+            },
+            'summary': summary,
+            'tags': serialized_tags,
+        })
+
+    @action(detail=True, methods=['post'], url_path='scan-unscanned')
+    def scan_unscanned(self, request, uuid=None):
+        """Queue processing only for release tags that are not fully scanned yet."""
+        from .tasks import process_single_tag
+
+        release = self.get_object()
+        tags = list(
+            RepositoryTag.objects.filter(releases__release=release)
+            .select_related('repository')
+            .order_by('repository__name', 'tag')
+        )
+        _attach_repository_tag_summary_data(tags)
+
+        queued_tag_uuids = []
+        already_running_tag_uuids = []
+        skipped_success_tag_uuids = []
+
+        for tag in tags:
+            total_images = getattr(tag, 'total_images_count', 0) or 0
+            pending_images = getattr(tag, 'pending_images_count', 0) or 0
+            in_process_images = getattr(tag, 'in_process_images_count', 0) or 0
+            error_images = getattr(tag, 'error_images_count', 0) or 0
+            success_images = getattr(tag, 'success_images_count', 0) or 0
+            effective_status = resolve_repository_tag_processing_status(
+                getattr(tag, 'processing_status', 'none'),
+                total_images,
+                pending_images,
+                in_process_images,
+                error_images,
+                success_images,
+            )
+
+            if effective_status == 'success':
+                skipped_success_tag_uuids.append(str(tag.uuid))
+                continue
+            if effective_status in ['pending', 'in_process']:
+                already_running_tag_uuids.append(str(tag.uuid))
+                continue
+
+            tag.processing_status = 'pending'
+            tag.save(update_fields=['processing_status', 'updated_at'])
+            process_single_tag.apply_async(args=[str(tag.uuid)], task_name="Process Single Tag")
+            queued_tag_uuids.append(str(tag.uuid))
+
+        return Response({
+            'status': 'success',
+            'message': (
+                f'Queued {len(queued_tag_uuids)} release tag(s) for scanning; '
+                f'{len(already_running_tag_uuids)} already running, '
+                f'{len(skipped_success_tag_uuids)} already complete'
+            ),
+            'summary': {
+                'total_tags_seen': len(tags),
+                'queued_tags': len(queued_tag_uuids),
+                'already_running_tags': len(already_running_tag_uuids),
+                'already_scanned_tags': len(skipped_success_tag_uuids),
+            },
+            'queued_tag_uuids': queued_tag_uuids,
+            'already_running_tag_uuids': already_running_tag_uuids,
+            'already_scanned_tag_uuids': skipped_success_tag_uuids,
+        })
 
 
 class VulnerabilityViewSet(BaseViewSet):
