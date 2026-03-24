@@ -86,6 +86,9 @@ export interface Vulnerability extends BaseEntity {
   epss: number
   fixable?: boolean
   fix?: string
+  fix_status?: string
+  fix_state?: string
+  fix_versions?: string[]
   details?: VulnerabilityDetails
   has_details: boolean
   exploit_available: boolean

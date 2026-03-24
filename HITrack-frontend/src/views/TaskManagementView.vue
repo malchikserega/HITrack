@@ -71,7 +71,7 @@
             </v-row>
             
             <v-row class="mt-4">
-              <v-col cols="12" md="4">
+              <v-col cols="12" md="3">
                 <v-btn
                   block
                   color="primary"
@@ -84,7 +84,7 @@
                   Update All Components Latest Versions
                 </v-btn>
               </v-col>
-              <v-col cols="12" md="4">
+              <v-col cols="12" md="3">
                 <v-btn
                   block
                   color="indigo"
@@ -97,7 +97,20 @@
                   Update Deb Latest Versions
                 </v-btn>
               </v-col>
-              <v-col cols="12" md="4">
+              <v-col cols="12" md="3">
+                <v-btn
+                  block
+                  color="deep-orange"
+                  prepend-icon="mdi-wrench-check"
+                  @click="recalculateVulnerabilityFixAvailability"
+                  :loading="recalculateFixAvailabilityLoading"
+                  size="large"
+                  class="action-btn"
+                >
+                  Recalculate Fix Availability
+                </v-btn>
+              </v-col>
+              <v-col cols="12" md="3">
                 <v-btn
                   block
                   color="secondary"
@@ -420,6 +433,7 @@ export default defineComponent({
     const testEndpointLoading = ref(false)
     const updateComponentsLoading = ref(false)
     const updateDebComponentsLoading = ref(false)
+    const recalculateFixAvailabilityLoading = ref(false)
     const stoppingTasks = ref<string[]>([])
     const tasks = ref<TaskResult[]>([])
     const periodicTasks = ref<PeriodicTask[]>([])
@@ -638,6 +652,22 @@ export default defineComponent({
       }
     }
 
+    const recalculateVulnerabilityFixAvailability = async () => {
+      recalculateFixAvailabilityLoading.value = true
+      try {
+        const response = await api.post('/test-tasks/recalculate_vulnerability_fix_availability/')
+        if (response.data?.task_id) {
+          upsertPendingTask(response.data.task_id, 'Recalculate Vulnerability Fix Availability')
+        }
+        notificationService.started('Fix availability recalculation task started.')
+      } catch (error) {
+        console.error('Error recalculating vulnerability fix availability:', error)
+        notificationService.error(`Failed to start fix availability recalculation: ${error}`)
+      } finally {
+        recalculateFixAvailabilityLoading.value = false
+      }
+    }
+
     const viewTaskDetails = (task: TaskResult) => {
       selectedTask.value = task
       taskDetailsDialog.value = true
@@ -700,6 +730,7 @@ export default defineComponent({
       if (taskName.includes('Test Direct API')) return 'mdi-api'
       if (taskName.includes('Scan')) return 'mdi-magnify'
       if (taskName.includes('Update')) return 'mdi-update'
+      if (taskName.includes('Recalculate')) return 'mdi-wrench-check'
       if (taskName.includes('Process')) return 'mdi-cog'
       if (taskName.includes('Parse')) return 'mdi-file-document'
       if (taskName.includes('Delete')) return 'mdi-delete'
@@ -769,6 +800,7 @@ export default defineComponent({
           testEndpointLoading,
           updateComponentsLoading,
           updateDebComponentsLoading,
+          recalculateFixAvailabilityLoading,
           stoppingTasks,
           tasks,
           periodicTasks,
@@ -790,6 +822,7 @@ export default defineComponent({
           testDirectAPI,
           updateAllComponentsLatestVersions,
           updateDebComponentsLatestVersions,
+          recalculateVulnerabilityFixAvailability,
           viewTaskDetails,
           retryTask,
           stopTask,

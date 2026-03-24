@@ -246,7 +246,7 @@ class ImageShortSerializer(serializers.ModelSerializer):
 class ComponentVersionVulnerabilitySerializer(serializers.ModelSerializer):
     class Meta:
         model = ComponentVersionVulnerability
-        fields = ['fixable', 'fix']
+        fields = ['fixable', 'fix', 'fix_status', 'fix_state', 'fix_versions']
 
 
 class ComponentVersionSerializer(serializers.ModelSerializer):
@@ -277,6 +277,9 @@ class ComponentVersionSerializer(serializers.ModelSerializer):
             vuln_data = VulnerabilityShortSerializer(cvv.vulnerability).data
             vuln_data['fixable'] = cvv.fixable
             vuln_data['fix'] = cvv.fix
+            vuln_data['fix_status'] = cvv.fix_status
+            vuln_data['fix_state'] = cvv.fix_state
+            vuln_data['fix_versions'] = cvv.fix_versions
             vulns.append(vuln_data)
         return vulns
 

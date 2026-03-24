@@ -306,6 +306,102 @@ def _lookup_latest_version_for_purl(purl: str) -> str | None:
     return latest_version
 
 
+def _normalize_fix_versions(raw_versions) -> list[str]:
+    if not isinstance(raw_versions, list):
+        return []
+
+    normalized_versions = []
+    seen_versions = set()
+    for raw_version in raw_versions:
+        version = str(raw_version).strip()
+        if not version or version in seen_versions:
+            continue
+        seen_versions.add(version)
+        normalized_versions.append(version)
+    return normalized_versions
+
+
+def _normalize_fix_state(raw_state) -> str | None:
+    state = str(raw_state or "").strip().lower()
+    return state or None
+
+
+def _is_deb_component_version(component_version_obj) -> bool:
+    component = getattr(component_version_obj, 'component', None)
+    component_type = getattr(component, 'type', None)
+    if str(component_type or '').lower() == 'deb':
+        return True
+
+    metadata = _parse_purl_metadata(getattr(component_version_obj, 'purl', None))
+    return bool(metadata and metadata.get('package_type') == 'deb')
+
+
+def _dpkg_version_gte(left_version: str, right_version: str) -> bool | None:
+    if not left_version or not right_version:
+        return None
+
+    try:
+        result = subprocess.run(
+            ['dpkg', '--compare-versions', str(left_version), 'ge', str(right_version)],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except (FileNotFoundError, OSError):
+        return None
+
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    return None
+
+
+def _determine_fix_metadata(component_version_obj, vulnerability_data: dict) -> dict:
+    fix_data = vulnerability_data.get('fix', {})
+    if not isinstance(fix_data, dict):
+        fix_data = {}
+
+    fix_versions = _normalize_fix_versions(fix_data.get('versions', []))
+    raw_fix_state = str(fix_data.get('state', '') or '').strip() or None
+    normalized_fix_state = _normalize_fix_state(raw_fix_state)
+
+    fixable = bool(fix_versions)
+    fix_status = 'unknown'
+
+    if fix_versions:
+        fix_status = 'available'
+        if _is_deb_component_version(component_version_obj):
+            latest_repo_version = str(getattr(component_version_obj, 'latest_version', '') or '').strip()
+            if latest_repo_version:
+                comparisons = [
+                    _dpkg_version_gte(latest_repo_version, fix_version)
+                    for fix_version in fix_versions
+                ]
+                known_comparisons = [result for result in comparisons if result is not None]
+                if known_comparisons and not any(known_comparisons):
+                    fixable = False
+                    fix_status = 'not_in_repo'
+    elif normalized_fix_state == 'wont-fix':
+        fix_status = 'wont_fix'
+    elif normalized_fix_state == 'not-fixed':
+        fix_status = 'not_fixed'
+    elif normalized_fix_state == 'fixed':
+        fix_status = 'version_unknown'
+
+    fix_display = ', '.join(fix_versions) if fix_versions else (raw_fix_state or '')
+    if fix_status == 'not_in_repo' and fix_display:
+        fix_display = f"{fix_display} (not yet in repo)"
+
+    return {
+        'fixable': fixable,
+        'fix': fix_display,
+        'fix_state': raw_fix_state,
+        'fix_status': fix_status,
+        'fix_versions': fix_versions,
+    }
+
+
 def _run_bulk_component_latest_version_update(
     queryset,
     task_name: str,
@@ -1956,12 +2052,6 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
                 epss_score = epss_data[0].get('epss', 0.0)
             elif isinstance(epss_data, (int, float)):
                 epss_score = float(epss_data)
-            fix_data = vulnerability_data.get('fix', {})
-            fix_versions = fix_data.get('versions', []) if isinstance(fix_data, dict) else []
-            fix_state = fix_data.get('state', '') if isinstance(fix_data, dict) else ''
-            fixable = bool(fix_versions) or (bool(fix_state) and fix_state.lower() not in ['wont-fix', 'not-fixed', ''])
-            fixable = bool(fixable)
-            fix_str = ', '.join(fix_versions) if fix_versions else (fix_state or '')
 
             # Get or create vulnerability (safe for parallel)
             vulnerability, _ = Vulnerability.objects.get_or_create(
@@ -2021,6 +2111,9 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
                     updated = True
                 if updated:
                     component_version_obj.save()
+
+                fix_metadata = _determine_fix_metadata(component_version_obj, vulnerability_data)
+
                 # Link image to component version (use in-memory set to skip DB check)
                 if component_version_obj.pk not in _linked_cv_pks:
                     component_version_obj.images.add(image)
@@ -2060,19 +2153,17 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
                 cvv, _ = ComponentVersionVulnerability.objects.get_or_create(
                     component_version=component_version_obj,
                     vulnerability=vulnerability,
-                    defaults={'fixable': fixable, 'fix': fix_str}
+                    defaults=fix_metadata,
                 )
                 # Update fix info if needed
                 if not _:
                     updated = False
-                    if cvv.fixable != fixable:
-                        cvv.fixable = fixable
-                        updated = True
-                    if cvv.fix != fix_str:
-                        cvv.fix = fix_str
-                        updated = True
+                    for field_name, field_value in fix_metadata.items():
+                        if getattr(cvv, field_name) != field_value:
+                            setattr(cvv, field_name, field_value)
+                            updated = True
                     if updated:
-                        cvv.save()
+                        cvv.save(update_fields=['fixable', 'fix', 'fix_state', 'fix_status', 'fix_versions', 'updated_at'])
 
         # Set status to success only after all matches are processed
         image.scan_status = 'success'
@@ -4231,3 +4322,144 @@ def update_deb_components_latest_versions():
         skip_recent_days=30,
         batch_size=50,
     )
+
+
+@celery_app.task(name="Recalculate Vulnerability Fix Availability")
+def recalculate_vulnerability_fix_availability():
+    """
+    Recalculate fix availability metadata for existing vulnerabilities using stored Grype data.
+    This updates current DB rows without rescanning images.
+    """
+    from .models import Image, ComponentVersionVulnerability
+
+    logger.info("Starting vulnerability fix availability recalculation")
+    start_time = time.time()
+
+    images_processed = 0
+    images_with_matches = 0
+    images_without_grype_matches = 0
+    findings_seen = 0
+    duplicate_matches_skipped = 0
+    unmatched_findings = 0
+    cvvs_updated = 0
+
+    try:
+        images_qs = Image.objects.filter(grype_data__isnull=False).only('pk', 'uuid', 'grype_data')
+        total_images = images_qs.count()
+
+        for image in images_qs.iterator(chunk_size=50):
+            images_processed += 1
+            grype_data = image.grype_data if isinstance(image.grype_data, dict) else {}
+            matches = grype_data.get('matches', [])
+            if not isinstance(matches, list) or not matches:
+                images_without_grype_matches += 1
+                continue
+
+            images_with_matches += 1
+
+            component_names = set()
+            component_versions = set()
+            vulnerability_ids = set()
+
+            for match in matches:
+                artifact = match.get('artifact', {}) if isinstance(match, dict) else {}
+                vulnerability_data = match.get('vulnerability', {}) if isinstance(match, dict) else {}
+                component_name = artifact.get('name')
+                component_version = artifact.get('version')
+                vulnerability_id = vulnerability_data.get('id')
+
+                if component_name:
+                    component_names.add(component_name)
+                if component_name and component_version:
+                    component_versions.add(component_version)
+                if vulnerability_id:
+                    vulnerability_ids.add(vulnerability_id)
+
+            cvv_rows = ComponentVersionVulnerability.objects.filter(
+                component_version__images=image,
+                component_version__component__name__in=component_names,
+                component_version__version__in=component_versions,
+                vulnerability__vulnerability_id__in=vulnerability_ids,
+            ).select_related('component_version', 'component_version__component', 'vulnerability')
+
+            cvv_map = {
+                (
+                    cvv.component_version.component.name,
+                    cvv.component_version.version,
+                    cvv.vulnerability.vulnerability_id,
+                ): cvv
+                for cvv in cvv_rows
+            }
+
+            processed_keys = set()
+            cvvs_to_update = []
+            update_timestamp = timezone.now()
+
+            for match in matches:
+                artifact = match.get('artifact', {}) if isinstance(match, dict) else {}
+                vulnerability_data = match.get('vulnerability', {}) if isinstance(match, dict) else {}
+                component_name = artifact.get('name')
+                component_version = artifact.get('version')
+                vulnerability_id = vulnerability_data.get('id')
+
+                if not component_name or not component_version or not vulnerability_id:
+                    continue
+
+                findings_seen += 1
+                key = (component_name, component_version, vulnerability_id)
+                if key in processed_keys:
+                    duplicate_matches_skipped += 1
+                    continue
+                processed_keys.add(key)
+
+                cvv = cvv_map.get(key)
+                if not cvv:
+                    unmatched_findings += 1
+                    continue
+
+                fix_metadata = _determine_fix_metadata(cvv.component_version, vulnerability_data)
+
+                updated = False
+                for field_name, field_value in fix_metadata.items():
+                    if getattr(cvv, field_name) != field_value:
+                        setattr(cvv, field_name, field_value)
+                        updated = True
+
+                if updated:
+                    cvv.updated_at = update_timestamp
+                    cvvs_to_update.append(cvv)
+
+            if cvvs_to_update:
+                ComponentVersionVulnerability.objects.bulk_update(
+                    cvvs_to_update,
+                    ['fixable', 'fix', 'fix_state', 'fix_status', 'fix_versions', 'updated_at'],
+                    batch_size=200,
+                )
+                cvvs_updated += len(cvvs_to_update)
+
+        total_time = time.time() - start_time
+        logger.info("Completed vulnerability fix availability recalculation")
+
+        return {
+            "status": "success",
+            "task_name": "Recalculate Vulnerability Fix Availability",
+            "summary": {
+                "total_images_seen": total_images,
+                "images_processed": images_processed,
+                "images_with_grype_matches": images_with_matches,
+                "images_without_grype_matches": images_without_grype_matches,
+                "findings_seen": findings_seen,
+                "duplicate_matches_skipped": duplicate_matches_skipped,
+                "unmatched_findings": unmatched_findings,
+                "cvvs_updated": cvvs_updated,
+            },
+            "processing_time": total_time,
+        }
+    except Exception as e:
+        logger.error(f"Error recalculating vulnerability fix availability: {str(e)}")
+        return {
+            "status": "error",
+            "task_name": "Recalculate Vulnerability Fix Availability",
+            "error": str(e),
+            "error_type": type(e).__name__,
+        }

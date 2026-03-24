@@ -1154,7 +1154,7 @@ class ImageViewSet(BaseViewSet):
         cvv_qs = ComponentVersionVulnerability.objects.filter(
             vulnerability__pk__in=page_vuln_ids,
             component_version__images=image
-        ).values('vulnerability__pk', 'fixable', 'fix')
+        ).values('vulnerability__pk', 'fixable', 'fix', 'fix_status', 'fix_state', 'fix_versions')
         fix_map = {}
         for row in cvv_qs:
             fix_map.setdefault(row['vulnerability__pk'], row)
@@ -1166,9 +1166,15 @@ class ImageViewSet(BaseViewSet):
             if cvv_row:
                 vuln_dict['fixable'] = cvv_row['fixable']
                 vuln_dict['fix'] = cvv_row['fix']
+                vuln_dict['fix_status'] = cvv_row['fix_status']
+                vuln_dict['fix_state'] = cvv_row['fix_state']
+                vuln_dict['fix_versions'] = cvv_row['fix_versions']
             else:
                 vuln_dict['fixable'] = False
                 vuln_dict['fix'] = ''
+                vuln_dict['fix_status'] = 'unknown'
+                vuln_dict['fix_state'] = ''
+                vuln_dict['fix_versions'] = []
             vuln_data.append(vuln_dict)
         
         return paginator.get_paginated_response(vuln_data)
@@ -2426,7 +2432,7 @@ class ReportGeneratorView(APIView):
                             cvv.component_version.version,
                             cvv.vulnerability.vulnerability_id,
                             cvv.vulnerability.severity,
-                            cvv.fix if cvv.fixable else 'No fix available'
+                            cvv.fix or 'No fix metadata'
                         ])
                 else:
                     ws.append([
@@ -3041,6 +3047,23 @@ class TestTaskViewSet(viewsets.ViewSet):
             result = update_deb_components_latest_versions.delay()
             return Response({
                 'message': 'Deb components latest versions update started',
+                'task_id': result.id
+            })
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+    @action(detail=False, methods=['post'])
+    def recalculate_vulnerability_fix_availability(self, request):
+        """Recalculate fix availability metadata for existing vulnerability rows"""
+        from .tasks import recalculate_vulnerability_fix_availability
+
+        try:
+            result = recalculate_vulnerability_fix_availability.delay()
+            return Response({
+                'message': 'Vulnerability fix availability recalculation started',
                 'task_id': result.id
             })
         except Exception as e:

@@ -278,6 +278,7 @@ CELERY_TASK_ROUTES = {
     'Update Components Latest Versions': {'queue': 'light', 'routing_key': 'light'},
     'Update All Components Latest Versions': {'queue': 'light', 'routing_key': 'light'},
     'Update Deb Components Latest Versions': {'queue': 'light', 'routing_key': 'light'},
+    'Recalculate Vulnerability Fix Availability': {'queue': 'light', 'routing_key': 'light'},
     'Deduplicate Images by Identity': {'queue': 'light', 'routing_key': 'light'},
     'Delete Old Repository Tags': {'queue': 'light', 'routing_key': 'light'},
     'Update Vulnerability Details': {'queue': 'enrichment', 'routing_key': 'enrichment'},

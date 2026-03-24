@@ -277,6 +277,9 @@ class ComponentVersionVulnerability(models.Model):
     vulnerability = models.ForeignKey('Vulnerability', on_delete=models.CASCADE)
     fixable = models.BooleanField(default=False, help_text='True if a fix is available for this vulnerability in this component version')
     fix = models.CharField(max_length=255, blank=True, null=True, help_text='Fix version(s) or state from Grype report')
+    fix_state = models.CharField(max_length=64, blank=True, null=True, help_text='Raw fix state reported by Grype')
+    fix_status = models.CharField(max_length=32, default='unknown', help_text='Normalized fix availability status')
+    fix_versions = models.JSONField(default=list, blank=True, help_text='Structured fixed-in versions reported by Grype')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
