@@ -1435,7 +1435,27 @@ def process_all_tags():
                         helm_repo_key = repository.repo_key or repository.name
                         chart_url = get_helm_chart_url(registry, helm_repo_key, chart_name, repo_tag.tag)
                         if chart_url:
-                            image_refs = get_helm_images_from_native_chart(registry, chart_url)
+                            try:
+                                image_refs = get_helm_images_from_native_chart(registry, chart_url)
+                            except Exception as exc:
+                                logger.error(
+                                    "Failed Helm image discovery for %s:%s: %s",
+                                    repository.name,
+                                    repo_tag.tag,
+                                    exc,
+                                )
+                                repo_tag.processing_status = 'error'
+                                repo_tag.save(update_fields=['processing_status', 'updated_at'])
+                                continue
+                        else:
+                            logger.error(
+                                "Could not resolve chart URL for Helm tag %s:%s",
+                                repository.name,
+                                repo_tag.tag,
+                            )
+                            repo_tag.processing_status = 'error'
+                            repo_tag.save(update_fields=['processing_status', 'updated_at'])
+                            continue
                     else:
                         if repository.repo_key:
                             rk = repository.repo_key
@@ -1446,11 +1466,42 @@ def process_all_tags():
                         manifest, digest = get_manifest(registry, repo_for_manifest, repo_tag.tag, image_name=img_name)
                         if not manifest:
                             logger.warning(f"Could not get manifest for {repository.name}:{repo_tag.tag}")
+                            repo_tag.processing_status = 'error'
+                            repo_tag.save(update_fields=['processing_status', 'updated_at'])
                             continue
                         if is_helm_chart(manifest):
                             chart_digest = get_chart_digest(manifest)
                             if chart_digest:
-                                image_refs = list(get_helm_images(registry, repository.name, chart_digest))
+                                try:
+                                    image_refs = list(get_helm_images(registry, repository.name, chart_digest))
+                                except Exception as exc:
+                                    logger.error(
+                                        "Failed Helm image discovery for %s:%s: %s",
+                                        repository.name,
+                                        repo_tag.tag,
+                                        exc,
+                                    )
+                                    repo_tag.processing_status = 'error'
+                                    repo_tag.save(update_fields=['processing_status', 'updated_at'])
+                                    continue
+                            else:
+                                logger.error(
+                                    "Could not extract chart digest for Helm tag %s:%s",
+                                    repository.name,
+                                    repo_tag.tag,
+                                )
+                                repo_tag.processing_status = 'error'
+                                repo_tag.save(update_fields=['processing_status', 'updated_at'])
+                                continue
+                        else:
+                            logger.error(
+                                "Manifest for %s:%s is not recognized as a Helm chart",
+                                repository.name,
+                                repo_tag.tag,
+                            )
+                            repo_tag.processing_status = 'error'
+                            repo_tag.save(update_fields=['processing_status', 'updated_at'])
+                            continue
 
                     for image_ref in image_refs:
                         # Get image digest; for Helm skip primary when ref doesn't contain registry base or points at Helm repo
@@ -2880,6 +2931,31 @@ def process_single_tag(tag_uuid: str):
         registry = repository.container_registry
         logger.info(f"Processing tag {tag.tag} from repository {repository.name}")
 
+        def _helm_processing_error_result(message: str):
+            logger.error(
+                "Helm image discovery failed for %s:%s: %s",
+                repository.name,
+                tag.tag,
+                message,
+            )
+            tag.processing_status = 'error'
+            tag.save(update_fields=['processing_status', 'updated_at'])
+            return {
+                "status": "error",
+                "task_name": "Process Single Tag",
+                "tag_uuid": str(tag_uuid),
+                "repository": repository.name,
+                "repository_uuid": str(repository.uuid),
+                "tag": tag.tag,
+                "tag_digest": tag.digest,
+                "repository_type": repository.repository_type,
+                "error": message,
+                "error_type": "HelmImageDiscoveryError",
+                "message": f"Failed to discover images for Helm tag {tag.tag}",
+                "suggestion": "Provide scan-only Helm values or use the chart fallback extraction path",
+                "timestamp": timezone.now().isoformat(),
+            }
+
         # For Docker images, just create the record
         if repository.repository_type == 'docker':
             image_ref = _repository_tag_image_ref(repository, tag, registry)
@@ -2910,9 +2986,14 @@ def process_single_tag(tag_uuid: str):
                 helm_repo_key = repository.repo_key or repository.name
                 chart_url = get_helm_chart_url(registry, helm_repo_key, chart_name, tag.tag)
                 if chart_url:
-                    image_refs = get_helm_images_from_native_chart(registry, chart_url)
+                    try:
+                        image_refs = get_helm_images_from_native_chart(registry, chart_url)
+                    except Exception as exc:
+                        return _helm_processing_error_result(str(exc))
                 else:
-                    logger.warning(f"Could not get chart URL for {repository.name} {chart_name}@{tag.tag}")
+                    return _helm_processing_error_result(
+                        f"Could not resolve chart URL for {repository.name} {chart_name}@{tag.tag}"
+                    )
             else:
                 if repository.repo_key:
                     rk = repository.repo_key
@@ -2924,12 +3005,23 @@ def process_single_tag(tag_uuid: str):
                 if manifest and is_helm_chart(manifest):
                     chart_digest = get_chart_digest(manifest)
                     if chart_digest:
-                        image_refs = list(get_helm_images(registry, repository.name, chart_digest))
+                        try:
+                            image_refs = list(get_helm_images(registry, repository.name, chart_digest))
+                        except Exception as exc:
+                            return _helm_processing_error_result(str(exc))
+                    else:
+                        return _helm_processing_error_result(
+                            f"Could not extract chart digest for {repository.name}:{tag.tag}"
+                        )
                 elif not manifest:
                     logger.warning(f"Could not get manifest for {repository.name}:{tag.tag}")
                     tag.processing_status = 'error'
                     tag.save()
                     return
+                else:
+                    return _helm_processing_error_result(
+                        f"Manifest for {repository.name}:{tag.tag} is not recognized as a Helm chart"
+                    )
 
             for image_ref in image_refs:
                 # Get image digest (ACR or Artifactory). For Helm: skip primary when ref doesn't
