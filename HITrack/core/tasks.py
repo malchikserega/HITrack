@@ -9,7 +9,7 @@ import re
 import subprocess
 import time
 from datetime import timedelta
-from urllib.parse import parse_qsl, unquote
+from urllib.parse import parse_qsl, unquote, urlparse
 
 import requests
 from django.utils import timezone
@@ -604,6 +604,307 @@ def _resolve_repository_tag_image_digest(tag, image_ref, registry):
     return resolved_digest
 
 
+def _registry_host(value):
+    raw_value = str(value or '').strip()
+    if not raw_value:
+        return None
+
+    if raw_value.startswith(('http://', 'https://')):
+        raw_value = urlparse(raw_value).netloc
+
+    return raw_value.split('/', 1)[0] if raw_value else None
+
+
+def _parse_image_reference(image_ref):
+    raw_reference = str(image_ref or '').strip()
+    if not raw_reference:
+        return None
+
+    digest = None
+    tag = None
+    path = raw_reference
+
+    if '@' in path:
+        path, digest = path.rsplit('@', 1)
+        digest = _normalize_image_digest(digest)
+
+    last_segment = path.rsplit('/', 1)[-1]
+    if ':' in last_segment:
+        path, tag = path.rsplit(':', 1)
+
+    segments = [segment for segment in path.split('/') if segment]
+    if not segments:
+        return None
+
+    host = None
+    if len(segments) > 1 and (
+        '.' in segments[0] or ':' in segments[0] or segments[0] == 'localhost'
+    ):
+        host = segments[0]
+        repository = '/'.join(segments[1:])
+    else:
+        repository = '/'.join(segments)
+
+    return {
+        'host': host,
+        'repository': repository,
+        'tag': tag,
+        'digest': digest,
+    }
+
+
+def _compose_image_reference(host, repository, tag=None, digest=None):
+    if not repository:
+        return None
+
+    base = f"{host}/{repository}" if host else repository
+    normalized_digest = _normalize_image_digest(digest)
+    if normalized_digest:
+        return f"{base}@{normalized_digest}"
+    if tag:
+        return f"{base}:{tag}"
+    return base
+
+
+def _repository_path_from_url(repository_url):
+    parsed = _parse_image_reference(repository_url)
+    if parsed:
+        return parsed['repository']
+
+    raw_url = str(repository_url or '').strip()
+    if not raw_url:
+        return None
+    if raw_url.startswith(('http://', 'https://')):
+        parsed_url = urlparse(raw_url)
+        return parsed_url.path.lstrip('/') or None
+    return raw_url.split('/', 1)[1] if '/' in raw_url else None
+
+
+def _derive_same_registry_image_candidates(repository, registry, image_ref):
+    parsed_ref = _parse_image_reference(image_ref)
+    if not parsed_ref or not parsed_ref.get('repository'):
+        return [image_ref]
+
+    registry_host = (
+        _registry_host(getattr(registry, 'api_url', None))
+        or parsed_ref.get('host')
+        or _registry_host(repository.url)
+    )
+    repo_path = parsed_ref['repository']
+
+    candidate_paths = [repo_path]
+    if repo_path.startswith('helm/'):
+        candidate_paths.append(repo_path.removeprefix('helm/'))
+
+    for chart_repo_path in filter(None, [repository.name, _repository_path_from_url(repository.url)]):
+        if repo_path == chart_repo_path and chart_repo_path.startswith('helm/'):
+            candidate_paths.append(chart_repo_path.removeprefix('helm/'))
+        if repo_path.startswith(f"{chart_repo_path}/") and chart_repo_path.startswith('helm/'):
+            candidate_paths.append(
+                f"{chart_repo_path.removeprefix('helm/')}{repo_path[len(chart_repo_path):]}"
+            )
+
+    candidates = []
+    for candidate_path in _dedupe_preserve_order(candidate_paths):
+        candidate_ref = _compose_image_reference(
+            registry_host or parsed_ref.get('host'),
+            candidate_path,
+            tag=parsed_ref.get('tag'),
+            digest=parsed_ref.get('digest'),
+        )
+        if candidate_ref:
+            candidates.append(candidate_ref)
+
+    return _dedupe_preserve_order(candidates or [image_ref])
+
+
+def _resolve_helm_image_location(repository, repo_tag, registry, image_ref):
+    from .models import ContainerRegistry, Image
+    from .utils.registry import (
+        build_fallback_image_ref,
+        build_fallback_image_ref_from_url,
+        get_image_digest,
+        to_docker_pull_ref,
+    )
+
+    chart_ref = _repository_tag_image_ref(repository, repo_tag, registry)
+    existing_image = (
+        Image.objects.filter(name=image_ref)
+        .order_by('-updated_at')
+        .first()
+    )
+    if existing_image and (
+        _has_completed_image_payload(existing_image)
+        or (
+            existing_image.digest
+            and existing_image.artifact_reference
+            and existing_image.artifact_reference != chart_ref
+        )
+    ):
+        return (
+            existing_image.name,
+            _normalize_image_digest(existing_image.digest),
+            existing_image.artifact_reference or existing_image.name,
+            None,
+        )
+
+    candidate_refs = _derive_same_registry_image_candidates(repository, registry, image_ref)
+
+    for candidate_ref in candidate_refs:
+        try:
+            candidate_digest = _normalize_image_digest(get_image_digest(registry, candidate_ref))
+        except Exception as exc:
+            logger.warning(
+                "Failed to resolve Helm child image digest for %s via %s: %s",
+                candidate_ref,
+                getattr(registry, 'name', 'unknown'),
+                exc,
+            )
+            candidate_digest = None
+
+        if candidate_digest:
+            resolved_pull_ref = to_docker_pull_ref(candidate_ref)
+            return (
+                resolved_pull_ref,
+                candidate_digest,
+                resolved_pull_ref,
+                None,
+            )
+
+    fallback_repositories = list(
+        repository.image_fallback_repositories.filter(
+            repository_type='docker',
+            container_registry__isnull=False,
+        ).select_related('container_registry')
+    )
+    for candidate_ref in candidate_refs:
+        for fallback_repository in fallback_repositories:
+            if not fallback_repository.container_registry:
+                continue
+            fallback_ref = build_fallback_image_ref(fallback_repository, candidate_ref)
+            if not fallback_ref:
+                continue
+            fallback_digest = _normalize_image_digest(
+                get_image_digest(fallback_repository.container_registry, fallback_ref)
+            )
+            if fallback_digest:
+                resolved_pull_ref = to_docker_pull_ref(fallback_ref)
+                return (
+                    resolved_pull_ref,
+                    fallback_digest,
+                    resolved_pull_ref,
+                    None,
+                )
+
+    for candidate_ref in candidate_refs:
+        for fallback_entry in (getattr(registry, 'image_fallback_repositories', None) or []):
+            fallback_url = fallback_entry.get('url') if isinstance(fallback_entry, dict) else None
+            auth_registry_uuid = fallback_entry.get('registry_uuid') if isinstance(fallback_entry, dict) else None
+            if not fallback_url or not auth_registry_uuid:
+                continue
+            auth_registry = ContainerRegistry.objects.filter(uuid=auth_registry_uuid).first()
+            if not auth_registry:
+                continue
+            fallback_ref = build_fallback_image_ref_from_url(fallback_url, candidate_ref)
+            if not fallback_ref:
+                continue
+            fallback_digest = _normalize_image_digest(get_image_digest(auth_registry, fallback_ref))
+            if fallback_digest:
+                resolved_pull_ref = to_docker_pull_ref(fallback_ref)
+                return (
+                    resolved_pull_ref,
+                    fallback_digest,
+                    resolved_pull_ref,
+                    None,
+                )
+
+    return (
+        None,
+        None,
+        None,
+        (
+            f"Could not resolve Helm child image {image_ref} in registry {getattr(registry, 'name', 'unknown')}. "
+            f"Tried: {', '.join(candidate_refs)}"
+        ),
+    )
+
+
+def _select_sbom_pull_reference(image, art_type='docker'):
+    chart_refs = set()
+    if art_type == 'helm':
+        for linked_tag in image.repository_tags.all():
+            repository = getattr(linked_tag, 'repository', None)
+            if not repository or repository.repository_type != 'helm':
+                continue
+            chart_refs.add(
+                _repository_tag_image_ref(
+                    repository,
+                    linked_tag,
+                    getattr(repository, 'container_registry', None),
+                )
+            )
+
+    candidates = []
+    artifact_ref = (image.artifact_reference or '').strip()
+    image_name = (image.name or '').strip()
+
+    if art_type == 'helm':
+        if artifact_ref and artifact_ref not in chart_refs and not artifact_ref.startswith(("http://", "https://")):
+            candidates.append(artifact_ref)
+        if image_name:
+            candidates.append(image_name)
+    else:
+        if artifact_ref and not artifact_ref.startswith(("http://", "https://")):
+            candidates.append(artifact_ref)
+        if image_name:
+            candidates.append(image_name)
+
+    for candidate in _dedupe_preserve_order(candidates):
+        if is_safe_image_ref(candidate):
+            return candidate
+
+    fallback_ref = image_name or artifact_ref
+    return fallback_ref
+
+
+def _reconcile_helm_tag_images(repo_tag, keep_image_ids):
+    keep_ids = set(keep_image_ids or [])
+    repository = repo_tag.repository
+    registry = repository.container_registry
+    chart_ref = _repository_tag_image_ref(repository, repo_tag, registry)
+    current_images = list(repo_tag.images.all())
+
+    if keep_ids:
+        repo_tag.images.set(list(keep_ids))
+    else:
+        repo_tag.images.clear()
+
+    removed_count = 0
+    deleted_count = 0
+
+    for image in current_images:
+        if image.pk in keep_ids:
+            continue
+        if image.artifact_reference != chart_ref:
+            continue
+
+        removed_count += 1
+        if (
+            not image.repository_tags.exclude(pk=repo_tag.pk).exists()
+            and image.sbom_data is None
+            and image.grype_data is None
+            and not image.component_versions.exists()
+            and not image.component_locations.exists()
+        ):
+            image.delete()
+            deleted_count += 1
+
+    return {
+        'removed_count': removed_count,
+        'deleted_count': deleted_count,
+    }
+
+
 def _has_completed_image_scan(image):
     return (
         image.scan_status == 'success' and
@@ -973,12 +1274,7 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
         image.scan_status = 'in_process'
         image.save()
         
-        # Prefer artifact_reference when it's a valid Docker pull ref (not a URL)
-        pull_ref = image.artifact_reference
-        if pull_ref and not pull_ref.startswith(("http://", "https://")):
-            image_ref = pull_ref
-        else:
-            image_ref = image.name or image.artifact_reference
+        image_ref = _select_sbom_pull_reference(image, art_type=art_type)
         if not is_safe_image_ref(image_ref):
             logger.error(f"Unsafe image_ref: {image_ref}")
             image.scan_status = 'error'
@@ -1377,7 +1673,7 @@ def process_all_tags():
     Process all tags from active repositories and create images if they don't exist.
     This task can be manually triggered.
     """
-    from .models import Repository, RepositoryTag, Image, ContainerRegistry
+    from .models import Repository, RepositoryTag
     from .utils.registry import (
         get_manifest,
         is_helm_chart,
@@ -1385,12 +1681,6 @@ def process_all_tags():
         get_helm_images,
         get_helm_chart_url,
         get_helm_images_from_native_chart,
-        get_bearer_token,
-        get_image_digest,
-        build_fallback_image_ref,
-        build_fallback_image_ref_from_url,
-        image_ref_repo_key,
-        to_docker_pull_ref,
     )
 
     logger.info("Starting processing of all tags from active repositories")
@@ -1510,90 +1800,46 @@ def process_all_tags():
                             repo_tag.save(update_fields=['processing_status', 'updated_at'])
                             continue
 
-                    for image_ref in image_refs:
-                        # Get image digest; for Helm skip primary when ref doesn't contain registry base or points at Helm repo
-                        image_digest = None
-                        resolved_pull_ref = None
-                        if registry and repository.repository_type == 'helm':
-                            ref_repo_key = image_ref_repo_key(registry.api_url or '', image_ref)
-                            helm_key = repository.repo_key or repository.name
-                            if ref_repo_key == helm_key:
-                                pass
-                            elif ref_repo_key is not None:
-                                image_digest = get_image_digest(registry, image_ref)
-                        elif registry:
-                            image_digest = get_image_digest(registry, image_ref)
-                        if image_digest is None and repository.repository_type == 'helm':
-                            for fb_repo in repository.image_fallback_repositories.filter(
-                                repository_type='docker',
-                                container_registry__isnull=False
-                            ).select_related('container_registry'):
-                                if not fb_repo.container_registry:
-                                    continue
-                                candidate_ref = build_fallback_image_ref(fb_repo, image_ref)
-                                if candidate_ref:
-                                    image_digest = get_image_digest(fb_repo.container_registry, candidate_ref)
-                                    if image_digest:
-                                        resolved_pull_ref = to_docker_pull_ref(candidate_ref)
-                                        logger.info(
-                                            "Resolved Helm image %s via fallback repo %s as %s",
-                                            image_ref, fb_repo.name, resolved_pull_ref
-                                        )
-                                        break
-                        if image_digest is None and repository.repository_type == 'helm' and registry:
-                            for fb_entry in (registry.image_fallback_repositories or []):
-                                fb_url = fb_entry.get('url') if isinstance(fb_entry, dict) else None
-                                auth_reg_uuid = fb_entry.get('registry_uuid') if isinstance(fb_entry, dict) else None
-                                if not fb_url or not auth_reg_uuid:
-                                    continue
-                                auth_registry = ContainerRegistry.objects.filter(uuid=auth_reg_uuid).first()
-                                if not auth_registry:
-                                    continue
-                                candidate_ref = build_fallback_image_ref_from_url(fb_url, image_ref)
-                                if candidate_ref:
-                                    image_digest = get_image_digest(auth_registry, candidate_ref)
-                                    if image_digest:
-                                        resolved_pull_ref = to_docker_pull_ref(candidate_ref)
-                                        logger.info(
-                                            "Resolved Helm image %s via registry fallback %s as %s",
-                                            image_ref, fb_entry.get('name', fb_url), resolved_pull_ref
-                                        )
-                                        break
-                        # Create or get image with proper digest
-                        artifact_ref = resolved_pull_ref or f"{repository.url}:{repo_tag.tag}"
-                        if image_digest:
-                            image = Image.objects.filter(name=image_ref, digest=image_digest).first()
-                            if image:
-                                created = False
-                            else:
-                                existing_image = Image.objects.filter(name=image_ref).exclude(digest=image_digest).first()
-                                if existing_image:
-                                    image = Image.objects.create(
-                                        name=image_ref,
-                                        digest=image_digest,
-                                        artifact_reference=artifact_ref
-                                    )
-                                    created = True
-                                else:
-                                    image = Image.objects.create(
-                                        name=image_ref,
-                                        digest=image_digest,
-                                        artifact_reference=artifact_ref
-                                    )
-                                    created = True
-                        else:
-                            image = Image.objects.filter(name=image_ref).first()
-                            if image:
-                                created = False
-                            else:
-                                image = Image.objects.create(
-                                    name=image_ref,
-                                    digest=None,
-                                    artifact_reference=artifact_ref
-                                )
-                                created = True
-                        image.repository_tags.add(repo_tag)
-                        logger.info(f"{'Created' if created else 'Linked'} Helm image {image_ref} with digest {image_digest}")
+                    resolved_image_ids = []
+                    unresolved_refs = []
+                    for image_ref in _dedupe_preserve_order(image_refs):
+                        resolved_name, image_digest, artifact_ref, resolution_error = _resolve_helm_image_location(
+                            repository,
+                            repo_tag,
+                            registry,
+                            image_ref,
+                        )
+                        if not resolved_name:
+                            unresolved_refs.append((image_ref, resolution_error))
+                            logger.error(
+                                "Failed to resolve Helm child image %s for %s:%s: %s",
+                                image_ref,
+                                repository.name,
+                                repo_tag.tag,
+                                resolution_error,
+                            )
+                            continue
+
+                        image, created = _get_or_create_canonical_image(
+                            name=resolved_name,
+                            digest=image_digest,
+                            artifact_reference=artifact_ref or resolved_name,
+                        )
+                        resolved_image_ids.append(image.pk)
+                        logger.info(
+                            "%s Helm image %s as %s with digest %s",
+                            'Created' if created else 'Linked',
+                            image_ref,
+                            resolved_name,
+                            image_digest,
+                        )
+
+                    if repository.repository_type == 'helm':
+                        _reconcile_helm_tag_images(repo_tag, resolved_image_ids)
+                        if not resolved_image_ids and (unresolved_refs or image_refs):
+                            repo_tag.processing_status = 'error'
+                            repo_tag.save(update_fields=['processing_status', 'updated_at'])
+                            continue
 
                 processed_tags.append(repo_tag.tag)
 
@@ -2928,7 +3174,7 @@ def process_single_tag(tag_uuid: str):
     Process a single repository tag and create an image if it doesn't exist.
     After processing, trigger SBOM scan for all images linked to this tag.
     """
-    from .models import RepositoryTag, Image, ContainerRegistry
+    from .models import RepositoryTag
     from .utils.registry import (
         get_manifest,
         is_helm_chart,
@@ -2936,12 +3182,6 @@ def process_single_tag(tag_uuid: str):
         get_helm_images,
         get_helm_chart_url,
         get_helm_images_from_native_chart,
-        get_bearer_token,
-        get_image_digest,
-        build_fallback_image_ref,
-        build_fallback_image_ref_from_url,
-        image_ref_repo_key,
-        to_docker_pull_ref,
     )
     from .tasks import generate_sbom_and_create_components
 
@@ -3053,70 +3293,51 @@ def process_single_tag(tag_uuid: str):
                         f"Manifest for {repository.name}:{tag.tag} is not recognized as a Helm chart"
                     )
 
-            for image_ref in image_refs:
-                # Get image digest (ACR or Artifactory). For Helm: skip primary when ref doesn't
-                # contain our registry base (e.g. a8n-docker.repo.com.int.zone/...) or when ref
-                # points at this Helm repo (Helm repos don't expose Docker API).
-                image_digest = None
-                resolved_pull_ref = None
-                if registry and repository.repository_type == 'helm':
-                    ref_repo_key = image_ref_repo_key(registry.api_url or '', image_ref)
-                    helm_key = repository.repo_key or repository.name
-                    if ref_repo_key == helm_key:
-                        pass  # ref points at Helm repo; use fallback only
-                    elif ref_repo_key is not None:
-                        # ref contains our registry base (e.g. repo.com/artifactory/docker-repo/...); try primary
-                        image_digest = get_image_digest(registry, image_ref)
-                    # else: ref is different host (e.g. a8n-docker.repo.com.int.zone/...); skip primary, use fallback
-                elif registry:
-                    image_digest = get_image_digest(registry, image_ref)
-                if image_digest is None and repository.repository_type == 'helm':
-                    fallback_repos = list(
-                        repository.image_fallback_repositories.filter(
-                            repository_type='docker',
-                            container_registry__isnull=False
-                        ).select_related('container_registry')
-                    )
-                    for fb_repo in fallback_repos:
-                        if not fb_repo.container_registry:
-                            continue
-                        candidate_ref = build_fallback_image_ref(fb_repo, image_ref)
-                        if candidate_ref:
-                            image_digest = get_image_digest(fb_repo.container_registry, candidate_ref)
-                            if image_digest:
-                                resolved_pull_ref = to_docker_pull_ref(candidate_ref)
-                                logger.info(
-                                    "Resolved Helm image %s via fallback repo %s as %s",
-                                    image_ref, fb_repo.name, resolved_pull_ref
-                                )
-                                break
-                if image_digest is None and repository.repository_type == 'helm' and registry:
-                    for fb_entry in (registry.image_fallback_repositories or []):
-                        fb_url = fb_entry.get('url') if isinstance(fb_entry, dict) else None
-                        auth_reg_uuid = fb_entry.get('registry_uuid') if isinstance(fb_entry, dict) else None
-                        if not fb_url or not auth_reg_uuid:
-                            continue
-                        auth_registry = ContainerRegistry.objects.filter(uuid=auth_reg_uuid).first()
-                        if not auth_registry:
-                            continue
-                        candidate_ref = build_fallback_image_ref_from_url(fb_url, image_ref)
-                        if candidate_ref:
-                            image_digest = get_image_digest(auth_registry, candidate_ref)
-                            if image_digest:
-                                resolved_pull_ref = to_docker_pull_ref(candidate_ref)
-                                logger.info(
-                                    "Resolved Helm image %s via registry fallback %s as %s",
-                                    image_ref, fb_entry.get('name', fb_url), resolved_pull_ref
-                                )
-                                break
-                artifact_ref = resolved_pull_ref or f"{repository.url}:{tag.tag}"
-                image, created = _get_or_create_canonical_image(
-                    name=image_ref,
-                    digest=image_digest,
-                    artifact_reference=artifact_ref,
+            resolved_image_ids = []
+            unresolved_image_refs = []
+            for image_ref in _dedupe_preserve_order(image_refs):
+                resolved_name, image_digest, artifact_ref, resolution_error = _resolve_helm_image_location(
+                    repository,
+                    tag,
+                    registry,
+                    image_ref,
                 )
-                image.repository_tags.add(tag)
-                logger.info(f"{'Created' if created else 'Linked'} Helm image {image_ref} with digest {image_digest}")
+                if not resolved_name:
+                    unresolved_image_refs.append({
+                        'image_ref': image_ref,
+                        'error': resolution_error,
+                    })
+                    logger.error(
+                        "Failed to resolve Helm child image %s for %s:%s: %s",
+                        image_ref,
+                        repository.name,
+                        tag.tag,
+                        resolution_error,
+                    )
+                    continue
+
+                image, created = _get_or_create_canonical_image(
+                    name=resolved_name,
+                    digest=image_digest,
+                    artifact_reference=artifact_ref or resolved_name,
+                )
+                resolved_image_ids.append(image.pk)
+                logger.info(
+                    "%s Helm image %s as %s with digest %s",
+                    'Created' if created else 'Linked',
+                    image_ref,
+                    resolved_name,
+                    image_digest,
+                )
+
+            _reconcile_helm_tag_images(tag, resolved_image_ids)
+            if not resolved_image_ids:
+                return _helm_processing_error_result(
+                    (
+                        f"No resolvable child images found for Helm tag {tag.tag}. "
+                        f"Unresolved refs: {', '.join(item['image_ref'] for item in unresolved_image_refs) or 'none'}"
+                    )
+                )
 
         # Trigger SBOM scan for all images linked to this tag
         images = tag.images.all()
