@@ -19,14 +19,12 @@ from typing import Any, Dict, Generator, List, Optional, Tuple
 import requests
 import yaml
 
+from .helm import extract_images_from_chart_blob
+
 logger = logging.getLogger(__name__)
 
 # Configuration
 PAGE_SIZE = 500
-
-# Regular expression for finding image references in Helm charts
-IMG_RE = re.compile(r'image:\s*["\']?([\w./-]+:[\w.\-]+)')
-
 
 def get_bearer_token(api_url: str, login: str, password: str) -> str:
     """
@@ -404,32 +402,9 @@ def get_helm_images_from_native_chart(
         response.raise_for_status()
     except requests.RequestException as e:
         logger.error("Failed to download Helm chart from %s: %s", chart_url, e)
-        return []
+        raise RuntimeError(f"Failed to download Helm chart from {chart_url}: {e}") from e
 
-    fname = None
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".tgz", delete=False) as f:
-            f.write(response.content)
-            f.flush()
-            fname = f.name
-        rendered = subprocess.run(
-            ["helm", "template", "scan", fname, "--skip-tests"],
-            capture_output=True,
-            check=True,
-            text=True,
-            timeout=120,
-        ).stdout
-        return sorted(set(IMG_RE.findall(rendered)))
-    except (subprocess.SubprocessError, OSError) as e:
-        logger.error("Failed to run helm template on chart %s: %s", chart_url, e)
-        return []
-    finally:
-        import os
-        if fname and os.path.exists(fname):
-            try:
-                os.unlink(fname)
-            except Exception:
-                pass
+    return extract_images_from_chart_blob(response.content, chart_url)
 
 
 def get_helm_images(api_url: str, token: str, repo: str, digest: str) -> List[str]:
@@ -445,24 +420,17 @@ def get_helm_images(api_url: str, token: str, repo: str, digest: str) -> List[st
     Returns:
         List[str]: List of container image references.
     """
+    base = _normalize_base_url(api_url)
+    headers = _auth_headers(token)
+    blob_url = f"{base}/v2/{repo}/blobs/{digest}"
     try:
-        base = _normalize_base_url(api_url)
-        headers = _auth_headers(token)
-        blob_url = f"{base}/v2/{repo}/blobs/{digest}"
-        blob = requests.get(blob_url, headers=headers).content
-        with tempfile.NamedTemporaryFile(suffix=".tgz") as f:
-            f.write(blob)
-            f.flush()
-            rendered = subprocess.run(
-                ["helm", "template", "scan", f.name, "--skip-tests"],
-                capture_output=True,
-                check=True,
-                text=True
-            ).stdout
-        return sorted(set(IMG_RE.findall(rendered)))
-    except (requests.RequestException, subprocess.SubprocessError) as e:
-        logger.error(f"Failed to process Helm chart {repo}:{digest}: {e}")
-        return []
+        response = requests.get(blob_url, headers=headers, timeout=60)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        logger.error("Failed to download Helm chart %s:%s: %s", repo, digest, e)
+        raise RuntimeError(f"Failed to download Helm chart {repo}:{digest}: {e}") from e
+
+    return extract_images_from_chart_blob(response.content, f"{repo}:{digest}")
 
 
 def get_artifactory_image_digest(registry_url: str, token: str, image_ref: str) -> Optional[str]:
