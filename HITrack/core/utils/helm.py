@@ -12,7 +12,7 @@ import yaml
 logger = logging.getLogger(__name__)
 
 RENDERED_IMAGE_RE = re.compile(
-    r'image:\s*["\']?([A-Za-z0-9][A-Za-z0-9./:_-]*(?::[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64}))'
+    r'image:\s*["\']?([A-Za-z0-9][A-Za-z0-9./:_${}-]*(?::[A-Za-z0-9._${}-]+|@sha256:[a-f0-9]{64}))'
 )
 VALUES_PATH_RE = re.compile(r"\.Values(?:\.[A-Za-z0-9_-]+)+")
 REQUIRED_VALUES_RE = re.compile(
