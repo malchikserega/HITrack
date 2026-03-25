@@ -704,9 +704,10 @@ def _get_or_create_canonical_image(name, digest=None, artifact_reference=None):
             if normalized_digest and image.digest != normalized_digest:
                 image.digest = normalized_digest
                 updated_fields.append('digest')
-            if artifact_reference and not image.artifact_reference:
-                image.artifact_reference = artifact_reference
-                updated_fields.append('artifact_reference')
+            if artifact_reference and artifact_reference != image.artifact_reference:
+                if not image.artifact_reference or not artifact_reference.startswith(("http://", "https://")):
+                    image.artifact_reference = artifact_reference
+                    updated_fields.append('artifact_reference')
             if updated_fields:
                 image.save(update_fields=updated_fields + ['updated_at'])
 
@@ -972,8 +973,12 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
         image.scan_status = 'in_process'
         image.save()
         
-        # Get image reference
-        image_ref = image.name or image.artifact_reference
+        # Prefer artifact_reference when it's a valid Docker pull ref (not a URL)
+        pull_ref = image.artifact_reference
+        if pull_ref and not pull_ref.startswith(("http://", "https://")):
+            image_ref = pull_ref
+        else:
+            image_ref = image.name or image.artifact_reference
         if not is_safe_image_ref(image_ref):
             logger.error(f"Unsafe image_ref: {image_ref}")
             image.scan_status = 'error'
@@ -1372,7 +1377,7 @@ def process_all_tags():
     Process all tags from active repositories and create images if they don't exist.
     This task can be manually triggered.
     """
-    from .models import Repository, RepositoryTag, Image
+    from .models import Repository, RepositoryTag, Image, ContainerRegistry
     from .utils.registry import (
         get_manifest,
         is_helm_chart,
@@ -1383,7 +1388,9 @@ def process_all_tags():
         get_bearer_token,
         get_image_digest,
         build_fallback_image_ref,
+        build_fallback_image_ref_from_url,
         image_ref_repo_key,
+        to_docker_pull_ref,
     )
 
     logger.info("Starting processing of all tags from active repositories")
@@ -1435,7 +1442,27 @@ def process_all_tags():
                         helm_repo_key = repository.repo_key or repository.name
                         chart_url = get_helm_chart_url(registry, helm_repo_key, chart_name, repo_tag.tag)
                         if chart_url:
-                            image_refs = get_helm_images_from_native_chart(registry, chart_url)
+                            try:
+                                image_refs = get_helm_images_from_native_chart(registry, chart_url)
+                            except Exception as exc:
+                                logger.error(
+                                    "Failed Helm image discovery for %s:%s: %s",
+                                    repository.name,
+                                    repo_tag.tag,
+                                    exc,
+                                )
+                                repo_tag.processing_status = 'error'
+                                repo_tag.save(update_fields=['processing_status', 'updated_at'])
+                                continue
+                        else:
+                            logger.error(
+                                "Could not resolve chart URL for Helm tag %s:%s",
+                                repository.name,
+                                repo_tag.tag,
+                            )
+                            repo_tag.processing_status = 'error'
+                            repo_tag.save(update_fields=['processing_status', 'updated_at'])
+                            continue
                     else:
                         if repository.repo_key:
                             rk = repository.repo_key
@@ -1446,15 +1473,47 @@ def process_all_tags():
                         manifest, digest = get_manifest(registry, repo_for_manifest, repo_tag.tag, image_name=img_name)
                         if not manifest:
                             logger.warning(f"Could not get manifest for {repository.name}:{repo_tag.tag}")
+                            repo_tag.processing_status = 'error'
+                            repo_tag.save(update_fields=['processing_status', 'updated_at'])
                             continue
                         if is_helm_chart(manifest):
                             chart_digest = get_chart_digest(manifest)
                             if chart_digest:
-                                image_refs = list(get_helm_images(registry, repository.name, chart_digest))
+                                try:
+                                    image_refs = list(get_helm_images(registry, repository.name, chart_digest))
+                                except Exception as exc:
+                                    logger.error(
+                                        "Failed Helm image discovery for %s:%s: %s",
+                                        repository.name,
+                                        repo_tag.tag,
+                                        exc,
+                                    )
+                                    repo_tag.processing_status = 'error'
+                                    repo_tag.save(update_fields=['processing_status', 'updated_at'])
+                                    continue
+                            else:
+                                logger.error(
+                                    "Could not extract chart digest for Helm tag %s:%s",
+                                    repository.name,
+                                    repo_tag.tag,
+                                )
+                                repo_tag.processing_status = 'error'
+                                repo_tag.save(update_fields=['processing_status', 'updated_at'])
+                                continue
+                        else:
+                            logger.error(
+                                "Manifest for %s:%s is not recognized as a Helm chart",
+                                repository.name,
+                                repo_tag.tag,
+                            )
+                            repo_tag.processing_status = 'error'
+                            repo_tag.save(update_fields=['processing_status', 'updated_at'])
+                            continue
 
                     for image_ref in image_refs:
                         # Get image digest; for Helm skip primary when ref doesn't contain registry base or points at Helm repo
                         image_digest = None
+                        resolved_pull_ref = None
                         if registry and repository.repository_type == 'helm':
                             ref_repo_key = image_ref_repo_key(registry.api_url or '', image_ref)
                             helm_key = repository.repo_key or repository.name
@@ -1475,13 +1534,33 @@ def process_all_tags():
                                 if candidate_ref:
                                     image_digest = get_image_digest(fb_repo.container_registry, candidate_ref)
                                     if image_digest:
+                                        resolved_pull_ref = to_docker_pull_ref(candidate_ref)
                                         logger.info(
                                             "Resolved Helm image %s via fallback repo %s as %s",
-                                            image_ref, fb_repo.name, candidate_ref
+                                            image_ref, fb_repo.name, resolved_pull_ref
+                                        )
+                                        break
+                        if image_digest is None and repository.repository_type == 'helm' and registry:
+                            for fb_entry in (registry.image_fallback_repositories or []):
+                                fb_url = fb_entry.get('url') if isinstance(fb_entry, dict) else None
+                                auth_reg_uuid = fb_entry.get('registry_uuid') if isinstance(fb_entry, dict) else None
+                                if not fb_url or not auth_reg_uuid:
+                                    continue
+                                auth_registry = ContainerRegistry.objects.filter(uuid=auth_reg_uuid).first()
+                                if not auth_registry:
+                                    continue
+                                candidate_ref = build_fallback_image_ref_from_url(fb_url, image_ref)
+                                if candidate_ref:
+                                    image_digest = get_image_digest(auth_registry, candidate_ref)
+                                    if image_digest:
+                                        resolved_pull_ref = to_docker_pull_ref(candidate_ref)
+                                        logger.info(
+                                            "Resolved Helm image %s via registry fallback %s as %s",
+                                            image_ref, fb_entry.get('name', fb_url), resolved_pull_ref
                                         )
                                         break
                         # Create or get image with proper digest
-                        artifact_ref = f"{repository.url}:{repo_tag.tag}"
+                        artifact_ref = resolved_pull_ref or f"{repository.url}:{repo_tag.tag}"
                         if image_digest:
                             image = Image.objects.filter(name=image_ref, digest=image_digest).first()
                             if image:
@@ -2849,7 +2928,7 @@ def process_single_tag(tag_uuid: str):
     Process a single repository tag and create an image if it doesn't exist.
     After processing, trigger SBOM scan for all images linked to this tag.
     """
-    from .models import RepositoryTag, Image
+    from .models import RepositoryTag, Image, ContainerRegistry
     from .utils.registry import (
         get_manifest,
         is_helm_chart,
@@ -2860,7 +2939,9 @@ def process_single_tag(tag_uuid: str):
         get_bearer_token,
         get_image_digest,
         build_fallback_image_ref,
+        build_fallback_image_ref_from_url,
         image_ref_repo_key,
+        to_docker_pull_ref,
     )
     from .tasks import generate_sbom_and_create_components
 
@@ -2879,6 +2960,31 @@ def process_single_tag(tag_uuid: str):
         repository = tag.repository
         registry = repository.container_registry
         logger.info(f"Processing tag {tag.tag} from repository {repository.name}")
+
+        def _helm_processing_error_result(message: str):
+            logger.error(
+                "Helm image discovery failed for %s:%s: %s",
+                repository.name,
+                tag.tag,
+                message,
+            )
+            tag.processing_status = 'error'
+            tag.save(update_fields=['processing_status', 'updated_at'])
+            return {
+                "status": "error",
+                "task_name": "Process Single Tag",
+                "tag_uuid": str(tag_uuid),
+                "repository": repository.name,
+                "repository_uuid": str(repository.uuid),
+                "tag": tag.tag,
+                "tag_digest": tag.digest,
+                "repository_type": repository.repository_type,
+                "error": message,
+                "error_type": "HelmImageDiscoveryError",
+                "message": f"Failed to discover images for Helm tag {tag.tag}",
+                "suggestion": "Provide scan-only Helm values or use the chart fallback extraction path",
+                "timestamp": timezone.now().isoformat(),
+            }
 
         # For Docker images, just create the record
         if repository.repository_type == 'docker':
@@ -2910,9 +3016,14 @@ def process_single_tag(tag_uuid: str):
                 helm_repo_key = repository.repo_key or repository.name
                 chart_url = get_helm_chart_url(registry, helm_repo_key, chart_name, tag.tag)
                 if chart_url:
-                    image_refs = get_helm_images_from_native_chart(registry, chart_url)
+                    try:
+                        image_refs = get_helm_images_from_native_chart(registry, chart_url)
+                    except Exception as exc:
+                        return _helm_processing_error_result(str(exc))
                 else:
-                    logger.warning(f"Could not get chart URL for {repository.name} {chart_name}@{tag.tag}")
+                    return _helm_processing_error_result(
+                        f"Could not resolve chart URL for {repository.name} {chart_name}@{tag.tag}"
+                    )
             else:
                 if repository.repo_key:
                     rk = repository.repo_key
@@ -2924,18 +3035,30 @@ def process_single_tag(tag_uuid: str):
                 if manifest and is_helm_chart(manifest):
                     chart_digest = get_chart_digest(manifest)
                     if chart_digest:
-                        image_refs = list(get_helm_images(registry, repository.name, chart_digest))
+                        try:
+                            image_refs = list(get_helm_images(registry, repository.name, chart_digest))
+                        except Exception as exc:
+                            return _helm_processing_error_result(str(exc))
+                    else:
+                        return _helm_processing_error_result(
+                            f"Could not extract chart digest for {repository.name}:{tag.tag}"
+                        )
                 elif not manifest:
                     logger.warning(f"Could not get manifest for {repository.name}:{tag.tag}")
                     tag.processing_status = 'error'
                     tag.save()
                     return
+                else:
+                    return _helm_processing_error_result(
+                        f"Manifest for {repository.name}:{tag.tag} is not recognized as a Helm chart"
+                    )
 
             for image_ref in image_refs:
                 # Get image digest (ACR or Artifactory). For Helm: skip primary when ref doesn't
                 # contain our registry base (e.g. a8n-docker.repo.com.int.zone/...) or when ref
                 # points at this Helm repo (Helm repos don't expose Docker API).
                 image_digest = None
+                resolved_pull_ref = None
                 if registry and repository.repository_type == 'helm':
                     ref_repo_key = image_ref_repo_key(registry.api_url or '', image_ref)
                     helm_key = repository.repo_key or repository.name
@@ -2961,12 +3084,32 @@ def process_single_tag(tag_uuid: str):
                         if candidate_ref:
                             image_digest = get_image_digest(fb_repo.container_registry, candidate_ref)
                             if image_digest:
+                                resolved_pull_ref = to_docker_pull_ref(candidate_ref)
                                 logger.info(
                                     "Resolved Helm image %s via fallback repo %s as %s",
-                                    image_ref, fb_repo.name, candidate_ref
+                                    image_ref, fb_repo.name, resolved_pull_ref
                                 )
                                 break
-                artifact_ref = f"{repository.url}:{tag.tag}"
+                if image_digest is None and repository.repository_type == 'helm' and registry:
+                    for fb_entry in (registry.image_fallback_repositories or []):
+                        fb_url = fb_entry.get('url') if isinstance(fb_entry, dict) else None
+                        auth_reg_uuid = fb_entry.get('registry_uuid') if isinstance(fb_entry, dict) else None
+                        if not fb_url or not auth_reg_uuid:
+                            continue
+                        auth_registry = ContainerRegistry.objects.filter(uuid=auth_reg_uuid).first()
+                        if not auth_registry:
+                            continue
+                        candidate_ref = build_fallback_image_ref_from_url(fb_url, image_ref)
+                        if candidate_ref:
+                            image_digest = get_image_digest(auth_registry, candidate_ref)
+                            if image_digest:
+                                resolved_pull_ref = to_docker_pull_ref(candidate_ref)
+                                logger.info(
+                                    "Resolved Helm image %s via registry fallback %s as %s",
+                                    image_ref, fb_entry.get('name', fb_url), resolved_pull_ref
+                                )
+                                break
+                artifact_ref = resolved_pull_ref or f"{repository.url}:{tag.tag}"
                 image, created = _get_or_create_canonical_image(
                     name=image_ref,
                     digest=image_digest,
@@ -2985,7 +3128,7 @@ def process_single_tag(tag_uuid: str):
                 image.save(update_fields=['scan_status', 'updated_at'])
                 repaired_tag_ids.update(_propagate_image_completion_to_equivalent_images(image))
                 continue
-            if image.scan_status in ['in_process', 'pending']:
+            if image.scan_status == 'in_process':
                 continue
             if _has_completed_image_scan(image):
                 continue

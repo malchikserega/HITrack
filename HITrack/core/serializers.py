@@ -801,13 +801,14 @@ class RepositoryDetailSerializer(serializers.ModelSerializer):
     scan_status = serializers.SerializerMethodField()
     last_scanned = serializers.DateTimeField(read_only=True)
     image_fallback_repositories = serializers.SerializerMethodField()
+    container_registry = serializers.UUIDField(source='container_registry_id', read_only=True)
 
     class Meta:
         model = Repository
         fields = [
             'uuid', 'name', 'url', 'repo_key', 'repository_type', 'tag_count',
             'scan_status', 'last_scanned', 'image_fallback_repositories',
-            'created_at', 'updated_at'
+            'container_registry', 'created_at', 'updated_at'
         ]
         read_only_fields = ['created_at', 'updated_at', 'uuid']
 

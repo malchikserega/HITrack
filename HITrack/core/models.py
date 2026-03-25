@@ -17,6 +17,12 @@ class ContainerRegistry(models.Model):
     password = models.CharField(max_length=256, blank=True)
     token = models.TextField(blank=True, null=True)
     last_sync = models.DateTimeField(null=True, blank=True)
+    image_fallback_repositories = models.JSONField(
+        default=list,
+        blank=True,
+        help_text='Fallback Docker repos for Helm image resolution. '
+                  'Each entry: {"url": "...", "name": "...", "registry_uuid": "..."}',
+    )
 
     class Meta:
         verbose_name_plural = "Registry"

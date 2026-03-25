@@ -127,6 +127,16 @@ def build_fallback_image_ref(fallback_repository, image_ref: str) -> Optional[st
     """
     if not fallback_repository or not fallback_repository.url:
         return None
+    return build_fallback_image_ref_from_url(fallback_repository.url, image_ref)
+
+
+def build_fallback_image_ref_from_url(fallback_url: str, image_ref: str) -> Optional[str]:
+    """
+    Build a candidate image ref by replacing the host portion of *image_ref*
+    with *fallback_url*.  Works with plain URL strings (no model required).
+    """
+    if not fallback_url:
+        return None
     if ":" in image_ref:
         path_part, tag = image_ref.rsplit(":", 1)
     else:
@@ -135,10 +145,29 @@ def build_fallback_image_ref(fallback_repository, image_ref: str) -> Optional[st
     path_without_host = "/".join(parts[1:]) if len(parts) > 1 else path_part
     if not path_without_host:
         path_without_host = path_part
-    base = fallback_repository.url.strip().rstrip("/")
+    base = fallback_url.strip().rstrip("/")
     if base.startswith("http://") or base.startswith("https://"):
         base = base.split("://", 1)[1]
     return f"{base}/{path_without_host}:{tag}"
+
+
+def to_docker_pull_ref(candidate_ref: str) -> str:
+    """Convert Artifactory path-format ref to Docker subdomain format.
+
+    Input:  repo.com.int.zone/artifactory/a8n-docker-stable-local/appstore:2.1.751
+    Output: a8n-docker-stable-local.repo.com.int.zone/appstore:2.1.751
+
+    Non-Artifactory refs (no '/artifactory/' segment) are returned unchanged.
+    """
+    if '/artifactory/' not in candidate_ref:
+        return candidate_ref
+    server_part, rest = candidate_ref.split('/artifactory/', 1)
+    parts = rest.split('/', 1)
+    repo_key = parts[0]
+    image_and_tag = parts[1] if len(parts) > 1 else ''
+    if image_and_tag:
+        return f"{repo_key}.{server_part}/{image_and_tag}"
+    return f"{repo_key}.{server_part}"
 
 
 def get_repo_images(registry, repo_key: str, package_type: str = 'docker') -> list:

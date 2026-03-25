@@ -55,6 +55,174 @@
         </v-col>
       </v-row>
 
+      <!-- Registry-level fallback Docker repositories -->
+      <v-row v-if="selectedRegistry">
+        <v-col cols="12">
+          <v-card variant="outlined" class="pa-4">
+            <v-card-title class="text-subtitle-1 font-weight-bold pb-2">
+              Image fallback repositories
+            </v-card-title>
+            <v-card-subtitle class="text-caption pb-3">
+              Docker repositories to try when resolving Helm chart image refs fails for any repository in this registry.
+            </v-card-subtitle>
+
+            <!-- Current entries -->
+            <v-table v-if="fallbackEntries.length" density="compact" class="mb-4">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>URL</th>
+                  <th>Auth Registry</th>
+                  <th class="text-right" style="width: 60px"></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(entry, idx) in fallbackEntries" :key="idx">
+                  <td>{{ entry.name }}</td>
+                  <td class="text-medium-emphasis">{{ entry.url }}</td>
+                  <td class="text-medium-emphasis">{{ registryNameByUuid(entry.registry_uuid) }}</td>
+                  <td class="text-right">
+                    <v-btn icon="mdi-delete-outline" size="x-small" variant="text" @click="removeFallbackEntry(idx)" />
+                  </td>
+                </tr>
+              </tbody>
+            </v-table>
+            <div v-else class="text-body-2 text-medium-emphasis mb-4">
+              No fallback repositories configured.
+            </div>
+
+            <!-- Add entry: free-text -->
+            <div class="text-subtitle-2 font-weight-medium mb-2">Add manually</div>
+            <v-row dense class="align-center mb-2">
+              <v-col cols="12" sm="4">
+                <v-text-field
+                  v-model="newFbUrl"
+                  label="Docker repo URL"
+                  placeholder="myregistry.azurecr.io"
+                  density="compact"
+                  variant="outlined"
+                  hide-details
+                />
+              </v-col>
+              <v-col cols="12" sm="3">
+                <v-text-field
+                  v-model="newFbName"
+                  label="Display name"
+                  density="compact"
+                  variant="outlined"
+                  hide-details
+                />
+              </v-col>
+              <v-col cols="12" sm="4">
+                <v-autocomplete
+                  v-model="newFbRegistryUuid"
+                  :items="allRegistries"
+                  item-title="name"
+                  item-value="uuid"
+                  label="Auth registry"
+                  density="compact"
+                  variant="outlined"
+                  hide-details
+                />
+              </v-col>
+              <v-col cols="12" sm="1">
+                <v-btn icon="mdi-plus" size="small" color="primary" variant="tonal" :disabled="!canAddManual" @click="addManualEntry" />
+              </v-col>
+            </v-row>
+
+            <!-- Add entry: browse from registry -->
+            <div class="text-subtitle-2 font-weight-medium mb-2">Browse from registry</div>
+            <v-row dense class="align-center mb-3">
+              <v-col cols="12" sm="4">
+                <v-autocomplete
+                  v-model="browseFbRegistryUuid"
+                  :items="allRegistries"
+                  item-title="name"
+                  item-value="uuid"
+                  label="Pick a registry to browse"
+                  density="compact"
+                  variant="outlined"
+                  hide-details
+                  clearable
+                />
+              </v-col>
+              <v-col cols="12" sm="2">
+                <v-btn size="small" variant="tonal" :disabled="!browseFbRegistryUuid" :loading="browseLoading" @click="openBrowseDialog">
+                  Browse repos
+                </v-btn>
+              </v-col>
+            </v-row>
+
+            <v-btn
+              color="primary"
+              size="small"
+              :loading="savingFallback"
+              :disabled="savingFallback || fallbackUnchanged"
+              @click="saveFallbackRepositories"
+            >
+              Save fallback list
+            </v-btn>
+          </v-card>
+        </v-col>
+      </v-row>
+
+      <!-- Browse repos dialog -->
+      <v-dialog v-model="browseDialog" width="700">
+        <v-card>
+          <v-card-title class="d-flex align-center justify-space-between">
+            <span>Select Docker repositories</span>
+            <v-btn icon="mdi-close" variant="text" @click="browseDialog = false" />
+          </v-card-title>
+          <v-card-text>
+            <v-text-field
+              v-model="browseSearch"
+              label="Search"
+              prepend-inner-icon="mdi-magnify"
+              variant="outlined"
+              density="compact"
+              clearable
+              @click:clear="browseSearch = ''"
+              class="mb-3"
+            />
+            <div style="max-height: 45vh; overflow-y: auto;">
+              <v-list v-if="!browseLoading" density="compact">
+                <v-list-item
+                  v-for="repo in filteredBrowseRepos"
+                  :key="repo.url"
+                  @click="toggleBrowseRepo(repo)"
+                >
+                  <template v-slot:prepend>
+                    <v-checkbox
+                      :model-value="browseSelectedRepos.some(r => r.url === repo.url)"
+                      hide-details
+                      class="mr-2"
+                      @click.stop="toggleBrowseRepo(repo)"
+                    />
+                  </template>
+                  <v-list-item-title>
+                    {{ repo.name }}
+                    <v-chip v-if="repo.package_type" size="x-small" variant="tonal" class="ml-2" density="compact">
+                      {{ repo.package_type }}
+                    </v-chip>
+                  </v-list-item-title>
+                  <v-list-item-subtitle>{{ repo.url }}</v-list-item-subtitle>
+                </v-list-item>
+              </v-list>
+              <div v-else class="text-center py-8">
+                <v-progress-circular indeterminate color="primary" size="36" />
+              </div>
+            </div>
+          </v-card-text>
+          <v-card-actions>
+            <v-spacer />
+            <v-btn variant="text" @click="browseDialog = false">Cancel</v-btn>
+            <v-btn color="primary" variant="text" :disabled="browseSelectedRepos.length === 0" @click="addBrowsedEntries">
+              Add {{ browseSelectedRepos.length }} selected
+            </v-btn>
+          </v-card-actions>
+        </v-card>
+      </v-dialog>
+
       <v-dialog 
         v-model="dialog" 
         width="1000"
@@ -285,7 +453,7 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import api from '../plugins/axios'
 import { notificationService } from '../plugins/notifications'
-import type { ContainerRegistry, RegistryProvider } from '../types/interfaces'
+import type { ContainerRegistry, RegistryProvider, RegistryFallbackEntry } from '../types/interfaces'
 
 interface RepoItem {
   name: string
@@ -325,6 +493,25 @@ const hasMore = ref(true)
 const isLoadingMore = ref(false)
 const pageSize = 100
 const lastRepo = ref<string | null>(null)
+
+// Fallback Docker repos (registry-level, JSON entries)
+const fallbackEntries = ref<RegistryFallbackEntry[]>([])
+const originalFallbackJson = ref('')
+const savingFallback = ref(false)
+const allRegistries = ref<{ uuid: string; name: string; provider: string }[]>([])
+
+// Manual add
+const newFbUrl = ref('')
+const newFbName = ref('')
+const newFbRegistryUuid = ref<string | null>(null)
+
+// Browse from registry
+const browseFbRegistryUuid = ref<string | null>(null)
+const browseDialog = ref(false)
+const browseLoading = ref(false)
+const browseRepos = ref<RepoItem[]>([])
+const browseSelectedRepos = ref<RepoItem[]>([])
+const browseSearch = ref('')
 
 const activeSteps = computed(() => {
   if (isJfrog.value) {
@@ -561,6 +748,129 @@ const submitJob = async () => {
   }
 }
 
+const fallbackUnchanged = computed(() => {
+  return JSON.stringify(fallbackEntries.value) === originalFallbackJson.value
+})
+
+const canAddManual = computed(() => {
+  return !!(newFbUrl.value.trim() && newFbName.value.trim() && newFbRegistryUuid.value)
+})
+
+const filteredBrowseRepos = computed(() => {
+  if (!browseSearch.value) return browseRepos.value
+  const s = browseSearch.value.toLowerCase()
+  return browseRepos.value.filter(r => r.name.toLowerCase().includes(s) || r.url.toLowerCase().includes(s))
+})
+
+const registryNameByUuid = (uuid: string) => {
+  return allRegistries.value.find(r => r.uuid === uuid)?.name ?? uuid
+}
+
+const loadAllRegistries = async () => {
+  try {
+    const results: { uuid: string; name: string; provider: string }[] = []
+    for (const prov of ['acr', 'jfrog'] as const) {
+      const resp = await api.get('registries/', { params: { provider: prov } })
+      for (const r of resp.data.registries ?? []) {
+        results.push({ uuid: r.uuid, name: r.name, provider: prov })
+      }
+    }
+    allRegistries.value = results
+  } catch {
+    allRegistries.value = []
+  }
+}
+
+const loadRegistryFallbacks = () => {
+  const reg = registries.value.find(r => r.uuid === selectedRegistry.value)
+  const entries: RegistryFallbackEntry[] = (reg?.image_fallback_repositories || []).map((e: any) => ({
+    url: e.url || '',
+    name: e.name || '',
+    registry_uuid: e.registry_uuid || '',
+  }))
+  fallbackEntries.value = entries
+  originalFallbackJson.value = JSON.stringify(entries)
+}
+
+const addManualEntry = () => {
+  if (!canAddManual.value) return
+  fallbackEntries.value.push({
+    url: newFbUrl.value.trim(),
+    name: newFbName.value.trim(),
+    registry_uuid: newFbRegistryUuid.value!,
+  })
+  newFbUrl.value = ''
+  newFbName.value = ''
+  newFbRegistryUuid.value = null
+}
+
+const removeFallbackEntry = (idx: number) => {
+  fallbackEntries.value.splice(idx, 1)
+}
+
+const openBrowseDialog = async () => {
+  if (!browseFbRegistryUuid.value) return
+  browseLoading.value = true
+  browseDialog.value = true
+  browseSelectedRepos.value = []
+  browseSearch.value = ''
+  try {
+    const browseReg = allRegistries.value.find(r => r.uuid === browseFbRegistryUuid.value)
+    const prov = browseReg?.provider || 'acr'
+    const resp = await api.get('repositories/get_acr_repos/', {
+      params: { provider: prov, registry_uuid: browseFbRegistryUuid.value, page_size: 500 }
+    })
+    browseRepos.value = (resp.data.repositories || []).filter((r: any) => r.package_type !== 'helm')
+  } catch (e: any) {
+    notificationService.error(e?.response?.data?.error || 'Failed to browse repositories')
+    browseRepos.value = []
+  } finally {
+    browseLoading.value = false
+  }
+}
+
+const toggleBrowseRepo = (repo: RepoItem) => {
+  const idx = browseSelectedRepos.value.findIndex(r => r.url === repo.url)
+  if (idx === -1) browseSelectedRepos.value.push(repo)
+  else browseSelectedRepos.value.splice(idx, 1)
+}
+
+const addBrowsedEntries = () => {
+  for (const repo of browseSelectedRepos.value) {
+    const alreadyExists = fallbackEntries.value.some(e => e.url === repo.url)
+    if (alreadyExists) continue
+    fallbackEntries.value.push({
+      url: repo.url,
+      name: repo.name,
+      registry_uuid: browseFbRegistryUuid.value!,
+    })
+  }
+  browseDialog.value = false
+  browseSelectedRepos.value = []
+}
+
+const saveFallbackRepositories = async () => {
+  if (!selectedRegistry.value) return
+  savingFallback.value = true
+  try {
+    const resp = await api.patch(`registries/${selectedRegistry.value}/`, {
+      image_fallback_repositories: fallbackEntries.value
+    })
+    const updated: RegistryFallbackEntry[] = resp.data.image_fallback_repositories || []
+    fallbackEntries.value = updated
+    originalFallbackJson.value = JSON.stringify(updated)
+    const reg = registries.value.find(r => r.uuid === selectedRegistry.value)
+    if (reg) {
+      reg.image_fallback_repositories = updated
+    }
+    notificationService.success('Fallback repositories saved')
+  } catch (e: any) {
+    notificationService.error(e?.response?.data?.error || 'Failed to save fallback list')
+  } finally {
+    savingFallback.value = false
+  }
+}
+
 const loadRegistries = async () => {
   try {
     const resp = await api.get('registries/', { params: { provider: provider.value } })
@@ -581,8 +891,18 @@ const onProviderChange = () => {
   loadRegistries()
 }
 
+watch(selectedRegistry, (newVal) => {
+  if (newVal) {
+    loadRegistryFallbacks()
+  } else {
+    fallbackEntries.value = []
+    originalFallbackJson.value = '[]'
+  }
+})
+
 onMounted(() => {
   loadRegistries()
+  loadAllRegistries()
 })
 </script>
 

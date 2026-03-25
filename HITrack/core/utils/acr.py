@@ -9,21 +9,18 @@ It handles authentication, data retrieval, and basic operations with ACR.
 import base64
 import logging
 import re
-import subprocess
-import tempfile
 import urllib.parse
 from typing import Generator, List, Optional, Tuple
 
 # Third-party imports
 import requests
 
+from .helm import extract_images_from_chart_blob
+
 logger = logging.getLogger(__name__)
 
 # Configuration
 PAGE_SIZE = 500
-
-# Regular expression for finding image references in Helm charts
-IMG_RE = re.compile(r'image:\s*["\']?([\w./-]+:[\w.\-]+)')
 
 
 def get_bearer_token(api_url: str, login: str, password: str) -> str:
@@ -221,22 +218,15 @@ def get_helm_images(api_url: str, token: str, repo: str, digest: str) -> List[st
     Returns:
         List[str]: List of container image references.
     """
+    headers = {"Authorization": f"Bearer {token}"}
     try:
-        headers = {"Authorization": f"Bearer {token}"}
-        blob = requests.get(f"{api_url}/v2/{repo}/blobs/{digest}", headers=headers).content
-        with tempfile.NamedTemporaryFile(suffix=".tgz") as f:
-            f.write(blob)
-            f.flush()
-            rendered = subprocess.run(
-                ["helm", "template", "scan", f.name, "--skip-tests"],
-                capture_output=True,
-                check=True,
-                text=True
-            ).stdout
-        return sorted(set(IMG_RE.findall(rendered)))
-    except (requests.RequestException, subprocess.SubprocessError) as e:
-        logger.error(f"Failed to process Helm chart {repo}:{digest}: {e}")
-        return []
+        response = requests.get(f"{api_url}/v2/{repo}/blobs/{digest}", headers=headers, timeout=60)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        logger.error("Failed to download Helm chart %s:%s: %s", repo, digest, e)
+        raise RuntimeError(f"Failed to download Helm chart {repo}:{digest}: {e}") from e
+
+    return extract_images_from_chart_blob(response.content, f"{repo}:{digest}")
 
 
 def get_acr_image_digest(registry_url: str, token: str, image_ref: str) -> str:

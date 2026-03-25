@@ -185,10 +185,17 @@ export interface Stats {
 /** Container registry provider (ACR or Artifactory) */
 export type RegistryProvider = 'acr' | 'jfrog'
 
+export interface RegistryFallbackEntry {
+  url: string
+  name: string
+  registry_uuid: string
+}
+
 export interface ContainerRegistry {
   uuid: string
   name: string
   api_url: string
+  image_fallback_repositories?: RegistryFallbackEntry[]
 }
 
 // Celery Task Interfaces

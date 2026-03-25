@@ -18,40 +18,37 @@
           <v-chip class="mr-2">Tags: {{ repository?.tag_count }}</v-chip>
           <v-chip class="mr-2">URL: {{ repository?.url }}</v-chip>
         </div>
-        <!-- Helm: Image fallback Docker repositories (when chart image refs fail) -->
+        <!-- Helm: Image fallback Docker repositories are managed at registry level -->
         <v-row v-if="repository?.repository_type === 'helm'" class="mt-4">
           <v-col cols="12">
             <v-card variant="outlined" class="pa-4">
               <v-card-title class="text-subtitle-1 font-weight-bold pb-2">
                 Image fallback repositories
               </v-card-title>
-              <v-card-subtitle class="text-caption pb-3">
-                When chart image refs fail to resolve, try these Docker repositories to download the same image.
+              <v-card-subtitle class="text-caption pb-1">
+                Fallback Docker repositories are configured at the registry level and apply to all Helm repositories in that registry.
               </v-card-subtitle>
-              <v-select
-                v-model="selectedFallbackRepoUuids"
-                :items="dockerReposForFallback"
-                item-title="name"
-                item-value="uuid"
-                label="Docker repositories"
-                multiple
-                chips
-                closable-chips
-                density="comfortable"
-                variant="outlined"
-                hide-details
-                class="mb-3"
-                :loading="dockerReposLoading"
-              />
-              <v-btn
-                color="primary"
-                size="small"
-                :loading="savingFallback"
-                :disabled="savingFallback || fallbackUnchanged"
-                @click="saveFallbackRepositories"
-              >
-                Save fallback list
-              </v-btn>
+              <div class="d-flex align-center mt-2">
+                <v-icon size="small" class="mr-2">mdi-information-outline</v-icon>
+                <span class="text-body-2">
+                  Manage fallback repositories on the
+                  <router-link to="/acr">Container Registries</router-link> page.
+                </span>
+              </div>
+              <div v-if="registryFallbackRepos.length" class="mt-3">
+                <v-chip
+                  v-for="(fb, idx) in registryFallbackRepos"
+                  :key="idx"
+                  size="small"
+                  class="mr-2 mb-1"
+                  variant="tonal"
+                >
+                  {{ fb.name || fb.url }}
+                </v-chip>
+              </div>
+              <div v-else class="mt-2 text-body-2 text-medium-emphasis">
+                No fallback repositories configured for this registry.
+              </div>
             </v-card>
           </v-col>
         </v-row>
@@ -557,11 +554,8 @@ const showDeleteDialog = ref(false)
 const tagToDelete = ref<any>(null)
 const scanning = ref(false)
 const showScanDialog = ref(false)
-// Helm: image fallback Docker repositories
-const dockerReposForFallback = ref<{ uuid: string; name: string }[]>([])
-const dockerReposLoading = ref(false)
-const selectedFallbackRepoUuids = ref<string[]>([])
-const savingFallback = ref(false)
+// Helm: registry-level image fallback repositories (read-only display)
+const registryFallbackRepos = ref<{ url: string; name: string; registry_uuid: string }[]>([])
 
 const tagNameRules = [
   (v: string) => !!v || 'Tag name is required',
@@ -858,8 +852,7 @@ const fetchRepository = async () => {
     const resp = await api.get(`repositories/${route.params.uuid}/`)
     repository.value = resp.data
     if (resp.data?.repository_type === 'helm') {
-      selectedFallbackRepoUuids.value = (resp.data.image_fallback_repositories || []).map((r: { uuid: string }) => r.uuid)
-      loadDockerRepos()
+      loadRegistryFallbacks()
     }
   } finally {
     repositoryLoading.value = false
@@ -867,37 +860,17 @@ const fetchRepository = async () => {
   }
 }
 
-const loadDockerRepos = async () => {
-  dockerReposLoading.value = true
-  try {
-    const resp = await api.get('repositories/names/', { params: { repository_type: 'docker' } })
-    dockerReposForFallback.value = (resp.data || []).map((r: any) => ({ uuid: r.uuid, name: r.name }))
-  } catch (e: any) {
-    notificationService.error(e?.response?.data?.error || 'Failed to load Docker repositories')
-  } finally {
-    dockerReposLoading.value = false
+const loadRegistryFallbacks = async () => {
+  const registryUuid = repository.value?.container_registry
+  if (!registryUuid) {
+    registryFallbackRepos.value = []
+    return
   }
-}
-
-const fallbackUnchanged = computed(() => {
-  const current = (repository.value?.image_fallback_repositories || []).map((r: { uuid: string }) => r.uuid).sort().join(',')
-  const selected = [...selectedFallbackRepoUuids.value].sort().join(',')
-  return current === selected
-})
-
-const saveFallbackRepositories = async () => {
-  if (!repository.value?.uuid) return
-  savingFallback.value = true
   try {
-    await api.patch(`repositories/${repository.value.uuid}/`, {
-      image_fallback_repository_uuids: selectedFallbackRepoUuids.value
-    })
-    notificationService.success('Fallback repositories saved')
-    await fetchRepository()
-  } catch (e: any) {
-    notificationService.error(e?.response?.data?.error || 'Failed to save fallback list')
-  } finally {
-    savingFallback.value = false
+    const resp = await api.get(`registries/${registryUuid}/`)
+    registryFallbackRepos.value = resp.data.image_fallback_repositories || []
+  } catch {
+    registryFallbackRepos.value = []
   }
 }
 

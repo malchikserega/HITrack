@@ -2107,11 +2107,60 @@ class ListRegistriesView(GenericAPIView):
             {
                 'uuid': str(r.uuid),
                 'name': r.name,
-                'api_url': r.api_url
+                'api_url': r.api_url,
+                'image_fallback_repositories': r.image_fallback_repositories or [],
             }
             for r in registries
         ]
         return Response({'registries': data})
+
+
+class RegistryDetailView(GenericAPIView):
+    """Get or update a single container registry (supports PATCH for fallback repos)."""
+    permission_classes = [IsAuthenticated]
+
+    @staticmethod
+    def _registry_response(registry):
+        return {
+            'uuid': str(registry.uuid),
+            'name': registry.name,
+            'api_url': registry.api_url,
+            'image_fallback_repositories': registry.image_fallback_repositories or [],
+        }
+
+    def get(self, request, uuid):
+        registry = ContainerRegistry.objects.filter(uuid=uuid).first()
+        if not registry:
+            return Response({'error': 'Registry not found'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(self._registry_response(registry))
+
+    def patch(self, request, uuid):
+        registry = ContainerRegistry.objects.filter(uuid=uuid).first()
+        if not registry:
+            return Response({'error': 'Registry not found'}, status=status.HTTP_404_NOT_FOUND)
+        entries = request.data.get('image_fallback_repositories')
+        if entries is not None:
+            if not isinstance(entries, list):
+                return Response(
+                    {'image_fallback_repositories': 'Must be a list of {url, name, registry_uuid} entries.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            valid_reg_uuids = set(
+                str(u) for u in ContainerRegistry.objects.values_list('uuid', flat=True)
+            )
+            cleaned = []
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                url = (entry.get('url') or '').strip()
+                name = (entry.get('name') or '').strip()
+                reg_uuid = str(entry.get('registry_uuid') or '').strip()
+                if not url or not name or reg_uuid not in valid_reg_uuids:
+                    continue
+                cleaned.append({'url': url, 'name': name, 'registry_uuid': reg_uuid})
+            registry.image_fallback_repositories = cleaned
+            registry.save(update_fields=['image_fallback_repositories'])
+        return Response(self._registry_response(registry))
 
 class StatsViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
