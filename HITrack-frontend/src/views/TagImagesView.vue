@@ -99,16 +99,18 @@
       <v-row>
         <v-col cols="12">
           <div class="images-table-responsive" style="margin-top:-8px !important;padding-top:0 !important;">
-            <v-data-table
+            <v-data-table-server
               :headers="headers"
               :items="images"
+              :items-length="totalItems"
               :loading="loading"
               class="elevation-1"
               item-class="clickable-row"
               :items-per-page="itemsPerPage"
               :page="page"
-              :sort-by.sync="sortBy"
+              v-model:sort-by="sortBy"
               hide-default-footer
+              @update:options="onTableOptionsUpdate"
             >
               <template #item="{ item }">
                 <tr class="clickable-row" @click="navigateToImageDetail(item)">
@@ -189,7 +191,7 @@
                   </td>
                 </tr>
               </template>
-            </v-data-table>
+            </v-data-table-server>
           </div>
           <div class="d-flex align-center justify-end mt-2 gap-4">
             <v-select
@@ -205,7 +207,6 @@
             <v-pagination
               v-model="page"
               :length="pageCount"
-              @update:model-value="fetchImages"
               :total-visible="7"
               density="comfortable"
             />
@@ -241,6 +242,18 @@ const totalItems = ref(0)
 const sortBy = ref<SortItem[]>([{ key: 'updated_at', order: 'desc' }])
 const showUniqueFindings = ref(false)
 
+const normalizeSortBy = (items?: readonly SortItem[]): SortItem[] =>
+  (items || []).map((item) => {
+    const order: 'asc' | 'desc' = item.order === 'desc' ? 'desc' : 'asc'
+    return {
+      key: item.key,
+      order,
+    }
+  })
+
+const areSortByEqual = (left: readonly SortItem[], right: readonly SortItem[]) =>
+  JSON.stringify(normalizeSortBy(left)) === JSON.stringify(normalizeSortBy(right))
+
 // Release management
 const tagReleases = ref<Array<{ uuid: string; name: string }>>([])
 const availableReleases = ref<Array<{ uuid: string; name: string }>>([])
@@ -268,7 +281,11 @@ const fetchImages = async () => {
     }
     if (search.value) params.search = search.value
     if (sortBy.value && sortBy.value.length > 0) {
-      params.ordering = sortBy.value.map(s => s.order === 'desc' ? `-${s.key}` : s.key).join(',')
+      const [sort] = sortBy.value
+      const resolvedKey = sort.key === 'findings'
+        ? (showUniqueFindings.value ? 'unique_findings' : 'findings')
+        : sort.key
+      params.ordering = `${sort.order === 'desc' ? '-' : ''}${resolvedKey}`
     }
     const response = await api.get<PaginatedResponse<Image>>(`repository-tags/${tagUuid.value}/images/`, { params })
     images.value = response.data.results
@@ -283,14 +300,48 @@ const fetchImages = async () => {
 const onItemsPerPageChange = (val: number) => {
   itemsPerPage.value = val
   page.value = 1
-  fetchImages()
 }
 
-watch([search, sortBy], () => {
-  page.value = 1
+watch(search, () => {
+  if (page.value !== 1) {
+    page.value = 1
+    return
+  }
   fetchImages()
 })
+
+watch(sortBy, () => {
+  if (page.value !== 1) {
+    page.value = 1
+    return
+  }
+  fetchImages()
+})
+watch(showUniqueFindings, () => {
+  if (sortBy.value[0]?.key === 'findings') {
+    fetchImages()
+  }
+})
 watch([page, itemsPerPage], fetchImages)
+
+const onTableOptionsUpdate = (options: { page: number; itemsPerPage: number; sortBy: SortItem[] }) => {
+  const nextSortBy = normalizeSortBy(options.sortBy)
+  const currentSortBy = normalizeSortBy(sortBy.value)
+
+  if (
+    page.value === options.page &&
+    itemsPerPage.value === options.itemsPerPage &&
+    JSON.stringify(currentSortBy) === JSON.stringify(nextSortBy)
+  ) {
+    return
+  }
+
+  page.value = options.page
+  itemsPerPage.value = options.itemsPerPage
+  if (!areSortByEqual(sortBy.value, nextSortBy)) {
+    sortBy.value = nextSortBy
+  }
+}
 
 const statusLabel = (status: string) => {
   switch (status) {

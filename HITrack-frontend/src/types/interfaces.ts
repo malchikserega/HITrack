@@ -138,6 +138,24 @@ export interface Image extends BaseEntity {
   component_versions?: ComponentVersion[]
 }
 
+export interface VulnerabilityAffectedImageTag {
+  repository_name: string
+  repository_uuid: string
+  repository_type: string
+  tag: string
+  tag_uuid: string
+}
+
+export interface VulnerabilityAffectedImage {
+  uuid: string
+  name: string
+  digest: string
+  scan_status: string
+  has_sbom: boolean
+  has_grype: boolean
+  repository_tags: VulnerabilityAffectedImageTag[]
+}
+
 /**
  * Component interface
  */

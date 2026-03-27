@@ -152,20 +152,18 @@
             ></v-text-field>
           </v-card-title>
           <v-card-text class="pa-0">
-            <v-data-table
+            <v-data-table-server
               :headers="headers"
               :items="tasks"
+              :items-length="totalTasks"
               :loading="loading"
-              :options.sync="options"
-              :server-items-length="totalTasks"
-              :items-per-page="options.itemsPerPage"
-              :page.sync="options.page"
+              :items-per-page="taskItemsPerPage"
+              :page="taskPage"
+              v-model:sort-by="taskSortBy"
               class="elevation-0 task-table"
               dense
-              :footer-props="{
-                'items-per-page-options': [10, 25, 50, 100],
-                'items-per-page-text': 'Tasks per page:'
-              }"
+              hide-default-footer
+              @update:options="onTaskOptionsUpdate"
             >
               <template v-slot:item.task_name="{ item }">
                 <div class="d-flex align-center">
@@ -242,7 +240,28 @@
                   </v-btn>
                 </div>
               </template>
-            </v-data-table>
+            </v-data-table-server>
+            <div class="d-flex align-center justify-end px-4 py-3 gap-4">
+              <v-select
+                :items="[10, 25, 50, 100]"
+                v-model="taskItemsPerPage"
+                label="Tasks per page"
+                density="compact"
+                variant="outlined"
+                hide-details
+                style="width: 90px"
+                @update:model-value="onTaskItemsPerPageChange"
+              />
+              <span class="text-body-2">
+                {{ taskRangeStart }}-{{ taskRangeEnd }} of {{ totalTasks }}
+              </span>
+              <v-pagination
+                v-model="taskPage"
+                :length="taskPageCount"
+                :total-visible="7"
+                density="comfortable"
+              />
+            </div>
           </v-card-text>
         </v-card>
       </v-col>
@@ -372,10 +391,16 @@
             Periodic Tasks
           </v-card-title>
           <v-card-text>
-            <v-data-table
+            <v-data-table-server
               :headers="periodicHeaders"
               :items="periodicTasks"
+              :items-length="totalPeriodicTasks"
               :loading="periodicLoading"
+              :items-per-page="periodicItemsPerPage"
+              :page="periodicPage"
+              v-model:sort-by="periodicSortBy"
+              hide-default-footer
+              @update:options="onPeriodicOptionsUpdate"
             >
               <template v-slot:item.enabled="{ item }">
                 <v-switch
@@ -405,7 +430,28 @@
                   <v-icon>mdi-play</v-icon>
                 </v-btn>
               </template>
-            </v-data-table>
+            </v-data-table-server>
+            <div class="d-flex align-center justify-end px-4 py-3 gap-4">
+              <v-select
+                :items="[10, 25, 50, 100]"
+                v-model="periodicItemsPerPage"
+                label="Items per page"
+                density="compact"
+                variant="outlined"
+                hide-details
+                style="width: 90px"
+                @update:model-value="onPeriodicItemsPerPageChange"
+              />
+              <span class="text-body-2">
+                {{ periodicRangeStart }}-{{ periodicRangeEnd }} of {{ totalPeriodicTasks }}
+              </span>
+              <v-pagination
+                v-model="periodicPage"
+                :length="periodicPageCount"
+                :total-visible="7"
+                density="comfortable"
+              />
+            </div>
           </v-card-text>
         </v-card>
       </v-col>
@@ -416,16 +462,15 @@
 
 <script lang="ts">
 import { defineComponent, ref, reactive, onMounted, onUnmounted, watch, computed } from 'vue'
-import { useRouter } from 'vue-router'
 import api from '@/plugins/axios'
 import type { TaskResult, TaskStatistics, PeriodicTask } from '@/types/interfaces'
 import { formatDate, formatDuration } from '@/utils/dateUtils'
 import { notificationService } from '@/plugins/notifications'
+import type { DataTableSortItem } from 'vuetify'
 
 export default defineComponent({
   name: 'TaskManagementView',
   setup() {
-    const router = useRouter()
     const loading = ref(false)
     const periodicLoading = ref(false)
     const testTaskLoading = ref(false)
@@ -453,34 +498,74 @@ export default defineComponent({
       tasks.value.some(task => ['pending', 'in_process'].includes(task.status))
     )
     let refreshTimer: number | null = null
-    
-    const options = ref({
-      page: 1,
-      itemsPerPage: 10,
-      sortBy: ['created'],
-      sortDesc: [true]
-    })
+
+    const taskPage = ref(1)
+    const taskItemsPerPage = ref(10)
+    const taskSortBy = ref<DataTableSortItem[]>([{ key: 'created', order: 'desc' }])
     const totalTasks = ref(0)
+    const periodicPage = ref(1)
+    const periodicItemsPerPage = ref(10)
+    const periodicSortBy = ref<DataTableSortItem[]>([{ key: 'name', order: 'asc' }])
+    const totalPeriodicTasks = ref(0)
+
+    const normalizeSortBy = (items?: readonly DataTableSortItem[]): DataTableSortItem[] =>
+      (items || []).map((item) => ({
+        key: String(item.key),
+        order: item.order === 'desc' ? 'desc' : 'asc',
+      }))
+
+    const areSortByEqual = (left: readonly DataTableSortItem[], right: readonly DataTableSortItem[]) =>
+      JSON.stringify(normalizeSortBy(left)) === JSON.stringify(normalizeSortBy(right))
+
+    const taskOrderingMap: Record<string, string> = {
+      task_id: 'task_id',
+      task_name: 'task_name',
+      status: 'status',
+      created: 'date_created',
+    }
+
+    const periodicOrderingMap: Record<string, string> = {
+      name: 'name',
+      task: 'task',
+      enabled: 'enabled',
+      last_run_at: 'last_run_at',
+      total_run_count: 'total_run_count',
+    }
+
+    const taskPageCount = computed(() => Math.ceil(totalTasks.value / taskItemsPerPage.value) || 1)
+    const periodicPageCount = computed(() => Math.ceil(totalPeriodicTasks.value / periodicItemsPerPage.value) || 1)
+    const taskRangeStart = computed(() => totalTasks.value === 0 ? 0 : ((taskPage.value - 1) * taskItemsPerPage.value) + 1)
+    const taskRangeEnd = computed(() => totalTasks.value === 0 ? 0 : Math.min(taskPage.value * taskItemsPerPage.value, totalTasks.value))
+    const periodicRangeStart = computed(() => totalPeriodicTasks.value === 0 ? 0 : ((periodicPage.value - 1) * periodicItemsPerPage.value) + 1)
+    const periodicRangeEnd = computed(() => totalPeriodicTasks.value === 0 ? 0 : Math.min(periodicPage.value * periodicItemsPerPage.value, totalPeriodicTasks.value))
 
     const headers = [
-      { text: 'Task ID', value: 'task_id' },
-      { text: 'Task Name', value: 'task_name' },
-      { text: 'Status', value: 'status' },
-      { text: 'Duration', value: 'duration' },
-      { text: 'Created', value: 'created' },
-      { text: 'Actions', value: 'actions', sortable: false }
+      { title: 'Task ID', key: 'task_id', sortable: true },
+      { title: 'Task Name', key: 'task_name', sortable: true },
+      { title: 'Status', key: 'status', sortable: true },
+      { title: 'Duration', key: 'duration', sortable: false },
+      { title: 'Created', key: 'created', sortable: true },
+      { title: 'Actions', key: 'actions', sortable: false }
     ]
 
     const periodicHeaders = [
-      { text: 'Name', value: 'name' },
-      { text: 'Task', value: 'task' },
-      { text: 'Enabled', value: 'enabled' },
-      { text: 'Schedule', value: 'schedule_info' },
-      { text: 'Next Run', value: 'next_run' },
-      { text: 'Last Run', value: 'last_run_at' },
-      { text: 'Run Count', value: 'total_run_count' },
-      { text: 'Actions', value: 'actions', sortable: false }
+      { title: 'Name', key: 'name', sortable: true },
+      { title: 'Task', key: 'task', sortable: true },
+      { title: 'Enabled', key: 'enabled', sortable: true },
+      { title: 'Schedule', key: 'schedule_info', sortable: false },
+      { title: 'Next Run', key: 'next_run', sortable: false },
+      { title: 'Last Run', key: 'last_run_at', sortable: true },
+      { title: 'Run Count', key: 'total_run_count', sortable: true },
+      { title: 'Actions', key: 'actions', sortable: false }
     ]
+
+    function debounce(fn: Function, delay: number) {
+      let timeout: ReturnType<typeof setTimeout> | null = null
+      return (...args: any[]) => {
+        if (timeout) clearTimeout(timeout)
+        timeout = setTimeout(() => fn(...args), delay)
+      }
+    }
 
     const loadStatistics = async () => {
       try {
@@ -495,8 +580,8 @@ export default defineComponent({
       loading.value = true
       try {
         const params: any = {
-          page_size: options.value.itemsPerPage || 10,
-          page: options.value.page || 1
+          page_size: taskItemsPerPage.value || 10,
+          page: taskPage.value || 1
         }
         
         // Add search parameter if provided
@@ -505,15 +590,16 @@ export default defineComponent({
         }
         
         // Add sorting parameters
-        if (options.value.sortBy && options.value.sortBy.length > 0) {
-          params.ordering = options.value.sortDesc && options.value.sortDesc[0] 
-            ? `-${options.value.sortBy[0]}` 
-            : options.value.sortBy[0]
+        if (taskSortBy.value.length > 0) {
+          const sortField = taskOrderingMap[String(taskSortBy.value[0].key)]
+          if (sortField) {
+            params.ordering = `${taskSortBy.value[0].order === 'desc' ? '-' : ''}${sortField}`
+          }
         }
         
         const response = await api.get('/tasks/', { params })
-        tasks.value = response.data.results
-        totalTasks.value = response.data.count
+        tasks.value = response.data.results || []
+        totalTasks.value = response.data.count || 0
       } catch (error) {
         console.error('Error loading tasks:', error)
       } finally {
@@ -524,8 +610,21 @@ export default defineComponent({
     const loadPeriodicTasks = async () => {
       periodicLoading.value = true
       try {
-        const response = await api.get('/periodic-tasks/')
-        periodicTasks.value = response.data.results
+        const params: any = {
+          page_size: periodicItemsPerPage.value || 10,
+          page: periodicPage.value || 1,
+        }
+
+        if (periodicSortBy.value.length > 0) {
+          const sortField = periodicOrderingMap[String(periodicSortBy.value[0].key)]
+          if (sortField) {
+            params.ordering = `${periodicSortBy.value[0].order === 'desc' ? '-' : ''}${sortField}`
+          }
+        }
+
+        const response = await api.get('/periodic-tasks/', { params })
+        periodicTasks.value = response.data.results || []
+        totalPeriodicTasks.value = response.data.count || 0
       } catch (error) {
         console.error('Error loading periodic tasks:', error)
       } finally {
@@ -565,7 +664,7 @@ export default defineComponent({
         return
       }
 
-      tasks.value = [pendingTask, ...tasks.value].slice(0, options.value.itemsPerPage || 10)
+      tasks.value = [pendingTask, ...tasks.value].slice(0, taskItemsPerPage.value || 10)
       totalTasks.value += 1
     }
 
@@ -724,18 +823,67 @@ export default defineComponent({
     }
 
     const getTaskIcon = (taskName: string) => {
-      if (taskName.includes('Test Task')) return 'mdi-test-tube'
-      if (taskName.includes('Failing Task')) return 'mdi-alert'
-      if (taskName.includes('Test Endpoint')) return 'mdi-web'
-      if (taskName.includes('Test Direct API')) return 'mdi-api'
-      if (taskName.includes('Scan')) return 'mdi-magnify'
-      if (taskName.includes('Update')) return 'mdi-update'
-      if (taskName.includes('Recalculate')) return 'mdi-wrench-check'
-      if (taskName.includes('Process')) return 'mdi-cog'
-      if (taskName.includes('Parse')) return 'mdi-file-document'
-      if (taskName.includes('Delete')) return 'mdi-delete'
-      if (taskName.includes('Cleanup')) return 'mdi-broom'
+      const safeTaskName = taskName || ''
+      if (safeTaskName.includes('Test Task')) return 'mdi-test-tube'
+      if (safeTaskName.includes('Failing Task')) return 'mdi-alert'
+      if (safeTaskName.includes('Test Endpoint')) return 'mdi-web'
+      if (safeTaskName.includes('Test Direct API')) return 'mdi-api'
+      if (safeTaskName.includes('Scan')) return 'mdi-magnify'
+      if (safeTaskName.includes('Update')) return 'mdi-update'
+      if (safeTaskName.includes('Recalculate')) return 'mdi-wrench-check'
+      if (safeTaskName.includes('Process')) return 'mdi-cog'
+      if (safeTaskName.includes('Parse')) return 'mdi-file-document'
+      if (safeTaskName.includes('Delete')) return 'mdi-delete'
+      if (safeTaskName.includes('Cleanup')) return 'mdi-broom'
       return 'mdi-help-circle'
+    }
+
+    const debouncedLoadTasks = debounce(loadTasks, 300)
+
+    const onTaskItemsPerPageChange = (value: number) => {
+      taskItemsPerPage.value = value
+      taskPage.value = 1
+    }
+
+    const onPeriodicItemsPerPageChange = (value: number) => {
+      periodicItemsPerPage.value = value
+      periodicPage.value = 1
+    }
+
+    const onTaskOptionsUpdate = (options: { page: number; itemsPerPage: number; sortBy: DataTableSortItem[] }) => {
+      const nextSortBy = normalizeSortBy(options.sortBy)
+
+      if (
+        taskPage.value === options.page &&
+        taskItemsPerPage.value === options.itemsPerPage &&
+        areSortByEqual(taskSortBy.value, nextSortBy)
+      ) {
+        return
+      }
+
+      taskPage.value = options.page
+      taskItemsPerPage.value = options.itemsPerPage
+      if (!areSortByEqual(taskSortBy.value, nextSortBy)) {
+        taskSortBy.value = nextSortBy
+      }
+    }
+
+    const onPeriodicOptionsUpdate = (options: { page: number; itemsPerPage: number; sortBy: DataTableSortItem[] }) => {
+      const nextSortBy = normalizeSortBy(options.sortBy)
+
+      if (
+        periodicPage.value === options.page &&
+        periodicItemsPerPage.value === options.itemsPerPage &&
+        areSortByEqual(periodicSortBy.value, nextSortBy)
+      ) {
+        return
+      }
+
+      periodicPage.value = options.page
+      periodicItemsPerPage.value = options.itemsPerPage
+      if (!areSortByEqual(periodicSortBy.value, nextSortBy)) {
+        periodicSortBy.value = nextSortBy
+      }
     }
 
 
@@ -763,14 +911,14 @@ export default defineComponent({
       }
     }
 
-    // Watch for changes in search and options
     watch(search, () => {
-      loadTasks()
+      taskPage.value = 1
+      debouncedLoadTasks()
     })
 
-    watch(options, () => {
-      loadTasks()
-    }, { deep: true })
+    watch([taskPage, taskItemsPerPage, taskSortBy], loadTasks)
+
+    watch([periodicPage, periodicItemsPerPage, periodicSortBy], loadPeriodicTasks)
 
     watch(hasActiveTasks, (isActive) => {
       if (isActive) {
@@ -809,8 +957,20 @@ export default defineComponent({
           taskDetailsDialog,
           selectedTask,
           hasActiveTasks,
-          options,
+          taskPage,
+          taskItemsPerPage,
+          taskSortBy,
           totalTasks,
+          periodicPage,
+          periodicItemsPerPage,
+          periodicSortBy,
+          totalPeriodicTasks,
+          taskPageCount,
+          periodicPageCount,
+          taskRangeStart,
+          taskRangeEnd,
+          periodicRangeStart,
+          periodicRangeEnd,
           headers,
           periodicHeaders,
           loadTasks,
@@ -829,6 +989,10 @@ export default defineComponent({
           getStatusColor,
           togglePeriodicTask,
           runPeriodicTaskNow,
+          onTaskOptionsUpdate,
+          onPeriodicOptionsUpdate,
+          onTaskItemsPerPageChange,
+          onPeriodicItemsPerPageChange,
           formatDate,
           formatDuration,
           getTaskIcon

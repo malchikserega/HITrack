@@ -40,16 +40,18 @@
       <v-row>
         <v-col cols="12">
           <div class="images-table-responsive" style="margin-top:-8px !important;padding-top:0 !important;">
-            <v-data-table
+            <v-data-table-server
               :headers="headers"
               :items="images"
+              :items-length="totalItems"
               :loading="loading"
               class="elevation-1"
               item-class="clickable-row"
               :items-per-page="itemsPerPage"
               :page="page"
-              :sort-by.sync="sortBy"
+              v-model:sort-by="sortBy"
               hide-default-footer
+              @update:options="onTableOptionsUpdate"
             >
               <template #item="{ item }">
                 <tr class="clickable-row">
@@ -167,7 +169,7 @@
                   </td>
                 </tr>
               </template>
-            </v-data-table>
+            </v-data-table-server>
           </div>
         </v-col>
       </v-row>
@@ -186,7 +188,6 @@
         <v-pagination
           v-model="page"
           :length="pageCount"
-          @update:model-value="fetchImages"
           :total-visible="7"
           density="comfortable"
         />
@@ -291,6 +292,18 @@ const showUniqueFindings = ref(false)
 const router = useRouter()
 let refreshTimer: number | null = null
 
+const normalizeSortBy = (items?: readonly DataTableSortItem[]): DataTableSortItem[] =>
+  (items || []).map((item) => {
+    const order: 'asc' | 'desc' = item.order === 'desc' ? 'desc' : 'asc'
+    return {
+      key: String(item.key),
+      order,
+    }
+  })
+
+const areSortByEqual = (left: readonly DataTableSortItem[], right: readonly DataTableSortItem[]) =>
+  JSON.stringify(normalizeSortBy(left)) === JSON.stringify(normalizeSortBy(right))
+
 const defaultItem = {
   id: undefined,
   uuid: '',
@@ -336,7 +349,11 @@ const fetchImages = async () => {
     }
     if (search.value) params.search = search.value
     if (sortBy.value && sortBy.value.length > 0) {
-      params.ordering = sortBy.value.map(s => s.order === 'desc' ? `-${s.key}` : s.key).join(',')
+      const [sort] = sortBy.value
+      const resolvedKey = sort.key === 'findings'
+        ? (showUniqueFindings.value ? 'unique_findings_count' : 'findings_count')
+        : String(sort.key)
+      params.ordering = `${sort.order === 'desc' ? '-' : ''}${resolvedKey}`
     }
     const response = await api.get<PaginatedResponse<Image>>('images/', { params })
     images.value = response.data.results
@@ -368,13 +385,29 @@ const pageCount = computed(() => Math.ceil(totalItems.value / itemsPerPage.value
 const onItemsPerPageChange = (val: number) => {
   itemsPerPage.value = val
   page.value = 1
-  fetchImages()
 }
 
-watch([search, sortBy], () => {
-  page.value = 1
+watch(search, () => {
+  if (page.value !== 1) {
+    page.value = 1
+    return
+  }
   fetchImages()
 })
+
+watch(sortBy, () => {
+  if (page.value !== 1) {
+    page.value = 1
+    return
+  }
+  fetchImages()
+})
+watch(showUniqueFindings, () => {
+  if (sortBy.value[0]?.key === 'findings') {
+    fetchImages()
+  }
+})
+watch([page, itemsPerPage], fetchImages)
 watch(hasActiveImageScans, (isActive) => {
   if (isActive) {
     startAutoRefresh()
@@ -416,6 +449,25 @@ const openDialog = (title: string, item?: Image) => {
 const closeDialog = () => {
   dialog.value = false
   editedItem.value = Object.assign({}, defaultItem)
+}
+
+const onTableOptionsUpdate = (options: { page: number; itemsPerPage: number; sortBy: DataTableSortItem[] }) => {
+  const nextSortBy = normalizeSortBy(options.sortBy)
+  const currentSortBy = normalizeSortBy(sortBy.value)
+
+  if (
+    page.value === options.page &&
+    itemsPerPage.value === options.itemsPerPage &&
+    JSON.stringify(currentSortBy) === JSON.stringify(nextSortBy)
+  ) {
+    return
+  }
+
+  page.value = options.page
+  itemsPerPage.value = options.itemsPerPage
+  if (!areSortByEqual(sortBy.value, nextSortBy)) {
+    sortBy.value = nextSortBy
+  }
 }
 
 const save = async () => {

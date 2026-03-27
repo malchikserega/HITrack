@@ -592,6 +592,73 @@ class ImageListSerializer(serializers.ModelSerializer):
         return None
 
 
+class VulnerabilityImageRepositoryTagSerializer(serializers.Serializer):
+    repository_name = serializers.CharField()
+    repository_uuid = serializers.UUIDField()
+    repository_type = serializers.CharField()
+    tag = serializers.CharField()
+    tag_uuid = serializers.UUIDField()
+
+
+class VulnerabilityAffectedImageSerializer(serializers.ModelSerializer):
+    has_sbom = serializers.SerializerMethodField()
+    has_grype = serializers.SerializerMethodField()
+    repository_tags = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Image
+        fields = [
+            'uuid',
+            'name',
+            'digest',
+            'scan_status',
+            'has_sbom',
+            'has_grype',
+            'repository_tags',
+        ]
+        read_only_fields = ['uuid']
+
+    @extend_schema_field(serializers.BooleanField())
+    def get_has_sbom(self, obj):
+        if hasattr(obj, 'has_sbom'):
+            return obj.has_sbom
+        try:
+            return obj.sbom_data is not None
+        except Exception:
+            return False
+
+    @extend_schema_field(serializers.BooleanField())
+    def get_has_grype(self, obj):
+        if hasattr(obj, 'has_grype'):
+            return obj.has_grype
+        try:
+            return obj.grype_data is not None
+        except Exception:
+            return False
+
+    @extend_schema_field(serializers.ListField(child=VulnerabilityImageRepositoryTagSerializer()))
+    def get_repository_tags(self, obj):
+        prefetched_tags = getattr(obj, '_prefetched_objects_cache', {}).get('repository_tags')
+        tags = prefetched_tags if prefetched_tags is not None else obj.repository_tags.select_related('repository').all()
+
+        serialized_tags = []
+        seen_tag_ids = set()
+        for tag in tags:
+            if tag.pk in seen_tag_ids:
+                continue
+            seen_tag_ids.add(tag.pk)
+            serialized_tags.append({
+                'repository_name': tag.repository.name,
+                'repository_uuid': tag.repository.uuid,
+                'repository_type': tag.repository.repository_type,
+                'tag': tag.tag,
+                'tag_uuid': tag.uuid,
+            })
+
+        serialized_tags.sort(key=lambda item: (item['repository_name'], item['tag']))
+        return serialized_tags
+
+
 class TagImageShortSerializer(serializers.ModelSerializer):
     findings = serializers.SerializerMethodField()
     components_count = serializers.SerializerMethodField()

@@ -16,7 +16,7 @@ from .serializers import (
     ReleaseSerializer, RepositoryTagReleaseSerializer, ReleaseAssignmentSerializer,
     VulnerabilityListSerializer, VulnerabilityDetailsSerializer,
     TaskResultSerializer, TaskResultListSerializer, PeriodicTaskSerializer, TaskStatisticsSerializer,
-    ComponentLocationSerializer
+    ComponentLocationSerializer, VulnerabilityAffectedImageSerializer
 )
 from django.db import models
 from .pagination import CustomPageNumberPagination
@@ -31,7 +31,7 @@ from collections import defaultdict
 from rest_framework.views import APIView
 from django.http import HttpResponse
 from openpyxl import Workbook
-from django.shortcuts import render
+from django.shortcuts import get_object_or_404, render
 import re
 import logging
 from django.conf import settings
@@ -77,6 +77,13 @@ IMAGE_LIST_ORDERING_MAP = {
     '-unique_findings': '-unique_findings_count',
 }
 
+VULNERABILITY_IMAGE_ORDERING_MAP = {
+    'name': 'name',
+    '-name': '-name',
+    'scan_status': 'scan_status',
+    '-scan_status': '-scan_status',
+}
+
 
 def _build_optimized_image_list_queryset(queryset):
     """Annotate lightweight image summary fields without loading large JSON blobs."""
@@ -105,6 +112,39 @@ def _build_optimized_image_list_queryset(queryset):
         )
     ).prefetch_related(
         'repository_tags__repository'
+    ).defer('sbom_data', 'grype_data')
+
+
+def _build_vulnerability_image_queryset(queryset, vulnerability):
+    repository_tag_prefetch = Prefetch(
+        'repository_tags',
+        queryset=RepositoryTag.objects.select_related('repository').only(
+            'uuid',
+            'tag',
+            'repository__uuid',
+            'repository__name',
+            'repository__repository_type',
+        ).order_by('repository__name', 'tag'),
+    )
+
+    return queryset.annotate(
+        has_sbom=Case(
+            When(sbom_data__isnull=False, then=True),
+            default=False,
+            output_field=BooleanField()
+        ),
+        has_grype=Case(
+            When(grype_data__isnull=False, then=True),
+            default=False,
+            output_field=BooleanField()
+        )
+    ).prefetch_related(
+        repository_tag_prefetch
+    ).only(
+        'uuid',
+        'name',
+        'digest',
+        'scan_status',
     ).defer('sbom_data', 'grype_data')
 
 
@@ -395,7 +435,7 @@ class RepositoryViewSet(BaseViewSet):
     queryset = Repository.objects.all()
     filterset_fields = ['name', 'repository_type']
     search_fields = ['name', 'url']
-    ordering_fields = ['name', 'created_at', 'updated_at']
+    ordering_fields = ['name', 'url', 'tag_count', 'created_at', 'updated_at']
 
     def get_serializer_class(self):
         if self.action == 'list':
@@ -1035,7 +1075,7 @@ class ImageViewSet(BaseViewSet):
     queryset = Image.objects.all()
     filterset_fields = ['repository_tags', 'component_versions']
     search_fields = ['name']
-    ordering_fields = ['name', 'created_at', 'updated_at', 'findings_count', 'unique_findings_count', 'components_count']
+    ordering_fields = ['name', 'digest', 'created_at', 'updated_at', 'findings_count', 'unique_findings_count', 'components_count']
     pagination_class = CustomPageNumberPagination
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
 
@@ -1113,7 +1153,16 @@ class ImageViewSet(BaseViewSet):
         # Get all vulnerabilities linked to this image through component versions
         vulnerabilities = Vulnerability.objects.filter(
             component_versions__images=image
-        ).select_related('details').distinct()
+        ).select_related('details').annotate(
+            image_fixable=Count(
+                'componentversionvulnerability',
+                filter=Q(
+                    componentversionvulnerability__component_version__images=image,
+                    componentversionvulnerability__fixable=True,
+                ),
+                distinct=True,
+            )
+        ).distinct()
 
         # Search
         search = request.query_params.get('search')
@@ -1135,13 +1184,27 @@ class ImageViewSet(BaseViewSet):
                 '-severity': '-severity',
                 'epss': 'epss',
                 '-epss': '-epss',
+                'fixable': 'image_fixable',
+                '-fixable': '-image_fixable',
                 'created_at': 'created_at',
                 '-created_at': '-created_at',
                 'updated_at': 'updated_at',
                 '-updated_at': '-updated_at',
             }
             ordering_field = ordering_map.get(ordering, ordering)
-            vulnerabilities = vulnerabilities.order_by(ordering_field)
+            if ordering in ['severity', '-severity']:
+                vulnerabilities = vulnerabilities.annotate(
+                    _severity_order=Case(
+                        When(severity='CRITICAL', then=Value(4)),
+                        When(severity='HIGH', then=Value(3)),
+                        When(severity='MEDIUM', then=Value(2)),
+                        When(severity='LOW', then=Value(1)),
+                        default=Value(0),
+                        output_field=IntegerField(),
+                    )
+                ).order_by('-_severity_order' if ordering == '-severity' else '_severity_order', 'vulnerability_id')
+            else:
+                vulnerabilities = vulnerabilities.order_by(ordering_field, 'vulnerability_id')
         else:
             vulnerabilities = vulnerabilities.order_by('-created_at')
 
@@ -1156,7 +1219,7 @@ class ImageViewSet(BaseViewSet):
             component_version__images=image
         ).values('vulnerability__pk', 'fixable', 'fix', 'fix_status', 'fix_state', 'fix_versions')
         fix_map = {}
-        for row in cvv_qs:
+        for row in cvv_qs.order_by('vulnerability__pk', '-fixable', 'fix'):
             fix_map.setdefault(row['vulnerability__pk'], row)
 
         vuln_data = []
@@ -1258,6 +1321,10 @@ class ImageViewSet(BaseViewSet):
                 '-name': '-component__name',
                 'type': 'component__type',
                 '-type': '-component__type',
+                'vulnerabilities_count': 'vulnerabilities_count',
+                '-vulnerabilities_count': '-vulnerabilities_count',
+                'used_count': 'images_count',
+                '-used_count': '-images_count',
                 'created_at': 'created_at',
                 '-created_at': '-created_at',
                 'updated_at': 'updated_at',
@@ -1616,44 +1683,55 @@ class ReleaseViewSet(BaseViewSet):
     queryset = Release.objects.all()
     serializer_class = ReleaseSerializer
     search_fields = ['name', 'description']
-    ordering_fields = ['name', 'created_at']
+    ordering_fields = [
+        'name',
+        'description',
+        'created_at',
+        'tag_count',
+        'critical_vulnerabilities',
+        'high_vulnerabilities',
+    ]
+
+    def _get_with_stats_queryset(self):
+        return Release.objects.annotate(
+            tag_count=Count('repository_tags', distinct=True),
+            critical_vulnerabilities=Count(
+                'repository_tags__repository_tag__images__component_versions__componentversionvulnerability__vulnerability',
+                filter=Q(
+                    repository_tags__repository_tag__images__component_versions__componentversionvulnerability__vulnerability__severity='CRITICAL'
+                ),
+                distinct=True,
+            ),
+            high_vulnerabilities=Count(
+                'repository_tags__repository_tag__images__component_versions__componentversionvulnerability__vulnerability',
+                filter=Q(
+                    repository_tags__repository_tag__images__component_versions__componentversionvulnerability__vulnerability__severity='HIGH'
+                ),
+                distinct=True,
+            ),
+        )
     
     @action(detail=False, methods=['get'])
     def with_stats(self, request):
         """Get all releases with repository tag counts and vulnerability stats"""
-        releases = Release.objects.annotate(
-            tag_count=Count('repository_tags', distinct=True)
-        )
+        releases = self.filter_queryset(self._get_with_stats_queryset())
 
-        vuln_counts = (
-            Vulnerability.objects.filter(
-                component_versions__images__repository_tags__releases__release__in=releases,
-                severity__in=['CRITICAL', 'HIGH']
-            )
-            .values('component_versions__images__repository_tags__releases__release', 'severity')
-            .annotate(cnt=Count('pk', distinct=True))
-        )
-
-        stats_map = {}
-        for row in vuln_counts:
-            rel_pk = row['component_versions__images__repository_tags__releases__release']
-            sev = row['severity']
-            stats_map.setdefault(rel_pk, {'CRITICAL': 0, 'HIGH': 0})[sev] = row['cnt']
-
-        release_data = []
-        for release in releases:
-            counts = stats_map.get(release.pk, {})
-            release_data.append({
+        def serialize_release(release):
+            return {
                 'uuid': str(release.uuid),
                 'name': release.name,
                 'description': release.description,
-                'tag_count': release.tag_count,
-                'critical_vulnerabilities': counts.get('CRITICAL', 0),
-                'high_vulnerabilities': counts.get('HIGH', 0),
-                'created_at': release.created_at
-            })
-        
-        return Response(release_data)
+                'tag_count': getattr(release, 'tag_count', 0) or 0,
+                'critical_vulnerabilities': getattr(release, 'critical_vulnerabilities', 0) or 0,
+                'high_vulnerabilities': getattr(release, 'high_vulnerabilities', 0) or 0,
+                'created_at': release.created_at,
+            }
+
+        page = self.paginate_queryset(releases)
+        if page is not None:
+            return self.get_paginated_response([serialize_release(release) for release in page])
+
+        return Response([serialize_release(release) for release in releases])
 
     @method_decorator(cache_page(300))
     @action(detail=False, methods=['get'])
@@ -1783,7 +1861,17 @@ class VulnerabilityViewSet(BaseViewSet):
     serializer_class = VulnerabilitySerializer
     filterset_fields = ['severity', 'vulnerability_type']
     search_fields = ['vulnerability_id']
-    ordering_fields = ['vulnerability_id', 'severity', 'epss', 'created_at', 'updated_at']
+    ordering_fields = [
+        'vulnerability_id',
+        'vulnerability_type',
+        'severity',
+        'epss',
+        'created_at',
+        'updated_at',
+        'cisa_kev',
+        'exploit_available',
+        'has_details',
+    ]
 
     def get_queryset(self):
         queryset = Vulnerability.objects.select_related('details').all()
@@ -1834,13 +1922,23 @@ class VulnerabilityViewSet(BaseViewSet):
 
     def filter_queryset(self, queryset):
         ordering = self.request.query_params.get('ordering')
-        if ordering in ('severity', '-severity'):
+        custom_ordering_map = {
+            'severity': '_severity_order',
+            '-severity': '-_severity_order',
+            'cisa_kev': '_cisa_kev_order',
+            '-cisa_kev': '-_cisa_kev_order',
+            'exploit_available': '_exploit_available_order',
+            '-exploit_available': '-_exploit_available_order',
+            'has_details': '_has_details_order',
+            '-has_details': '-_has_details_order',
+        }
+        if ordering in custom_ordering_map:
             # Apply filter and search backends first (skip OrderingFilter)
             for backend in self.filter_backends:
                 if backend == filters.OrderingFilter:
                     continue
                 queryset = backend().filter_queryset(self.request, queryset, self)
-            # Custom severity order: Critical=0, High=1, Medium=2, Low=3, Unknown=4 (not alphabetical)
+            # Custom severity order: Critical > High > Medium > Low > Unknown.
             severity_order = Case(
                 When(severity='CRITICAL', then=Value(0)),
                 When(severity='HIGH', then=Value(1)),
@@ -1850,8 +1948,25 @@ class VulnerabilityViewSet(BaseViewSet):
                 default=Value(5),
                 output_field=IntegerField()
             )
-            queryset = queryset.annotate(_severity_order=severity_order)
-            queryset = queryset.order_by('-_severity_order' if ordering == '-severity' else '_severity_order')
+            queryset = queryset.annotate(
+                _severity_order=severity_order,
+                _cisa_kev_order=Case(
+                    When(details__cisa_kev_known_exploited=True, then=Value(1)),
+                    default=Value(0),
+                    output_field=IntegerField(),
+                ),
+                _exploit_available_order=Case(
+                    When(details__exploit_available=True, then=Value(1)),
+                    default=Value(0),
+                    output_field=IntegerField(),
+                ),
+                _has_details_order=Case(
+                    When(details__isnull=False, then=Value(1)),
+                    default=Value(0),
+                    output_field=IntegerField(),
+                ),
+            )
+            queryset = queryset.order_by(custom_ordering_map[ordering], 'vulnerability_id')
             return queryset
         return super().filter_queryset(queryset)
 
@@ -1964,36 +2079,48 @@ class VulnerabilityViewSet(BaseViewSet):
         """
         Get all images that contain this vulnerability.
         """
-        vulnerability = self.get_object()
-        
-        # Optimized query with prefetch_related and annotations
-        images = Image.objects.filter(
-            component_versions__vulnerabilities=vulnerability
-        ).distinct().prefetch_related(
-            'repository_tags__repository',
-            'component_versions'
-        ).annotate(
-            findings_count=models.Count(
-                'component_versions__componentversionvulnerability',
-                filter=models.Q(component_versions__componentversionvulnerability__vulnerability=vulnerability)
-            ),
-            unique_findings_count=models.Count(
-                'component_versions__componentversionvulnerability__vulnerability',
-                filter=models.Q(component_versions__componentversionvulnerability__vulnerability=vulnerability),
-                distinct=True
-            ),
-            components_count=models.Count('component_versions', distinct=True)
-        ).order_by('name', 'created_at')
-        
-        # Apply pagination
+        vulnerability = get_object_or_404(Vulnerability, uuid=uuid)
+
+        image_ids_subquery = ComponentVersionVulnerability.objects.filter(
+            vulnerability=vulnerability
+        ).values('component_version__images__pk')
+
+        images = _build_vulnerability_image_queryset(
+            Image.objects.filter(pk__in=image_ids_subquery),
+            vulnerability,
+        )
+
+        search = (request.query_params.get('search') or '').strip()
+        if search:
+            images = images.filter(
+                Q(name__icontains=search)
+                | Q(digest__icontains=search)
+                | Q(repository_tags__tag__icontains=search)
+                | Q(repository_tags__repository__name__icontains=search)
+            )
+
+        ordering = VULNERABILITY_IMAGE_ORDERING_MAP.get(
+            request.query_params.get('ordering'),
+            'name',
+        )
+        images = images.distinct().order_by(ordering, 'uuid')
+
         paginator = self.pagination_class()
         page = paginator.paginate_queryset(images, request)
-        
+
         if page is not None:
-            serializer = ImageListSerializer(page, many=True)
+            serializer = VulnerabilityAffectedImageSerializer(
+                page,
+                many=True,
+                context={'request': request, 'vulnerability': vulnerability},
+            )
             return paginator.get_paginated_response(serializer.data)
-        
-        serializer = ImageListSerializer(images, many=True)
+
+        serializer = VulnerabilityAffectedImageSerializer(
+            images,
+            many=True,
+            context={'request': request, 'vulnerability': vulnerability},
+        )
         return Response(serializer.data)
 
     @action(detail=True, methods=['get'])
@@ -2711,7 +2838,7 @@ class TaskManagementViewSet(BaseViewSet):
     serializer_class = TaskResultSerializer
     filterset_fields = ['status', 'task_name']
     search_fields = ['task_id', 'task_name']
-    ordering_fields = ['date_created', 'date_done', 'status']
+    ordering_fields = ['task_id', 'task_name', 'date_created', 'date_done', 'status']
     ordering = ['-date_created']
     lookup_field = 'task_id'
     
@@ -2728,6 +2855,16 @@ class TaskManagementViewSet(BaseViewSet):
     
     def get_queryset(self):
         queryset = super().get_queryset()
+
+        if self.action == 'list':
+            queryset = queryset.only(
+                'task_id',
+                'task_name',
+                'status',
+                'result',
+                'date_created',
+                'date_done',
+            )
         
         # Filter by date range
         days = self.request.query_params.get('days', None)
@@ -2982,11 +3119,11 @@ class PeriodicTaskViewSet(viewsets.ReadOnlyModelViewSet):
     ViewSet for managing periodic tasks
     """
     permission_classes = [IsAuthenticated]
-    queryset = PeriodicTask.objects.all().order_by('name')
+    queryset = PeriodicTask.objects.select_related('interval', 'crontab').all().order_by('name')
     serializer_class = PeriodicTaskSerializer
     filterset_fields = ['enabled', 'task']
     search_fields = ['name', 'task']
-    ordering_fields = ['name', 'last_run_at', 'total_run_count']
+    ordering_fields = ['name', 'task', 'enabled', 'last_run_at', 'total_run_count']
     ordering = ['name']
     
     @action(detail=True, methods=['post'])

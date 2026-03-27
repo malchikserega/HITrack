@@ -281,19 +281,20 @@
                     <div v-if="componentsSearch" class="text-caption text-grey mb-4 text-right">
                       Found {{ componentsTotal }} result{{ componentsTotal !== 1 ? 's' : '' }}
                     </div>
-                    <v-data-table
+                    <v-data-table-server
                       :headers="componentHeaders"
                       :items="components"
+                      :items-length="componentsTotal"
                       :loading="componentsLoading"
                       :items-per-page="componentsPerPage"
                       :page="componentsPage"
-                      :sort-by="componentsSortBy"
-                      :sort-desc="componentsSortDesc"
+                      v-model:sort-by="componentsSortBy"
                       hide-default-footer
                       class="elevation-1"
                       hover
                       density="comfortable"
                       :no-data-text="componentsSearch ? 'No components found matching your search' : 'No components found'"
+                      @update:options="onComponentsTableOptionsUpdate"
                       @click:row="onComponentRowClick"
                     >
                       <template v-slot:item.name="{ item }">
@@ -329,7 +330,7 @@
                       <template v-slot:item.created_at="{ item }">
                         {{ $formatDate(item.created_at) }}
                       </template>
-                    </v-data-table>
+                    </v-data-table-server>
                     <div class="d-flex align-center justify-end mt-2 gap-4">
                       <v-select
                         :items="[10, 20, 50, 100]"
@@ -344,7 +345,6 @@
                       <v-pagination
                         v-model="componentsPage"
                         :length="componentsPageCount"
-                        @update:model-value="fetchComponents"
                         :total-visible="7"
                         density="comfortable"
                       />
@@ -374,18 +374,19 @@
                         Found {{ vulnerabilitiesTotal }} result{{ vulnerabilitiesTotal !== 1 ? 's' : '' }}
                       </div>
                     </div>
-                    <v-data-table
+                    <v-data-table-server
                       :headers="vulnerabilityHeaders"
                       :items="vulnerabilities"
+                      :items-length="vulnerabilitiesTotal"
                       :loading="vulnerabilitiesLoading"
                       :items-per-page="vulnerabilitiesPerPage"
                       :page="vulnerabilitiesPage"
-                      :sort-by="vulnerabilitiesSortBy"
-                      :sort-desc="vulnerabilitiesSortDesc"
+                      v-model:sort-by="vulnerabilitiesSortBy"
                       hide-default-footer
                       class="elevation-1"
                       hover
                       density="comfortable"
+                      @update:options="onVulnerabilitiesTableOptionsUpdate"
                       @click:row="onVulnerabilityRowClick"
                       :no-data-text="vulnerabilitiesSearch ? 'No vulnerabilities found matching your search' : 'No vulnerabilities found'"
                     >
@@ -460,7 +461,7 @@
                         <span v-else-if="item.fix_state" class="text-caption text-grey">{{ item.fix_state }}</span>
                         <span v-else class="text-caption text-grey">No fix available</span>
                       </template>
-                    </v-data-table>
+                    </v-data-table-server>
                     <div class="d-flex align-center justify-end mt-2 gap-4">
                       <v-select
                         :items="[10, 20, 50, 100]"
@@ -475,7 +476,6 @@
                       <v-pagination
                         v-model="vulnerabilitiesPage"
                         :length="vulnerabilitiesPageCount"
-                        @update:model-value="fetchVulnerabilities"
                         :total-visible="7"
                         density="comfortable"
                       />
@@ -844,15 +844,26 @@ const componentsLoading = ref(false)
 const componentsTotal = ref(0)
 const componentsPage = ref(1)
 const componentsPerPage = ref(10)
-const componentsSortBy = ref<readonly DataTableSortItem[]>([])
-const componentsSortDesc = ref<boolean[]>([])
+const componentsSortBy = ref<DataTableSortItem[]>([{ key: 'name', order: 'asc' }])
 const componentsSearch = ref('')
 const componentsPageCount = computed(() => Math.ceil(componentsTotal.value / componentsPerPage.value))
 
+const normalizeSortBy = (items?: readonly DataTableSortItem[]): DataTableSortItem[] =>
+  (items || []).map((item) => {
+    const order: 'asc' | 'desc' = item.order === 'desc' ? 'desc' : 'asc'
+    return {
+      key: String(item.key),
+      order,
+    }
+  })
+
+const areSortByEqual = (left: readonly DataTableSortItem[], right: readonly DataTableSortItem[]) =>
+  JSON.stringify(normalizeSortBy(left)) === JSON.stringify(normalizeSortBy(right))
+
 const componentHeaders = [
-  { title: 'Component', key: 'component.name', sortable: true },
+  { title: 'Component', key: 'name', sortable: true },
   { title: 'Version', key: 'version', sortable: true },
-  { title: 'Type', key: 'component.type', sortable: true },
+  { title: 'Type', key: 'type', sortable: true },
   { title: 'Vulnerabilities', key: 'vulnerabilities_count', sortable: true },
   { title: 'Used in:', key: 'used_count', sortable: true }
 ] as const
@@ -865,12 +876,11 @@ const fetchComponents = async () => {
   componentsLoading.value = true
   try {
     const sortField = componentsSortBy.value[0]
-    const sortDesc = componentsSortDesc.value[0]
     
     let ordering = undefined
     if (sortField) {
-      const prefix = sortDesc ? '-' : ''
-      ordering = `${prefix}${sortField}`
+      const prefix = sortField.order === 'desc' ? '-' : ''
+      ordering = `${prefix}${String(sortField.key)}`
     }
 
     const params = {
@@ -901,8 +911,7 @@ const vulnerabilitiesLoading = ref(false)
 const vulnerabilitiesTotal = ref(0)
 const vulnerabilitiesPage = ref(1)
 const vulnerabilitiesPerPage = ref(10)
-const vulnerabilitiesSortBy = ref<readonly DataTableSortItem[]>([])
-const vulnerabilitiesSortDesc = ref<boolean[]>([])
+const vulnerabilitiesSortBy = ref<DataTableSortItem[]>([{ key: 'severity', order: 'desc' }])
 const vulnerabilitiesSearch = ref('')
 const vulnerabilitiesPageCount = computed(() => Math.ceil(vulnerabilitiesTotal.value / vulnerabilitiesPerPage.value))
 
@@ -921,15 +930,12 @@ const fetchVulnerabilities = async () => {
   }
   vulnerabilitiesLoading.value = true
   try {
-    // Get the first sort field and direction
     const sortField = vulnerabilitiesSortBy.value[0]
-    const sortDesc = vulnerabilitiesSortDesc.value[0]
     
-    // Build ordering parameter
     let ordering = undefined
     if (sortField) {
-      const prefix = sortDesc ? '-' : ''
-      ordering = `${prefix}${sortField}`
+      const prefix = sortField.order === 'desc' ? '-' : ''
+      ordering = `${prefix}${String(sortField.key)}`
     }
 
     const params = {
@@ -970,8 +976,7 @@ const debouncedFetchVulnerabilities = debounce(() => {
 watch([
   componentsPage,
   componentsPerPage,
-  componentsSortBy,
-  componentsSortDesc
+  componentsSortBy
 ], fetchComponents)
 
 watch(componentsSearch, () => {
@@ -983,8 +988,7 @@ watch(componentsSearch, () => {
 watch([
   vulnerabilitiesPage,
   vulnerabilitiesPerPage,
-  vulnerabilitiesSortBy,
-  vulnerabilitiesSortDesc
+  vulnerabilitiesSortBy
 ], fetchVulnerabilities)
 
 watch(vulnerabilitiesSearch, () => {
@@ -1002,13 +1006,49 @@ watch(activeTab, (newTab) => {
 const onVulnerabilitiesItemsPerPageChange = (val: number) => {
   vulnerabilitiesPerPage.value = val
   vulnerabilitiesPage.value = 1
-  fetchVulnerabilities()
 }
 
 const onComponentsItemsPerPageChange = (val: number) => {
   componentsPerPage.value = val
   componentsPage.value = 1
-  fetchComponents()
+}
+
+const onComponentsTableOptionsUpdate = (options: { page: number; itemsPerPage: number; sortBy: DataTableSortItem[] }) => {
+  const nextSortBy = normalizeSortBy(options.sortBy)
+  const currentSortBy = normalizeSortBy(componentsSortBy.value)
+
+  if (
+    componentsPage.value === options.page &&
+    componentsPerPage.value === options.itemsPerPage &&
+    JSON.stringify(currentSortBy) === JSON.stringify(nextSortBy)
+  ) {
+    return
+  }
+
+  componentsPage.value = options.page
+  componentsPerPage.value = options.itemsPerPage
+  if (!areSortByEqual(componentsSortBy.value, nextSortBy)) {
+    componentsSortBy.value = nextSortBy
+  }
+}
+
+const onVulnerabilitiesTableOptionsUpdate = (options: { page: number; itemsPerPage: number; sortBy: DataTableSortItem[] }) => {
+  const nextSortBy = normalizeSortBy(options.sortBy)
+  const currentSortBy = normalizeSortBy(vulnerabilitiesSortBy.value)
+
+  if (
+    vulnerabilitiesPage.value === options.page &&
+    vulnerabilitiesPerPage.value === options.itemsPerPage &&
+    JSON.stringify(currentSortBy) === JSON.stringify(nextSortBy)
+  ) {
+    return
+  }
+
+  vulnerabilitiesPage.value = options.page
+  vulnerabilitiesPerPage.value = options.itemsPerPage
+  if (!areSortByEqual(vulnerabilitiesSortBy.value, nextSortBy)) {
+    vulnerabilitiesSortBy.value = nextSortBy
+  }
 }
 
 const onVulnerabilityRowClick = (event: MouseEvent, { item }: { item: Vulnerability }) => {

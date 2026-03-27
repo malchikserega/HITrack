@@ -45,13 +45,18 @@
           </v-card-title>
           
           <v-card-text class="pa-0">
-            <v-data-table
+            <v-data-table-server
               :headers="headers"
-              :items="filteredReleases"
+              :items="releases"
+              :items-length="totalReleases"
               :loading="loading"
-              :search="search"
+              :items-per-page="itemsPerPage"
+              :page="page"
+              v-model:sort-by="sortBy"
+              hide-default-footer
               class="elevation-0"
               item-value="uuid"
+              @update:options="onTableOptionsUpdate"
             >
               <template #item.name="{ item }">
                 <div class="d-flex align-center">
@@ -126,7 +131,28 @@
                   />
                 </div>
               </template>
-            </v-data-table>
+            </v-data-table-server>
+            <div class="d-flex align-center justify-end px-4 py-3 gap-4">
+              <v-select
+                :items="[10, 25, 50, 100]"
+                v-model="itemsPerPage"
+                label="Items per page"
+                density="compact"
+                variant="outlined"
+                hide-details
+                style="width: 90px"
+                @update:model-value="onItemsPerPageChange"
+              />
+              <span class="text-body-2">
+                {{ releaseRangeStart }}-{{ releaseRangeEnd }} of {{ totalReleases }}
+              </span>
+              <v-pagination
+                v-model="page"
+                :length="pageCount"
+                :total-visible="7"
+                density="comfortable"
+              />
+            </div>
           </v-card-text>
         </v-card>
       </v-col>
@@ -677,6 +703,7 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { notificationService } from '@/plugins/notifications'
 import api from '@/plugins/axios'
+import type { DataTableSortItem } from 'vuetify'
 
 interface Release {
   uuid: string
@@ -747,6 +774,10 @@ const loading = ref(false)
 const saving = ref(false)
 const deleting = ref(false)
 const search = ref('')
+const page = ref(1)
+const itemsPerPage = ref(10)
+const totalReleases = ref(0)
+const sortBy = ref<DataTableSortItem[]>([{ key: 'created_at', order: 'desc' }])
 const dialog = ref(false)
 const detailsDialog = ref(false)
 const deleteDialog = ref(false)
@@ -783,6 +814,15 @@ const releaseForm = ref({
   description: ''
 })
 
+const normalizeSortBy = (items?: readonly DataTableSortItem[]): DataTableSortItem[] =>
+  (items || []).map((item) => ({
+    key: String(item.key),
+    order: item.order === 'desc' ? 'desc' : 'asc',
+  }))
+
+const areSortByEqual = (left: readonly DataTableSortItem[], right: readonly DataTableSortItem[]) =>
+  JSON.stringify(normalizeSortBy(left)) === JSON.stringify(normalizeSortBy(right))
+
 // Table headers
 const headers = [
   { title: 'Name', key: 'name', sortable: true },
@@ -815,15 +855,15 @@ const jsonTableHeaders = [
 ]
 
 // Computed
-const filteredReleases = computed(() => {
-  if (!search.value) return releases.value
-  
-  const searchLower = search.value.toLowerCase()
-  return releases.value.filter(release => 
-    release.name.toLowerCase().includes(searchLower) ||
-    release.description.toLowerCase().includes(searchLower)
-  )
-})
+const pageCount = computed(() => Math.ceil(totalReleases.value / itemsPerPage.value) || 1)
+
+const releaseRangeStart = computed(() => (
+  totalReleases.value === 0 ? 0 : ((page.value - 1) * itemsPerPage.value) + 1
+))
+
+const releaseRangeEnd = computed(() => (
+  totalReleases.value === 0 ? 0 : Math.min(page.value * itemsPerPage.value, totalReleases.value)
+))
 
 const hasFoundTags = computed(() => {
   return parsedData.value.some(item => 
@@ -864,12 +904,29 @@ const releasableScanCount = computed(() => (
   releaseTags.value.filter(tag => !['success', 'pending', 'in_process'].includes(tag.processing_status)).length
 ))
 
+function debounce(fn: Function, delay: number) {
+  let timeout: ReturnType<typeof setTimeout> | null = null
+  return (...args: any[]) => {
+    if (timeout) clearTimeout(timeout)
+    timeout = setTimeout(() => fn(...args), delay)
+  }
+}
+
 // Methods
 const fetchReleases = async () => {
   loading.value = true
   try {
-    const response = await api.get('/releases/with_stats/')
-    releases.value = response.data
+    const params = {
+      page: page.value,
+      page_size: itemsPerPage.value,
+      ordering: sortBy.value.length
+        ? `${sortBy.value[0].order === 'desc' ? '-' : ''}${String(sortBy.value[0].key)}`
+        : undefined,
+      search: search.value || undefined,
+    }
+    const response = await api.get('/releases/with_stats/', { params })
+    releases.value = response.data.results || []
+    totalReleases.value = response.data.count || 0
   } catch (error) {
     console.error('Error fetching releases:', error)
     notificationService.error('Failed to load releases')
@@ -884,6 +941,31 @@ const fetchReleaseNames = async () => {
     releaseNames.value = response.data
   } catch (error) {
     console.error('Error fetching release names:', error)
+  }
+}
+
+const debouncedFetchReleases = debounce(fetchReleases, 300)
+
+const onItemsPerPageChange = (value: number) => {
+  itemsPerPage.value = value
+  page.value = 1
+}
+
+const onTableOptionsUpdate = (options: { page: number; itemsPerPage: number; sortBy: DataTableSortItem[] }) => {
+  const nextSortBy = normalizeSortBy(options.sortBy)
+
+  if (
+    page.value === options.page &&
+    itemsPerPage.value === options.itemsPerPage &&
+    areSortByEqual(sortBy.value, nextSortBy)
+  ) {
+    return
+  }
+
+  page.value = options.page
+  itemsPerPage.value = options.itemsPerPage
+  if (!areSortByEqual(sortBy.value, nextSortBy)) {
+    sortBy.value = nextSortBy
   }
 }
 
@@ -1383,6 +1465,13 @@ const createReleaseWithTags = async () => {
 onMounted(() => {
   fetchReleases()
   fetchReleaseNames()
+})
+
+watch([page, itemsPerPage, sortBy], fetchReleases)
+
+watch(search, () => {
+  page.value = 1
+  debouncedFetchReleases()
 })
 
 watch(

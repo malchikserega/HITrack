@@ -36,9 +36,10 @@
       </v-row>
       <v-row>
         <v-col cols="12">
-          <v-data-table
+          <v-data-table-server
             :headers="headers"
             :items="repositories"
+            :items-length="totalItems"
             :loading="loading"
             class="elevation-1"
             hover
@@ -46,9 +47,8 @@
             :items-per-page="itemsPerPage"
             :page="page"
             v-model:sort-by="sortBy"
-            :server-items-length="totalItems"
             hide-default-footer
-            @update:sort-by="sortBy = $event"
+            @update:options="onTableOptionsUpdate"
           >
             <template #item="{ item }">
               <tr class="clickable-row" @click="onRowClick(item)">
@@ -132,7 +132,7 @@
                 </td>
               </tr>
             </template>
-          </v-data-table>
+          </v-data-table-server>
         </v-col>
       </v-row>
 
@@ -244,6 +244,18 @@ import type { Repository, PaginatedResponse } from '../types/interfaces'
 import { useRouter } from 'vue-router'
 
 interface SortItem { key: string; order: 'asc' | 'desc' }
+
+const normalizeSortBy = (items?: readonly SortItem[]): SortItem[] =>
+  (items || []).map((item) => {
+    const order: 'asc' | 'desc' = item.order === 'desc' ? 'desc' : 'asc'
+    return {
+      key: item.key,
+      order,
+    }
+  })
+
+const areSortByEqual = (left: readonly SortItem[], right: readonly SortItem[]) =>
+  JSON.stringify(normalizeSortBy(left)) === JSON.stringify(normalizeSortBy(right))
 
 const router = useRouter()
 const repositories = ref<Repository[]>([])
@@ -368,6 +380,25 @@ const onPageChange = (newPage: number) => {
 const onItemsPerPageChange = (newItemsPerPage: number) => {
   itemsPerPage.value = newItemsPerPage
   page.value = 1 // Reset to first page when changing items per page
+}
+
+const onTableOptionsUpdate = (options: { page: number; itemsPerPage: number; sortBy: SortItem[] }) => {
+  const nextSortBy = normalizeSortBy(options.sortBy)
+  const currentSortBy = normalizeSortBy(sortBy.value)
+
+  if (
+    page.value === options.page &&
+    itemsPerPage.value === options.itemsPerPage &&
+    JSON.stringify(currentSortBy) === JSON.stringify(nextSortBy)
+  ) {
+    return
+  }
+
+  page.value = options.page
+  itemsPerPage.value = options.itemsPerPage
+  if (!areSortByEqual(sortBy.value, nextSortBy)) {
+    sortBy.value = nextSortBy
+  }
 }
 
 const openDialog = (title: string, item?: Repository) => {
