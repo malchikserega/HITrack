@@ -512,9 +512,11 @@ def _run_bulk_component_latest_version_update(
 
 
 def _is_supported_vulnerability_enrichment_target(vulnerability_id: str, vulnerability_type: str | None = None) -> bool:
-    if vulnerability_type and str(vulnerability_type).upper() == 'CVE':
+    normalized_type = str(vulnerability_type or '').upper()
+    normalized_id = str(vulnerability_id or '').upper()
+    if normalized_type in {'CVE', 'GHSA'}:
         return True
-    return bool(vulnerability_id and vulnerability_id.upper().startswith('CVE-'))
+    return normalized_id.startswith('CVE-') or normalized_id.startswith('GHSA-')
 
 
 def _dedupe_preserve_order(values):
@@ -538,6 +540,9 @@ def _build_vulnerability_data_sources(cve_details, exploit_info):
     if cve_details:
         if cve_details.get('epss_data_source'):
             data_sources.append(cve_details['epss_data_source'])
+        explicit_detail_sources = cve_details.get('_detail_sources')
+        if explicit_detail_sources:
+            data_sources.extend(explicit_detail_sources)
         cve_detail_fields = {
             'cve_details_score',
             'cve_details_severity',
@@ -546,7 +551,10 @@ def _build_vulnerability_data_sources(cve_details, exploit_info):
             'cve_details_summary',
             'cve_details_references',
         }
-        if any(cve_details.get(field) is not None for field in cve_detail_fields):
+        if (
+            any(cve_details.get(field) is not None for field in cve_detail_fields)
+            and not explicit_detail_sources
+        ):
             data_sources.append('CVE-CIRCL')
     if exploit_info:
         if exploit_info.get('cisa_kev_known_exploited'):
@@ -3896,7 +3904,7 @@ def update_critical_vulnerability_details():
             return {
                 "status": "completed",
                 "task_name": "Update Critical Vulnerability Details",
-                "message": "No critical or stale CVEs need updating",
+                "message": "No critical or stale supported vulnerabilities need updating",
                 "summary": {
                     "total_vulnerabilities": 0,
                     "critical_severity_count": critical_vulns.count(),
@@ -4102,7 +4110,7 @@ def update_vulnerability_details_bulk(vulnerability_uuids: List[str], batch_size
                 },
                 'processing_time': time.time() - start_time,
                 'processing_time_formatted': f"{time.time() - start_time:.2f} seconds",
-                'message': 'No supported CVE identifiers were supplied for enrichment',
+                'message': 'No supported vulnerability identifiers were supplied for enrichment',
                 'timestamp': timezone.now().isoformat()
             }
         
