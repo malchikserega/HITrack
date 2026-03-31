@@ -520,8 +520,8 @@ class ImageListSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Image
-        fields = ['uuid', 'name', 'digest', 'scan_status', 'has_sbom', 'has_grype', 'findings', 'unique_findings', 'components_count', 'repository_info', 'updated_at']
-        read_only_fields = ['uuid', 'updated_at']
+        fields = ['uuid', 'name', 'digest', 'scan_status', 'has_sbom', 'has_grype', 'findings', 'unique_findings', 'components_count', 'repository_info', 'created_at', 'updated_at']
+        read_only_fields = ['uuid', 'created_at', 'updated_at']
 
     @extend_schema_field(serializers.BooleanField())
     def get_has_sbom(self, obj):
