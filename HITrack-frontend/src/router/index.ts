@@ -54,6 +54,12 @@ const router = createRouter({
       meta: { requiresAuth: true }
     },
     {
+      path: '/activities',
+      name: 'recent-activities',
+      component: () => import('../views/RecentActivitiesView.vue'),
+      meta: { requiresAuth: true }
+    },
+    {
       path: '/acr',
       name: 'ACR',
       component: () => import('../views/ACRView.vue'),

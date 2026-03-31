@@ -244,7 +244,11 @@
       <!-- Activity and Quick Actions -->
       <v-row>
         <v-col cols="12" md="6">
-          <RecentActivityFeed :activities="dashboardData.recent_activities || []" />
+          <RecentActivityFeed
+            :activities="dashboardData.recent_activities || []"
+            :show-view-all="true"
+            @view-all="viewAllRecentActivities"
+          />
         </v-col>
         <v-col cols="12" md="3">
           <RecentTasksCard />
@@ -406,6 +410,10 @@ const viewImages = () => {
 
 const viewRepositories = () => {
   router.push('/repositories')
+}
+
+const viewAllRecentActivities = () => {
+  router.push('/activities')
 }
 
 const viewVulnerabilitiesWithDetails = () => {

@@ -193,6 +193,16 @@ export interface PaginatedResponse<T> {
   results: T[]
 }
 
+export interface RecentActivity {
+  type: 'scan' | 'vulnerability'
+  title: string
+  timestamp: string
+  severity?: string | null
+  status?: string | null
+  target_type?: 'repository' | 'vulnerability' | 'image' | 'component' | 'repository_tag' | 'release' | null
+  target_uuid?: string | null
+}
+
 export interface Stats {
   repositories: number
   images: number

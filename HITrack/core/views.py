@@ -20,8 +20,9 @@ from .serializers import (
 )
 from django.db import models
 from .pagination import CustomPageNumberPagination
-from django.db.models import Q, Count, Prefetch, Case, When, Value, BooleanField, IntegerField
+from django.db.models import Q, Count, Prefetch, Case, When, Value, BooleanField, IntegerField, F, CharField, TextField
 from django.db.models.query import prefetch_related_objects
+from django.db.models.functions import Cast, Concat, TruncDate
 from django.utils import timezone
 from django.utils.decorators import method_decorator
 from django.views.decorators.cache import cache_page
@@ -83,6 +84,117 @@ VULNERABILITY_IMAGE_ORDERING_MAP = {
     'scan_status': 'scan_status',
     '-scan_status': '-scan_status',
 }
+
+
+def _normalize_recent_activity_types(raw_types):
+    normalized = []
+    for raw_type in raw_types:
+        if raw_type is None:
+            continue
+        for item in str(raw_type).split(','):
+            value = item.strip().lower()
+            if value in {'scan', 'vulnerability'} and value not in normalized:
+                normalized.append(value)
+    return normalized
+
+
+def _build_recent_activity_queryset(since_timestamp, activity_types=None):
+    selected_types = _normalize_recent_activity_types(activity_types or ['scan', 'vulnerability'])
+
+    recent_scans = Repository.objects.filter(
+        updated_at__gte=since_timestamp
+    ).annotate(
+        activity_type=Value('scan', output_field=CharField()),
+        title=Concat(
+            Value('Repository "'),
+            F('name'),
+            Value('" scanned'),
+            output_field=TextField(),
+        ),
+        timestamp=F('updated_at'),
+        activity_severity=Value(None, output_field=CharField()),
+        activity_status=F('scan_status'),
+        target_type=Value('repository', output_field=CharField()),
+        target_uuid=Cast('uuid', output_field=CharField()),
+    ).values(
+        'activity_type',
+        'title',
+        'timestamp',
+        'activity_severity',
+        'activity_status',
+        'target_type',
+        'target_uuid',
+    )
+
+    recent_vulnerabilities = Vulnerability.objects.filter(
+        created_at__gte=since_timestamp
+    ).annotate(
+        activity_type=Value('vulnerability', output_field=CharField()),
+        title=Concat(
+            Value('New vulnerability: '),
+            F('vulnerability_id'),
+            output_field=TextField(),
+        ),
+        timestamp=F('created_at'),
+        activity_severity=F('severity'),
+        activity_status=Value(None, output_field=CharField()),
+        target_type=Value('vulnerability', output_field=CharField()),
+        target_uuid=Cast('uuid', output_field=CharField()),
+    ).values(
+        'activity_type',
+        'title',
+        'timestamp',
+        'activity_severity',
+        'activity_status',
+        'target_type',
+        'target_uuid',
+    )
+
+    querysets = []
+    if 'scan' in selected_types:
+        querysets.append(recent_scans)
+    if 'vulnerability' in selected_types:
+        querysets.append(recent_vulnerabilities)
+
+    if not querysets:
+        return recent_scans.none()
+    if len(querysets) == 1:
+        return querysets[0].order_by('-timestamp')
+    return querysets[0].union(*querysets[1:]).order_by('-timestamp')
+
+
+def _build_vulnerability_trend_series(days=30):
+    current_timezone = timezone.get_current_timezone()
+    end_date = timezone.localdate()
+    start_date = end_date - timedelta(days=days - 1)
+    start_datetime = timezone.make_aware(
+        datetime.combine(start_date, datetime.min.time()),
+        current_timezone,
+    )
+    end_datetime = timezone.make_aware(
+        datetime.combine(end_date + timedelta(days=1), datetime.min.time()),
+        current_timezone,
+    )
+
+    vulnerability_counts = {
+        item['trend_date']: item['count']
+        for item in Vulnerability.objects.filter(
+            created_at__gte=start_datetime,
+            created_at__lt=end_datetime,
+        ).annotate(
+            trend_date=TruncDate('created_at', tzinfo=current_timezone)
+        ).values('trend_date').annotate(
+            count=Count('uuid')
+        ).order_by('trend_date')
+    }
+
+    return [
+        {
+            'created_at__date': (start_date + timedelta(days=offset)).isoformat(),
+            'count': vulnerability_counts.get(start_date + timedelta(days=offset), 0),
+        }
+        for offset in range(days)
+    ]
 
 
 def _build_optimized_image_list_queryset(queryset):
@@ -2322,12 +2434,8 @@ class StatsViewSet(viewsets.ViewSet):
             count=Count('uuid')
         ).order_by('severity')
         
-        # Optimized vulnerability trends - indexed date field
-        vulnerability_trends = Vulnerability.objects.filter(
-            created_at__gte=thirty_days_ago
-        ).values('created_at__date').annotate(
-            count=Count('uuid')
-        ).order_by('created_at__date')
+        # Build a complete 30-day series so empty days are represented correctly.
+        vulnerability_trends = _build_vulnerability_trend_series(days=30)
         
         # Optimized top vulnerable components - avoid N+1 with select_related
         top_vulnerable_components = ComponentVersion.objects.select_related('component').annotate(
@@ -2366,37 +2474,11 @@ class StatsViewSet(viewsets.ViewSet):
         ransomware_percentage = (ransomware_vulns / total_vulns * 100) if total_vulns > 0 else 0
         details_percentage = (vulns_with_details / total_vulns * 100) if total_vulns > 0 else 0
         
-        # Optimized recent activities - single query with union
-        recent_activities = []
-        
-        # Recent repository scans - optimized with only needed fields
-        recent_scans = Repository.objects.filter(
-            updated_at__gte=thirty_days_ago
-        ).only('name', 'updated_at', 'scan_status').order_by('-updated_at')[:5]
-        
-        for repo in recent_scans:
-            recent_activities.append({
-                'type': 'scan',
-                'title': f'Repository "{repo.name}" scanned',
-                'timestamp': repo.updated_at,
-                'status': repo.scan_status
-            })
-        
-        # Recent vulnerabilities - optimized with only needed fields
-        recent_vulns = Vulnerability.objects.filter(
-            created_at__gte=thirty_days_ago
-        ).only('vulnerability_id', 'created_at', 'severity').order_by('-created_at')[:5]
-        
-        for vuln in recent_vulns:
-            recent_activities.append({
-                'type': 'vulnerability',
-                'title': f'New vulnerability: {vuln.vulnerability_id}',
-                'timestamp': vuln.created_at,
-                'severity': vuln.severity
-            })
-        
-        # Sort activities by timestamp
-        recent_activities.sort(key=lambda x: x['timestamp'], reverse=True)
+        recent_activities = list(_build_recent_activity_queryset(thirty_days_ago)[:10])
+        for activity in recent_activities:
+            activity['type'] = activity.pop('activity_type')
+            activity['severity'] = activity.pop('activity_severity')
+            activity['status'] = activity.pop('activity_status')
         
         return Response({
             'basic_stats': {
@@ -2417,7 +2499,7 @@ class StatsViewSet(viewsets.ViewSet):
                 'details_percentage': round(details_percentage, 1)
             },
             'severity_distribution': list(severity_distribution),
-            'vulnerability_trends': list(vulnerability_trends),
+            'vulnerability_trends': vulnerability_trends,
             'top_vulnerable_components': [
                 {
                     'name': cv.component.name,
@@ -2432,12 +2514,43 @@ class StatsViewSet(viewsets.ViewSet):
                     'vulnerability_id': vuln.vulnerability_id,
                     'severity': vuln.severity,
                     'epss': round(vuln.epss, 3),
-                    'description': vuln.description[:100] + '...' if len(vuln.description) > 100 else vuln.description
+                    'description': (
+                        f"{vuln.description[:100]}..."
+                        if vuln.description and len(vuln.description) > 100
+                        else vuln.description
+                    ),
                 }
                 for vuln in top_vulnerabilities_by_epss
             ],
             'recent_activities': recent_activities[:10]
         })
+
+    @method_decorator(cache_page(60))
+    @action(detail=False, methods=['get'], url_path='recent-activities')
+    def recent_activities(self, request):
+        """Get paginated recent activities for the last 30 days."""
+        thirty_days_ago = timezone.now() - timedelta(days=30)
+        paginator = CustomPageNumberPagination()
+        requested_types = request.query_params.getlist('type')
+        if not requested_types:
+            single_type = request.query_params.get('type')
+            if single_type:
+                requested_types = [single_type]
+
+        activities = _build_recent_activity_queryset(
+            thirty_days_ago,
+            activity_types=requested_types or ['scan', 'vulnerability'],
+        )
+        page = paginator.paginate_queryset(activities, request)
+        results = list(page if page is not None else activities)
+        for activity in results:
+            activity['type'] = activity.pop('activity_type')
+            activity['severity'] = activity.pop('activity_severity')
+            activity['status'] = activity.pop('activity_status')
+
+        if page is not None:
+            return paginator.get_paginated_response(results)
+        return Response(results)
 
 class JobViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]

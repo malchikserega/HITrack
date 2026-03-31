@@ -1,7 +1,16 @@
 <template>
   <v-card class="activity-card" elevation="2">
-    <v-card-title class="text-h6 font-weight-bold pa-4 pb-2">
-      Recent Activity
+    <v-card-title class="text-h6 font-weight-bold pa-4 pb-2 d-flex align-center justify-space-between">
+      <span>Recent Activity</span>
+      <v-btn
+        v-if="showViewAll"
+        variant="text"
+        color="primary"
+        size="small"
+        @click="emit('view-all')"
+      >
+        View All
+      </v-btn>
     </v-card-title>
     <v-card-text class="pa-4 pt-0">
       <div v-if="!activities || activities.length === 0" class="text-center pa-8">
@@ -12,7 +21,10 @@
         <v-list-item
           v-for="(activity, index) in activities"
           :key="index"
+          :to="getActivityRoute(activity) || undefined"
+          :link="hasActivityRoute(activity)"
           class="activity-item"
+          :class="{ 'activity-item--link': hasActivityRoute(activity) }"
         >
           <template #prepend>
             <v-avatar :color="getActivityColor(activity.type)" size="32">
@@ -72,13 +84,44 @@ interface Activity {
   timestamp: string
   severity?: string
   status?: string
+  target_type?: 'repository' | 'vulnerability' | 'image' | 'component' | 'repository_tag' | 'release'
+  target_uuid?: string
 }
 
 interface Props {
   activities: Activity[]
+  showViewAll?: boolean
 }
 
 const props = defineProps<Props>()
+const emit = defineEmits<{
+  (e: 'view-all'): void
+}>()
+
+const hasActivityRoute = (activity: Activity) => Boolean(getActivityRoute(activity))
+
+const getActivityRoute = (activity: Activity) => {
+  if (!activity.target_type || !activity.target_uuid) {
+    return null
+  }
+
+  switch (activity.target_type) {
+    case 'repository':
+      return { name: 'RepositoryDetail', params: { uuid: activity.target_uuid } }
+    case 'vulnerability':
+      return { name: 'vulnerability-detail', params: { uuid: activity.target_uuid } }
+    case 'image':
+      return { name: 'image-detail', params: { uuid: activity.target_uuid } }
+    case 'component':
+      return { name: 'component-detail', params: { uuid: activity.target_uuid } }
+    case 'repository_tag':
+      return { name: 'tag-images', params: { uuid: activity.target_uuid } }
+    case 'release':
+      return { name: 'releases' }
+    default:
+      return null
+  }
+}
 
 const getActivityIcon = (type: string) => {
   switch (type) {
@@ -159,6 +202,14 @@ const formatTimestamp = (timestamp: string) => {
 
 .activity-item:hover {
   background-color: rgba(0, 0, 0, 0.04);
+}
+
+.activity-item--link {
+  cursor: pointer;
+}
+
+.activity-item--link:hover .activity-title {
+  text-decoration: underline;
 }
 
 .activity-title {
