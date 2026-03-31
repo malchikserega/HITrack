@@ -84,8 +84,14 @@
                     {{ item.tag_count }}
                   </v-chip>
                 </td>
-                <td>{{ $formatDate(item.created_at) }}</td>
-                <td>{{ $formatDate(item.updated_at) }}</td>
+                <td>
+                  <div class="date-meta-cell">
+                    <div class="date-meta-cell__primary">{{ $formatDate(item.updated_at) }}</div>
+                    <div class="date-meta-cell__secondary">
+                      Created: {{ $formatDate(item.created_at) }}
+                    </div>
+                  </div>
+                </td>
                 <td>
                   <div style="display: flex; flex-direction: row; gap: 8px; justify-content: center; align-items: center;">
                     <v-tooltip :text="getScanTooltip(item)" location="top">
@@ -292,8 +298,7 @@ const headers: any[] = [
   { title: 'URL', key: 'url', sortable: true },
   { title: 'Status', key: 'scan_status', sortable: false, width: '190px' },
   { title: 'Tags', key: 'tag_count', align: 'center', sortable: true },
-  { title: 'Created', key: 'created_at', sortable: true },
-  { title: 'Updated', key: 'updated_at', sortable: true },
+  { title: 'Updated', key: 'updated_at', sortable: true, width: '210px' },
   { title: 'Actions', key: 'actions', sortable: false }
 ]
 
@@ -645,6 +650,20 @@ onUnmounted(() => {
   align-items: center;
   text-align: center;
   min-width: 40px;
+}
+
+.date-meta-cell {
+  line-height: 1.2;
+}
+
+.date-meta-cell__primary {
+  font-weight: 500;
+}
+
+.date-meta-cell__secondary {
+  color: #6b7280;
+  font-size: 0.82rem;
+  margin-top: 4px;
 }
 
 .v-theme--matrix :deep(.v-table .v-table__wrapper > table > thead > tr > th) {

@@ -306,7 +306,12 @@
             </div>
           </template>
           <template v-slot:item.updated_at="{ item }">
-            {{ $formatDate(item.updated_at) }}
+            <div class="date-meta-cell">
+              <div class="date-meta-cell__primary">{{ $formatDate(item.updated_at) }}</div>
+              <div class="date-meta-cell__secondary">
+                Created: {{ $formatDate(item.created_at) }}
+              </div>
+            </div>
           </template>
         </v-data-table>
         <div class="d-flex align-center justify-end mt-2 gap-4">
@@ -492,7 +497,7 @@ const headers = [
   { title: 'Status', key: 'processing_status', sortable: false, width: '190px' },
   { title: 'Vulnerabilities', key: 'findings', sortable: false, width: '120px' },
   { title: 'Components', key: 'components', sortable: false, width: '120px' },
-  { title: 'Updated', key: 'updated_at', sortable: false, width: '160px' },
+  { title: 'Updated', key: 'updated_at', sortable: false, width: '210px' },
   { title: 'Actions', key: 'actions', sortable: false, width: '172px' }
 ]
 
@@ -1214,8 +1219,8 @@ onUnmounted(() => {
 
   :deep(.tag-table th:nth-child(6)),
   :deep(.tag-table td:nth-child(6)) {
-    width: 160px;
-    min-width: 160px;
+    width: 210px;
+    min-width: 210px;
   }
 
   :deep(.tag-table th:nth-child(7)),
@@ -1268,5 +1273,19 @@ onUnmounted(() => {
   min-height: 300px;
   display: flex;
   align-items: flex-start;
+}
+
+.date-meta-cell {
+  line-height: 1.2;
+}
+
+.date-meta-cell__primary {
+  font-weight: 500;
+}
+
+.date-meta-cell__secondary {
+  color: #6b7280;
+  font-size: 0.82rem;
+  margin-top: 4px;
 }
 </style> 

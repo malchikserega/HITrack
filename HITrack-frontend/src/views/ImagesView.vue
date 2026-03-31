@@ -101,7 +101,12 @@
                     {{ item.components_count }}
                   </td>
                   <td @click="onRowClick(item)">
-                    <span class="nowrap">{{ $formatDate(item.updated_at) }}</span>
+                    <div class="date-meta-cell">
+                      <div class="date-meta-cell__primary nowrap">{{ $formatDate(item.updated_at) }}</div>
+                      <div class="date-meta-cell__secondary nowrap">
+                        Created: {{ $formatDate(item.created_at) }}
+                      </div>
+                    </div>
                   </td>
                   <td>
                     <v-tooltip location="top">
@@ -332,7 +337,7 @@ const headers: any[] = [
   { title: 'SBOM', key: 'has_sbom', sortable: false },
   { title: 'Findings', key: 'findings', sortable: true },
   { title: 'Components', key: 'components_count', sortable: true },
-  { title: 'Updated', key: 'updated_at', sortable: true },
+  { title: 'Updated', key: 'updated_at', sortable: true, width: '210px' },
   { title: 'Actions', key: 'actions', sortable: false }
 ]
 
@@ -748,6 +753,20 @@ onUnmounted(() => {
 .switch-compact :deep(.v-label) {
   font-size: 0.75rem;
   opacity: 0.7;
+}
+
+.date-meta-cell {
+  line-height: 1.2;
+}
+
+.date-meta-cell__primary {
+  font-weight: 500;
+}
+
+.date-meta-cell__secondary {
+  color: #6b7280;
+  font-size: 0.82rem;
+  margin-top: 4px;
 }
 
 .clickable-row {

@@ -268,6 +268,14 @@
                   </div>
                 </div>
               </template>
+              <template v-slot:item.updated_at="{ item }">
+                <div class="date-meta-cell">
+                  <div class="date-meta-cell__primary">{{ $formatDate(item.updated_at) }}</div>
+                  <div class="date-meta-cell__secondary">
+                    Created: {{ $formatDate(item.created_at) }}
+                  </div>
+                </div>
+              </template>
             </v-data-table-server>
 
             <!-- Pagination -->
@@ -372,6 +380,7 @@ const headers = [
   { title: 'CISA KEV', key: 'cisa_kev', sortable: true },
   { title: 'Exploit', key: 'exploit_available', sortable: true },
   { title: 'Details', key: 'has_details', sortable: true },
+  { title: 'Updated', key: 'updated_at', sortable: true, width: '210px' },
   { title: 'Description', key: 'description', sortable: false }
 ] as const
 
@@ -673,5 +682,19 @@ onMounted(() => {
 
 .flex-shrink-0 {
   flex-shrink: 0;
+}
+
+.date-meta-cell {
+  line-height: 1.2;
+}
+
+.date-meta-cell__primary {
+  font-weight: 500;
+}
+
+.date-meta-cell__secondary {
+  color: #6b7280;
+  font-size: 0.82rem;
+  margin-top: 4px;
 }
 </style> 
