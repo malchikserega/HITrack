@@ -4855,7 +4855,7 @@ def cleanup_threat_intel_snapshots(retention_days: int = 90):
 
 
 @celery_app.task(name="Collect Weekly Threat Intel Snapshot")
-def collect_weekly_threat_intel_snapshot(retention_days: int = 90, limit: int = 5):
+def collect_weekly_threat_intel_snapshot(retention_days: int = 90, limit: int | None = None):
     """Persist the current weekly threat-intel summary and rotate older snapshots."""
     from .utils.threat_intel import save_weekly_threat_intel_snapshot
 

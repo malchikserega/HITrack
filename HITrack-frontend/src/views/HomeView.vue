@@ -244,7 +244,11 @@
       <!-- Activity and Quick Actions -->
       <v-row>
         <v-col cols="12">
-          <WeeklyThreatIntelCard :intel="dashboardData.weekly_threat_intel" />
+          <WeeklyThreatIntelCard
+            :intel="dashboardData.weekly_threat_intel"
+            :show-view-all="true"
+            @view-all="viewAllThreatIntel"
+          />
         </v-col>
       </v-row>
 
@@ -370,6 +374,10 @@ const fetchDashboardData = async () => {
 
 const refreshData = () => {
   fetchDashboardData()
+}
+
+const viewAllThreatIntel = () => {
+  router.push('/threat-intel')
 }
 
 const scanAllRepositories = async () => {

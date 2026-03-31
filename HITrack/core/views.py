@@ -164,6 +164,90 @@ def _build_recent_activity_queryset(since_timestamp, activity_types=None):
     return querysets[0].union(*querysets[1:]).order_by('-timestamp')
 
 
+def _parse_threat_intel_timestamp(value):
+    if not value:
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+    try:
+        if isinstance(value, str) and 'T' in value:
+            return datetime.fromisoformat(value.replace('Z', '+00:00'))
+        return datetime.fromisoformat(f"{value}T00:00:00+00:00")
+    except Exception:
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _build_weekly_threat_intel_rows(summary, intel_type='all'):
+    rows = []
+    selected_type = (intel_type or 'all').strip().lower()
+
+    if selected_type in {'all', 'observed'}:
+        for entry in (summary.get('observed_this_week') or {}).get('entries', []):
+            context_parts = [entry.get('type') or 'Observed in HITrack']
+            if entry.get('cisa_kev'):
+                context_parts.append('KEV')
+            elif entry.get('exploit_available'):
+                context_parts.append('Exploit available')
+            if entry.get('epss'):
+                context_parts.append(f"EPSS {entry['epss']}")
+
+            rows.append({
+                'id': f"observed:{entry.get('uuid') or entry.get('vulnerability_id')}",
+                'type': 'observed',
+                'identifier': entry.get('vulnerability_id'),
+                'title': entry.get('vulnerability_id'),
+                'context': " · ".join(part for part in context_parts if part),
+                'timestamp': entry.get('created_at'),
+                'severity': entry.get('severity'),
+                'target_type': 'vulnerability',
+                'target_uuid': entry.get('uuid'),
+                'external_url': None,
+            })
+
+    if selected_type in {'all', 'kev'}:
+        for entry in (summary.get('kev_added_this_week') or {}).get('entries', []):
+            context_parts = [part for part in [entry.get('vendor'), entry.get('product')] if part]
+            if entry.get('ransomware_use') == 'Known':
+                context_parts.append('Ransomware')
+
+            rows.append({
+                'id': f"kev:{entry.get('vulnerability_id')}",
+                'type': 'kev',
+                'identifier': entry.get('vulnerability_id'),
+                'title': entry.get('title') or entry.get('vulnerability_id'),
+                'context': " · ".join(context_parts) or 'CISA KEV',
+                'timestamp': entry.get('date_added'),
+                'severity': 'KEV',
+                'target_type': None,
+                'target_uuid': None,
+                'external_url': entry.get('url'),
+            })
+
+    if selected_type in {'all', 'supply_chain'}:
+        for entry in (summary.get('supply_chain_this_week') or {}).get('entries', []):
+            packages = entry.get('packages') or []
+            context_parts = [str(entry.get('ecosystem') or '').upper()]
+            if packages:
+                context_parts.append(", ".join(packages[:3]))
+            elif entry.get('title'):
+                context_parts.append(entry.get('title'))
+
+            rows.append({
+                'id': f"supply_chain:{entry.get('advisory_id') or entry.get('url')}",
+                'type': 'supply_chain',
+                'identifier': entry.get('advisory_id') or 'Advisory',
+                'title': entry.get('title') or entry.get('advisory_id') or 'Supply-chain advisory',
+                'context': " · ".join(part for part in context_parts if part) or 'GitHub Advisory',
+                'timestamp': entry.get('published_at'),
+                'severity': entry.get('severity') or ('MALWARE' if entry.get('type') == 'malware' else None),
+                'target_type': None,
+                'target_uuid': None,
+                'external_url': entry.get('url'),
+            })
+
+    rows.sort(key=lambda item: _parse_threat_intel_timestamp(item.get('timestamp')), reverse=True)
+    return rows
+
+
 def _build_vulnerability_trend_series(days=30):
     current_timezone = timezone.get_current_timezone()
     end_date = timezone.localdate()
@@ -2555,6 +2639,35 @@ class StatsViewSet(viewsets.ViewSet):
         if page is not None:
             return paginator.get_paginated_response(results)
         return Response(results)
+
+    @method_decorator(cache_page(60))
+    @action(detail=False, methods=['get'], url_path='weekly-threat-intel')
+    def weekly_threat_intel(self, request):
+        """Get paginated weekly threat-intel rows for the current week."""
+        selected_type = request.query_params.get('type', 'all')
+        summary = get_dashboard_weekly_threat_intel(limit=None)
+        rows = _build_weekly_threat_intel_rows(summary, selected_type)
+
+        paginator = CustomPageNumberPagination()
+        page = paginator.paginate_queryset(rows, request)
+        results = list(page if page is not None else rows)
+
+        if page is not None:
+            response = paginator.get_paginated_response(results)
+            response.data['period_start'] = summary.get('period_start')
+            response.data['period_end'] = summary.get('period_end')
+            response.data['selected_type'] = selected_type
+            return response
+
+        return Response({
+            'count': len(results),
+            'next': None,
+            'previous': None,
+            'period_start': summary.get('period_start'),
+            'period_end': summary.get('period_end'),
+            'selected_type': selected_type,
+            'results': results,
+        })
 
 class JobViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]

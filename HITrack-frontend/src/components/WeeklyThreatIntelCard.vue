@@ -2,9 +2,20 @@
   <v-card class="weekly-threat-card" elevation="2">
     <v-card-title class="text-h6 font-weight-bold pa-4 pb-2 d-flex align-center justify-space-between">
       <span>Weekly Threat Intel</span>
-      <v-chip size="small" color="primary" variant="tonal">
-        {{ formattedPeriod }}
-      </v-chip>
+      <div class="weekly-threat-card__actions">
+        <v-chip size="small" color="primary" variant="tonal">
+          {{ formattedPeriod }}
+        </v-chip>
+        <v-btn
+          v-if="showViewAll"
+          variant="text"
+          color="primary"
+          size="small"
+          @click="emit('view-all')"
+        >
+          View All
+        </v-btn>
+      </div>
     </v-card-title>
     <v-card-text class="pa-4 pt-0">
       <v-row>
@@ -242,6 +253,10 @@ interface WeeklyThreatIntel {
 
 const props = defineProps<{
   intel?: WeeklyThreatIntel | null
+  showViewAll?: boolean
+}>()
+const emit = defineEmits<{
+  (e: 'view-all'): void
 }>()
 
 const router = useRouter()
@@ -276,6 +291,12 @@ const openExternal = (url?: string | null) => {
 <style scoped>
 .weekly-threat-card {
   border-radius: 12px;
+}
+
+.weekly-threat-card__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .intel-section {

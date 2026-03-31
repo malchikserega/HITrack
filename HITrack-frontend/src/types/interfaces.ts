@@ -203,6 +203,27 @@ export interface RecentActivity {
   target_uuid?: string | null
 }
 
+export type WeeklyThreatIntelType = 'all' | 'observed' | 'kev' | 'supply_chain'
+
+export interface WeeklyThreatIntelListItem {
+  id: string
+  type: 'observed' | 'kev' | 'supply_chain'
+  identifier: string
+  title: string
+  context: string
+  timestamp: string
+  severity?: string | null
+  target_type?: 'vulnerability' | null
+  target_uuid?: string | null
+  external_url?: string | null
+}
+
+export interface WeeklyThreatIntelResponse extends PaginatedResponse<WeeklyThreatIntelListItem> {
+  period_start?: string
+  period_end?: string
+  selected_type?: WeeklyThreatIntelType
+}
+
 export interface Stats {
   repositories: number
   images: number

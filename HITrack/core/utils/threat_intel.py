@@ -13,7 +13,28 @@ def get_current_week_period():
     return week_start, week_end
 
 
-def build_live_weekly_threat_intel_summary(limit: int = 5) -> Dict:
+def _limit_summary_entries(summary: Dict, limit: int | None) -> Dict:
+    if limit is None:
+        return summary
+
+    def limited_bucket(bucket: Dict | None) -> Dict:
+        bucket = bucket or {}
+        entries = list(bucket.get('entries') or [])
+        return {
+            'count': bucket.get('count', len(entries)),
+            'entries': entries[:limit],
+        }
+
+    return {
+        'period_start': summary.get('period_start'),
+        'period_end': summary.get('period_end'),
+        'observed_this_week': limited_bucket(summary.get('observed_this_week')),
+        'kev_added_this_week': limited_bucket(summary.get('kev_added_this_week')),
+        'supply_chain_this_week': limited_bucket(summary.get('supply_chain_this_week')),
+    }
+
+
+def build_live_weekly_threat_intel_summary(limit: int | None = 5) -> Dict:
     current_timezone = timezone.get_current_timezone()
     week_start, week_end = get_current_week_period()
     week_start_datetime = timezone.make_aware(
@@ -52,7 +73,7 @@ def build_live_weekly_threat_intel_summary(limit: int = 5) -> Dict:
             'exploit_available': bool(getattr(vulnerability.details, 'exploit_available', False))
             if getattr(vulnerability, 'details', None) else False,
         }
-        for vulnerability in observed_queryset[:limit]
+        for vulnerability in (observed_queryset if limit is None else observed_queryset[:limit])
     ]
 
     collector = VulnerabilityDataCollector()
@@ -83,7 +104,7 @@ def build_live_weekly_threat_intel_summary(limit: int = 5) -> Dict:
     }
 
 
-def save_weekly_threat_intel_snapshot(snapshot_date=None, limit: int = 5) -> ThreatIntelSnapshot:
+def save_weekly_threat_intel_snapshot(snapshot_date=None, limit: int | None = None) -> ThreatIntelSnapshot:
     snapshot_date = snapshot_date or timezone.localdate()
     summary = build_live_weekly_threat_intel_summary(limit=limit)
     period_start = summary['period_start']
@@ -113,19 +134,19 @@ def cleanup_old_threat_intel_snapshots(retention_days: int = 90) -> int:
     return deleted_count
 
 
-def get_dashboard_weekly_threat_intel(limit: int = 5) -> Dict:
+def get_dashboard_weekly_threat_intel(limit: int | None = 5) -> Dict:
     week_start, _ = get_current_week_period()
     latest_snapshot = ThreatIntelSnapshot.objects.filter(
         snapshot_date__gte=week_start,
     ).order_by('-snapshot_date', '-updated_at').first()
 
     if latest_snapshot:
-        return {
+        return _limit_summary_entries({
             'period_start': latest_snapshot.period_start.isoformat(),
             'period_end': latest_snapshot.period_end.isoformat(),
             'observed_this_week': latest_snapshot.observed_this_week,
             'kev_added_this_week': latest_snapshot.kev_added_this_week,
             'supply_chain_this_week': latest_snapshot.supply_chain_this_week,
-        }
+        }, limit)
 
     return build_live_weekly_threat_intel_summary(limit=limit)

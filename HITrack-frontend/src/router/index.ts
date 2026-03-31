@@ -60,6 +60,12 @@ const router = createRouter({
       meta: { requiresAuth: true }
     },
     {
+      path: '/threat-intel',
+      name: 'weekly-threat-intel',
+      component: () => import('../views/WeeklyThreatIntelView.vue'),
+      meta: { requiresAuth: true }
+    },
+    {
       path: '/acr',
       name: 'ACR',
       component: () => import('../views/ACRView.vue'),
