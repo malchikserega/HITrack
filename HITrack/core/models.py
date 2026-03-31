@@ -210,6 +210,29 @@ class Vulnerability(models.Model):
         return f"{self.vulnerability_id} ({self.severity})"
 
 
+class ThreatIntelSnapshot(models.Model):
+    uuid = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    snapshot_date = models.DateField(unique=True)
+    period_start = models.DateField()
+    period_end = models.DateField()
+    observed_this_week = models.JSONField(default=dict, blank=True)
+    kev_added_this_week = models.JSONField(default=dict, blank=True)
+    supply_chain_this_week = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Threat Intel Snapshot'
+        verbose_name_plural = 'Threat Intel Snapshots'
+        ordering = ['-snapshot_date', '-updated_at']
+        indexes = [
+            models.Index(fields=['period_start', 'period_end']),
+        ]
+
+    def __str__(self):
+        return f"Threat intel snapshot for {self.snapshot_date.isoformat()}"
+
+
 class VulnerabilityDetails(models.Model):
     """
     Additional vulnerability information from external sources like CVE Details,

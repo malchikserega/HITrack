@@ -4835,3 +4835,48 @@ def recalculate_vulnerability_fix_availability():
             "error": str(e),
             "error_type": type(e).__name__,
         }
+
+
+@celery_app.task(name="Cleanup Threat Intel Snapshots")
+def cleanup_threat_intel_snapshots(retention_days: int = 90):
+    """Delete old persisted threat-intel snapshots."""
+    from .utils.threat_intel import cleanup_old_threat_intel_snapshots
+
+    deleted_count = cleanup_old_threat_intel_snapshots(retention_days=retention_days)
+    return {
+        "status": "success",
+        "task_name": "Cleanup Threat Intel Snapshots",
+        "summary": {
+            "retention_days": retention_days,
+            "deleted_snapshots": deleted_count,
+        },
+        "timestamp": timezone.now().isoformat(),
+    }
+
+
+@celery_app.task(name="Collect Weekly Threat Intel Snapshot")
+def collect_weekly_threat_intel_snapshot(retention_days: int = 90, limit: int = 5):
+    """Persist the current weekly threat-intel summary and rotate older snapshots."""
+    from .utils.threat_intel import save_weekly_threat_intel_snapshot
+
+    start_time = time.time()
+    snapshot = save_weekly_threat_intel_snapshot(limit=limit)
+    cleanup_result = cleanup_threat_intel_snapshots(retention_days=retention_days)
+    processing_time = time.time() - start_time
+
+    return {
+        "status": "success",
+        "task_name": "Collect Weekly Threat Intel Snapshot",
+        "summary": {
+            "snapshot_date": snapshot.snapshot_date.isoformat(),
+            "period_start": snapshot.period_start.isoformat(),
+            "period_end": snapshot.period_end.isoformat(),
+            "retention_days": retention_days,
+            "observed_this_week_count": (snapshot.observed_this_week or {}).get("count", 0),
+            "kev_added_this_week_count": (snapshot.kev_added_this_week or {}).get("count", 0),
+            "supply_chain_this_week_count": (snapshot.supply_chain_this_week or {}).get("count", 0),
+            "deleted_snapshots": cleanup_result.get("summary", {}).get("deleted_snapshots", 0),
+        },
+        "processing_time": processing_time,
+        "timestamp": timezone.now().isoformat(),
+    }

@@ -37,6 +37,7 @@ import re
 import logging
 from django.conf import settings
 from .utils.status import resolve_repository_tag_processing_status
+from .utils.threat_intel import get_dashboard_weekly_threat_intel
 
 logger = logging.getLogger(__name__)
 
@@ -2479,6 +2480,8 @@ class StatsViewSet(viewsets.ViewSet):
             activity['type'] = activity.pop('activity_type')
             activity['severity'] = activity.pop('activity_severity')
             activity['status'] = activity.pop('activity_status')
+
+        weekly_threat_intel = get_dashboard_weekly_threat_intel(limit=5)
         
         return Response({
             'basic_stats': {
@@ -2522,7 +2525,8 @@ class StatsViewSet(viewsets.ViewSet):
                 }
                 for vuln in top_vulnerabilities_by_epss
             ],
-            'recent_activities': recent_activities[:10]
+            'recent_activities': recent_activities[:10],
+            'weekly_threat_intel': weekly_threat_intel,
         })
 
     @method_decorator(cache_page(60))

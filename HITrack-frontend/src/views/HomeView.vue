@@ -243,6 +243,13 @@
 
       <!-- Activity and Quick Actions -->
       <v-row>
+        <v-col cols="12">
+          <WeeklyThreatIntelCard :intel="dashboardData.weekly_threat_intel" />
+        </v-col>
+      </v-row>
+
+      <!-- Activity and Quick Actions -->
+      <v-row>
         <v-col cols="12" md="6">
           <RecentActivityFeed
             :activities="dashboardData.recent_activities || []"
@@ -322,6 +329,7 @@ import SeverityDistributionChart from '../components/SeverityDistributionChart.v
 import VulnerabilityTrendChart from '../components/VulnerabilityTrendChart.vue'
 import RecentActivityFeed from '../components/RecentActivityFeed.vue'
 import RecentTasksCard from '../components/RecentTasksCard.vue'
+import WeeklyThreatIntelCard from '../components/WeeklyThreatIntelCard.vue'
 import { getVulnerabilityTypeColor, getSeverityColor, getEpssColor, getEpssSourceColor, getEpssSourceIcon, getEpssSourceDisplay } from '../utils/colors'
 
 const router = useRouter()
