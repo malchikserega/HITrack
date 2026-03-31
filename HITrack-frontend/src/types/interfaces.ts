@@ -213,6 +213,8 @@ export interface WeeklyThreatIntelListItem {
   context: string
   timestamp: string
   severity?: string | null
+  relevant_in_hitrack?: boolean
+  currently_present?: boolean
   target_type?: 'vulnerability' | null
   target_uuid?: string | null
   external_url?: string | null

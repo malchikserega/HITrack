@@ -22,10 +22,29 @@
         <v-col cols="12" md="4">
           <div class="intel-section">
             <div class="intel-section__header">
-              <div class="intel-section__title">Observed In HITrack</div>
-              <v-chip size="small" color="info" variant="tonal">
-                {{ intel?.observed_this_week?.count || 0 }}
-              </v-chip>
+              <div class="intel-section__title-row">
+                <div class="intel-section__title">Observed In HITrack</div>
+                <v-tooltip location="top">
+                  <template #activator="{ props }">
+                    <v-icon
+                      v-bind="props"
+                      size="16"
+                      color="medium-emphasis"
+                    >
+                      mdi-information-outline
+                    </v-icon>
+                  </template>
+                  <span>{{ observedTooltip }}</span>
+                </v-tooltip>
+              </div>
+              <v-tooltip location="top">
+                <template #activator="{ props }">
+                  <v-chip v-bind="props" size="small" color="info" variant="tonal">
+                    {{ intel?.observed_this_week?.count || 0 }}
+                  </v-chip>
+                </template>
+                <span>{{ observedTooltip }}</span>
+              </v-tooltip>
             </div>
             <div v-if="!intel?.observed_this_week?.entries?.length" class="intel-empty">
               No new observed vulnerabilities this week.
@@ -88,10 +107,49 @@
         <v-col cols="12" md="4">
           <div class="intel-section">
             <div class="intel-section__header">
-              <div class="intel-section__title">New KEV This Week</div>
-              <v-chip size="small" color="error" variant="tonal">
-                {{ intel?.kev_added_this_week?.count || 0 }}
-              </v-chip>
+              <div>
+                <div class="intel-section__title-row">
+                  <div class="intel-section__title">New KEV This Week</div>
+                  <v-tooltip location="top">
+                    <template #activator="{ props }">
+                      <v-icon
+                        v-bind="props"
+                        size="16"
+                        color="medium-emphasis"
+                      >
+                        mdi-information-outline
+                      </v-icon>
+                    </template>
+                    <span>{{ kevTooltip }}</span>
+                  </v-tooltip>
+                </div>
+                <div class="intel-section__summary">
+                  <v-tooltip location="top">
+                    <template #activator="{ props }">
+                      <v-chip v-bind="props" size="x-small" color="success" variant="tonal">
+                        Relevant {{ intel?.kev_added_this_week?.relevant_in_hitrack_count || 0 }}
+                      </v-chip>
+                    </template>
+                    <span>{{ relevantTooltip }}</span>
+                  </v-tooltip>
+                  <v-tooltip location="top">
+                    <template #activator="{ props }">
+                      <v-chip v-bind="props" size="x-small" color="primary" variant="tonal">
+                        Present {{ intel?.kev_added_this_week?.currently_present_count || 0 }}
+                      </v-chip>
+                    </template>
+                    <span>{{ presentTooltip }}</span>
+                  </v-tooltip>
+                </div>
+              </div>
+              <v-tooltip location="top">
+                <template #activator="{ props }">
+                  <v-chip v-bind="props" size="small" color="error" variant="tonal">
+                    {{ intel?.kev_added_this_week?.count || 0 }}
+                  </v-chip>
+                </template>
+                <span>{{ kevTooltip }}</span>
+              </v-tooltip>
             </div>
             <div v-if="!intel?.kev_added_this_week?.entries?.length" class="intel-empty">
               No new CISA KEV additions this week.
@@ -101,7 +159,7 @@
                 v-for="entry in intel.kev_added_this_week.entries"
                 :key="entry.vulnerability_id"
                 class="intel-item intel-item--clickable"
-                @click="openExternal(entry.url)"
+                @click="openKevEntry(entry)"
               >
                 <template #prepend>
                   <v-icon color="error">mdi-shield-alert</v-icon>
@@ -114,6 +172,32 @@
                 </v-list-item-subtitle>
                 <template #append>
                   <div class="intel-item__meta">
+                    <v-tooltip v-if="entry.currently_present" location="top">
+                      <template #activator="{ props }">
+                        <v-chip
+                          v-bind="props"
+                          size="x-small"
+                          color="primary"
+                          variant="tonal"
+                        >
+                          Present
+                        </v-chip>
+                      </template>
+                      <span>{{ presentTooltip }}</span>
+                    </v-tooltip>
+                    <v-tooltip v-else-if="entry.relevant_in_hitrack" location="top">
+                      <template #activator="{ props }">
+                        <v-chip
+                          v-bind="props"
+                          size="x-small"
+                          color="success"
+                          variant="tonal"
+                        >
+                          Relevant
+                        </v-chip>
+                      </template>
+                      <span>{{ relevantTooltip }}</span>
+                    </v-tooltip>
                     <v-chip
                       size="x-small"
                       color="error"
@@ -139,10 +223,49 @@
         <v-col cols="12" md="4">
           <div class="intel-section">
             <div class="intel-section__header">
-              <div class="intel-section__title">Supply-Chain Advisories</div>
-              <v-chip size="small" color="warning" variant="tonal">
-                {{ intel?.supply_chain_this_week?.count || 0 }}
-              </v-chip>
+              <div>
+                <div class="intel-section__title-row">
+                  <div class="intel-section__title">Supply-Chain Advisories</div>
+                  <v-tooltip location="top">
+                    <template #activator="{ props }">
+                      <v-icon
+                        v-bind="props"
+                        size="16"
+                        color="medium-emphasis"
+                      >
+                        mdi-information-outline
+                      </v-icon>
+                    </template>
+                    <span>{{ supplyChainTooltip }}</span>
+                  </v-tooltip>
+                </div>
+                <div class="intel-section__summary">
+                  <v-tooltip location="top">
+                    <template #activator="{ props }">
+                      <v-chip v-bind="props" size="x-small" color="success" variant="tonal">
+                        Relevant {{ intel?.supply_chain_this_week?.relevant_in_hitrack_count || 0 }}
+                      </v-chip>
+                    </template>
+                    <span>{{ relevantTooltip }}</span>
+                  </v-tooltip>
+                  <v-tooltip location="top">
+                    <template #activator="{ props }">
+                      <v-chip v-bind="props" size="x-small" color="primary" variant="tonal">
+                        Present {{ intel?.supply_chain_this_week?.currently_present_count || 0 }}
+                      </v-chip>
+                    </template>
+                    <span>{{ presentTooltip }}</span>
+                  </v-tooltip>
+                </div>
+              </div>
+              <v-tooltip location="top">
+                <template #activator="{ props }">
+                  <v-chip v-bind="props" size="small" color="warning" variant="tonal">
+                    {{ intel?.supply_chain_this_week?.count || 0 }}
+                  </v-chip>
+                </template>
+                <span>{{ supplyChainTooltip }}</span>
+              </v-tooltip>
             </div>
             <div v-if="!intel?.supply_chain_this_week?.entries?.length" class="intel-empty">
               No new supply-chain advisories this week.
@@ -152,7 +275,7 @@
                 v-for="entry in intel.supply_chain_this_week.entries"
                 :key="entry.advisory_id || entry.url"
                 class="intel-item intel-item--clickable"
-                @click="openExternal(entry.url)"
+                @click="openSupplyChainEntry(entry)"
               >
                 <template #prepend>
                   <v-chip
@@ -171,6 +294,32 @@
                 </v-list-item-subtitle>
                 <template #append>
                   <div class="intel-item__meta">
+                    <v-tooltip v-if="entry.currently_present" location="top">
+                      <template #activator="{ props }">
+                        <v-chip
+                          v-bind="props"
+                          size="x-small"
+                          color="primary"
+                          variant="tonal"
+                        >
+                          Present
+                        </v-chip>
+                      </template>
+                      <span>{{ presentTooltip }}</span>
+                    </v-tooltip>
+                    <v-tooltip v-else-if="entry.relevant_in_hitrack" location="top">
+                      <template #activator="{ props }">
+                        <v-chip
+                          v-bind="props"
+                          size="x-small"
+                          color="success"
+                          variant="tonal"
+                        >
+                          Relevant
+                        </v-chip>
+                      </template>
+                      <span>{{ relevantTooltip }}</span>
+                    </v-tooltip>
                     <v-chip
                       v-if="entry.severity"
                       size="x-small"
@@ -221,10 +370,15 @@ interface KevThreatEntry {
   date_added: string
   ransomware_use?: string | null
   url?: string | null
+  relevant_in_hitrack?: boolean
+  currently_present?: boolean
+  target_uuid?: string | null
 }
 
 interface SupplyChainEntry {
   advisory_id?: string | null
+  ghsa_id?: string | null
+  cve_id?: string | null
   title: string
   severity?: string | null
   ecosystem: string
@@ -232,6 +386,9 @@ interface SupplyChainEntry {
   packages?: string[]
   published_at?: string | null
   url?: string | null
+  relevant_in_hitrack?: boolean
+  currently_present?: boolean
+  target_uuid?: string | null
 }
 
 interface WeeklyThreatIntel {
@@ -243,10 +400,14 @@ interface WeeklyThreatIntel {
   }
   kev_added_this_week?: {
     count: number
+    relevant_in_hitrack_count?: number
+    currently_present_count?: number
     entries: KevThreatEntry[]
   }
   supply_chain_this_week?: {
     count: number
+    relevant_in_hitrack_count?: number
+    currently_present_count?: number
     entries: SupplyChainEntry[]
   }
 }
@@ -277,9 +438,31 @@ const formattedPeriod = computed(() => {
   return `${formatDate(props.intel.period_start)} - ${formatDate(props.intel.period_end)}`
 })
 
+const observedTooltip = 'Vulnerabilities first seen in HITrack during the current week.'
+const kevTooltip = 'New entries added to the official CISA Known Exploited Vulnerabilities catalog this week.'
+const supplyChainTooltip = 'New weekly package or malware advisories from external supply-chain sources such as GitHub Advisory data.'
+const relevantTooltip = 'This external advisory matches a vulnerability that exists in HITrack at least once in historical data.'
+const presentTooltip = 'This external advisory matches a vulnerability that is currently present in scanned images linked in HITrack.'
+
 const openLocalVulnerability = (uuid?: string) => {
   if (!uuid) return
   router.push({ name: 'vulnerability-detail', params: { uuid } })
+}
+
+const openKevEntry = (entry: KevThreatEntry) => {
+  if (entry.target_uuid) {
+    openLocalVulnerability(entry.target_uuid)
+    return
+  }
+  openExternal(entry.url)
+}
+
+const openSupplyChainEntry = (entry: SupplyChainEntry) => {
+  if (entry.target_uuid) {
+    openLocalVulnerability(entry.target_uuid)
+    return
+  }
+  openExternal(entry.url)
 }
 
 const openExternal = (url?: string | null) => {
@@ -314,6 +497,19 @@ const openExternal = (url?: string | null) => {
 .intel-section__title {
   font-weight: 700;
   font-size: 1rem;
+}
+
+.intel-section__title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.intel-section__summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
 }
 
 .intel-list {

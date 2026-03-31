@@ -21,15 +21,33 @@
       <v-card elevation="2" class="threat-intel-card">
         <v-card-text class="pb-0">
           <div class="filters-bar">
-            <v-select
-              v-model="selectedIntelType"
-              :items="intelTypeOptions"
-              label="Intel Type"
-              variant="outlined"
-              density="comfortable"
-              hide-details
-              class="intel-type-filter"
-            />
+            <div class="filters-bar__left">
+              <v-select
+                v-model="selectedIntelType"
+                :items="intelTypeOptions"
+                label="Intel Type"
+                variant="outlined"
+                density="comfortable"
+                hide-details
+                class="intel-type-filter"
+              />
+              <v-tooltip location="top">
+                <template #activator="{ props }">
+                  <v-btn
+                    v-bind="props"
+                    icon="mdi-information-outline"
+                    size="small"
+                    variant="text"
+                    color="medium-emphasis"
+                  />
+                </template>
+                <div class="intel-tooltip">
+                  <div><strong>Observed</strong>: first seen in HITrack this week.</div>
+                  <div><strong>Relevant</strong>: matched in HITrack historical data.</div>
+                  <div><strong>Present</strong>: currently linked to scanned images.</div>
+                </div>
+              </v-tooltip>
+            </div>
             <v-chip color="primary" variant="tonal" size="small">
               {{ formattedPeriod }}
             </v-chip>
@@ -78,6 +96,38 @@
               <div class="timestamp-cell">
                 <div>{{ formatTimestamp(item.timestamp) }}</div>
                 <div class="timestamp-cell__relative">{{ formatRelativeTime(item.timestamp) }}</div>
+              </div>
+            </template>
+
+            <template #item.hitrack="{ item }">
+              <div class="presence-cell">
+                <v-tooltip v-if="item.currently_present" location="top">
+                  <template #activator="{ props }">
+                    <v-chip
+                      v-bind="props"
+                      size="small"
+                      color="primary"
+                      variant="tonal"
+                    >
+                      Present
+                    </v-chip>
+                  </template>
+                  <span>{{ presentTooltip }}</span>
+                </v-tooltip>
+                <v-tooltip v-else-if="item.relevant_in_hitrack" location="top">
+                  <template #activator="{ props }">
+                    <v-chip
+                      v-bind="props"
+                      size="small"
+                      color="success"
+                      variant="tonal"
+                    >
+                      Relevant
+                    </v-chip>
+                  </template>
+                  <span>{{ relevantTooltip }}</span>
+                </v-tooltip>
+                <span v-else class="text-medium-emphasis">-</span>
               </div>
             </template>
 
@@ -148,6 +198,7 @@ const headers: DataTableHeader[] = [
   { title: 'Type', key: 'type', sortable: false, width: 170 },
   { title: 'Context', key: 'context', sortable: false, minWidth: 280 },
   { title: 'When', key: 'timestamp', sortable: false, width: 220 },
+  { title: 'HITrack', key: 'hitrack', sortable: false, width: 160 },
   { title: 'Signal', key: 'severity', sortable: false, width: 150 },
   { title: 'Actions', key: 'actions', sortable: false, width: 90, align: 'end' },
 ]
@@ -167,6 +218,9 @@ const formattedPeriod = computed(() => {
   }
   return `${formatDateOnly(periodStart.value)} - ${formatDateOnly(periodEnd.value)}`
 })
+
+const relevantTooltip = 'Matched in HITrack historical data at least once.'
+const presentTooltip = 'Currently linked to scanned images in HITrack.'
 
 const fetchThreatIntel = async () => {
   loading.value = true
@@ -309,6 +363,13 @@ onMounted(fetchThreatIntel)
   flex-wrap: wrap;
 }
 
+.filters-bar__left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .intel-type-filter {
   max-width: 280px;
 }
@@ -338,6 +399,19 @@ onMounted(fetchThreatIntel)
 .context-cell {
   white-space: normal;
   line-height: 1.35;
+}
+
+.presence-cell {
+  display: flex;
+  align-items: center;
+  min-height: 32px;
+}
+
+.intel-tooltip {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 280px;
 }
 
 .timestamp-cell {

@@ -198,9 +198,11 @@ def _build_weekly_threat_intel_rows(summary, intel_type='all'):
                 'context': " · ".join(part for part in context_parts if part),
                 'timestamp': entry.get('created_at'),
                 'severity': entry.get('severity'),
-                'target_type': 'vulnerability',
-                'target_uuid': entry.get('uuid'),
+                'target_type': entry.get('target_type') or 'vulnerability',
+                'target_uuid': entry.get('target_uuid') or entry.get('uuid'),
                 'external_url': None,
+                'relevant_in_hitrack': bool(entry.get('relevant_in_hitrack', True)),
+                'currently_present': bool(entry.get('currently_present')),
             })
 
     if selected_type in {'all', 'kev'}:
@@ -217,9 +219,11 @@ def _build_weekly_threat_intel_rows(summary, intel_type='all'):
                 'context': " · ".join(context_parts) or 'CISA KEV',
                 'timestamp': entry.get('date_added'),
                 'severity': 'KEV',
-                'target_type': None,
-                'target_uuid': None,
+                'target_type': entry.get('target_type'),
+                'target_uuid': entry.get('target_uuid'),
                 'external_url': entry.get('url'),
+                'relevant_in_hitrack': bool(entry.get('relevant_in_hitrack')),
+                'currently_present': bool(entry.get('currently_present')),
             })
 
     if selected_type in {'all', 'supply_chain'}:
@@ -239,9 +243,11 @@ def _build_weekly_threat_intel_rows(summary, intel_type='all'):
                 'context': " · ".join(part for part in context_parts if part) or 'GitHub Advisory',
                 'timestamp': entry.get('published_at'),
                 'severity': entry.get('severity') or ('MALWARE' if entry.get('type') == 'malware' else None),
-                'target_type': None,
-                'target_uuid': None,
+                'target_type': entry.get('target_type'),
+                'target_uuid': entry.get('target_uuid'),
                 'external_url': entry.get('url'),
+                'relevant_in_hitrack': bool(entry.get('relevant_in_hitrack')),
+                'currently_present': bool(entry.get('currently_present')),
             })
 
     rows.sort(key=lambda item: _parse_threat_intel_timestamp(item.get('timestamp')), reverse=True)
