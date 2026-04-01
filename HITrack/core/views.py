@@ -311,6 +311,131 @@ def _build_vulnerability_trend_series(days=30):
     ]
 
 
+def _build_dashboard_overview_payload():
+    from django.db.models import Count, Q
+
+    total_repositories = Repository.objects.count()
+    total_images = Image.objects.count()
+
+    security_metrics = Vulnerability.objects.aggregate(
+        critical_count=Count('uuid', filter=Q(severity='CRITICAL')),
+        total_count=Count('uuid')
+    )
+
+    fixable_vulns = ComponentVersionVulnerability.objects.filter(
+        fixable=True
+    ).values('vulnerability').distinct().count()
+
+    total_vulns = security_metrics['total_count']
+    fixable_percentage = (fixable_vulns / total_vulns * 100) if total_vulns > 0 else 0
+    cisa_kev_vulns = Vulnerability.objects.filter(details__cisa_kev_known_exploited=True).count()
+    exploit_available_vulns = Vulnerability.objects.filter(details__exploit_available=True).count()
+    ransomware_vulns = Vulnerability.objects.filter(details__cisa_kev_ransomware_use='Known').count()
+    vulns_with_details = Vulnerability.objects.filter(details__isnull=False).count()
+
+    cisa_kev_percentage = (cisa_kev_vulns / total_vulns * 100) if total_vulns > 0 else 0
+    exploit_percentage = (exploit_available_vulns / total_vulns * 100) if total_vulns > 0 else 0
+    ransomware_percentage = (ransomware_vulns / total_vulns * 100) if total_vulns > 0 else 0
+    details_percentage = (vulns_with_details / total_vulns * 100) if total_vulns > 0 else 0
+
+    return {
+        'basic_stats': {
+            'repositories': total_repositories,
+            'images': total_images,
+        },
+        'security_metrics': {
+            'critical_vulnerabilities': security_metrics['critical_count'],
+            'fixable_vulnerabilities': fixable_vulns,
+            'fixable_percentage': round(fixable_percentage, 1),
+            'cisa_kev_vulnerabilities': cisa_kev_vulns,
+            'cisa_kev_percentage': round(cisa_kev_percentage, 1),
+            'exploit_available_vulnerabilities': exploit_available_vulns,
+            'exploit_percentage': round(exploit_percentage, 1),
+            'ransomware_vulnerabilities': ransomware_vulns,
+            'ransomware_percentage': round(ransomware_percentage, 1),
+            'vulnerabilities_with_details': vulns_with_details,
+            'details_percentage': round(details_percentage, 1),
+        },
+    }
+
+
+def _build_dashboard_visualizations_payload():
+    from django.db.models import Count
+
+    severity_distribution = Vulnerability.objects.values('severity').annotate(
+        count=Count('uuid')
+    ).order_by('severity')
+
+    return {
+        'severity_distribution': list(severity_distribution),
+        'vulnerability_trends': _build_vulnerability_trend_series(days=30),
+    }
+
+
+def _build_dashboard_top_lists_payload():
+    from django.db.models import Count
+
+    top_vulnerable_components = ComponentVersion.objects.select_related('component').annotate(
+        vuln_count=Count('vulnerabilities')
+    ).filter(vuln_count__gt=0).order_by('-vuln_count')[:10]
+
+    top_vulnerabilities_by_epss = Vulnerability.objects.filter(
+        epss__isnull=False
+    ).only('uuid', 'vulnerability_id', 'severity', 'epss', 'description').order_by('-epss')[:10]
+
+    return {
+        'top_vulnerable_components': [
+            {
+                'name': cv.component.name,
+                'version': cv.version,
+                'vulnerability_count': cv.vuln_count,
+            }
+            for cv in top_vulnerable_components
+        ],
+        'top_vulnerabilities_by_epss': [
+            {
+                'uuid': str(vuln.uuid),
+                'vulnerability_id': vuln.vulnerability_id,
+                'severity': vuln.severity,
+                'epss': round(vuln.epss, 3),
+                'description': (
+                    f"{vuln.description[:100]}..."
+                    if vuln.description and len(vuln.description) > 100
+                    else vuln.description
+                ),
+            }
+            for vuln in top_vulnerabilities_by_epss
+        ],
+    }
+
+
+def _build_dashboard_activity_payload():
+    thirty_days_ago = timezone.now() - timedelta(days=30)
+    recent_activities = list(_build_recent_activity_queryset(thirty_days_ago)[:10])
+    for activity in recent_activities:
+        activity['type'] = activity.pop('activity_type')
+        activity['severity'] = activity.pop('activity_severity')
+        activity['status'] = activity.pop('activity_status')
+
+    return {
+        'recent_activities': recent_activities[:10],
+    }
+
+
+def _build_dashboard_threat_intel_payload():
+    return {
+        'weekly_threat_intel': get_dashboard_weekly_threat_intel(limit=5),
+    }
+
+
+def _build_dashboard_analytics_payload():
+    return {
+        'risk_rankings': build_dashboard_risk_rankings(limit=5),
+        'fixability_analytics': build_dashboard_fixability_analytics(),
+        'recent_scan_deltas': build_recent_scan_deltas(limit=10),
+    }
+
+
 def _build_optimized_image_list_queryset(queryset):
     """Annotate lightweight image summary fields without loading large JSON blobs."""
     return queryset.annotate(
@@ -2540,121 +2665,44 @@ class StatsViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'])
     def dashboard_metrics(self, request):
         """Get comprehensive dashboard metrics with optimized queries"""
-        from django.db.models import Count, Avg, Q
-        from django.utils import timezone
-        from datetime import timedelta
-        
-        # Calculate date once
-        thirty_days_ago = timezone.now() - timedelta(days=30)
-        
-        # Optimized basic counts with select_related/prefetch_related
-        total_repositories = Repository.objects.count()
-        total_images = Image.objects.count()
-        
-        # Optimized severity distribution - single query
-        severity_distribution = Vulnerability.objects.values('severity').annotate(
-            count=Count('uuid')
-        ).order_by('severity')
-        
-        # Build a complete 30-day series so empty days are represented correctly.
-        vulnerability_trends = _build_vulnerability_trend_series(days=30)
-        
-        # Optimized top vulnerable components - avoid N+1 with select_related
-        top_vulnerable_components = ComponentVersion.objects.select_related('component').annotate(
-            vuln_count=Count('vulnerabilities')
-        ).filter(vuln_count__gt=0).order_by('-vuln_count')[:10]
-        
-        # Optimized top vulnerabilities by EPSS - limit fields
-        top_vulnerabilities_by_epss = Vulnerability.objects.filter(
-            epss__isnull=False
-        ).only('uuid', 'vulnerability_id', 'severity', 'epss', 'description').order_by('-epss')[:10]
-        
-        # Optimized security metrics - single aggregation query
-        security_metrics = Vulnerability.objects.aggregate(
-            critical_count=Count('uuid', filter=Q(severity='CRITICAL')),
-            total_count=Count('uuid')
-        )
-        
-        # Optimized fixable vulnerabilities count - count unique vulnerabilities that are fixable
-        fixable_vulns = ComponentVersionVulnerability.objects.filter(
-            fixable=True
-        ).values('vulnerability').distinct().count()
-        
-        # Calculate percentage based on unique vulnerabilities
-        total_vulns = security_metrics['total_count']
-        fixable_percentage = (fixable_vulns / total_vulns * 100) if total_vulns > 0 else 0
-        
-        # Additional security metrics
-        cisa_kev_vulns = Vulnerability.objects.filter(details__cisa_kev_known_exploited=True).count()
-        exploit_available_vulns = Vulnerability.objects.filter(details__exploit_available=True).count()
-        ransomware_vulns = Vulnerability.objects.filter(details__cisa_kev_ransomware_use='Known').count()
-        vulns_with_details = Vulnerability.objects.filter(details__isnull=False).count()
-        
-        # Calculate percentages
-        cisa_kev_percentage = (cisa_kev_vulns / total_vulns * 100) if total_vulns > 0 else 0
-        exploit_percentage = (exploit_available_vulns / total_vulns * 100) if total_vulns > 0 else 0
-        ransomware_percentage = (ransomware_vulns / total_vulns * 100) if total_vulns > 0 else 0
-        details_percentage = (vulns_with_details / total_vulns * 100) if total_vulns > 0 else 0
-        
-        recent_activities = list(_build_recent_activity_queryset(thirty_days_ago)[:10])
-        for activity in recent_activities:
-            activity['type'] = activity.pop('activity_type')
-            activity['severity'] = activity.pop('activity_severity')
-            activity['status'] = activity.pop('activity_status')
-
-        weekly_threat_intel = get_dashboard_weekly_threat_intel(limit=5)
-        risk_rankings = build_dashboard_risk_rankings(limit=5)
-        fixability_analytics = build_dashboard_fixability_analytics()
-        recent_scan_deltas = build_recent_scan_deltas(limit=10)
-        
         return Response({
-            'basic_stats': {
-                'repositories': total_repositories,
-                'images': total_images
-            },
-            'security_metrics': {
-                'critical_vulnerabilities': security_metrics['critical_count'],
-                'fixable_vulnerabilities': fixable_vulns,
-                'fixable_percentage': round(fixable_percentage, 1),
-                'cisa_kev_vulnerabilities': cisa_kev_vulns,
-                'cisa_kev_percentage': round(cisa_kev_percentage, 1),
-                'exploit_available_vulnerabilities': exploit_available_vulns,
-                'exploit_percentage': round(exploit_percentage, 1),
-                'ransomware_vulnerabilities': ransomware_vulns,
-                'ransomware_percentage': round(ransomware_percentage, 1),
-                'vulnerabilities_with_details': vulns_with_details,
-                'details_percentage': round(details_percentage, 1)
-            },
-            'severity_distribution': list(severity_distribution),
-            'vulnerability_trends': vulnerability_trends,
-            'top_vulnerable_components': [
-                {
-                    'name': cv.component.name,
-                    'version': cv.version,
-                    'vulnerability_count': cv.vuln_count
-                }
-                for cv in top_vulnerable_components
-            ],
-            'top_vulnerabilities_by_epss': [
-                {
-                    'uuid': str(vuln.uuid),
-                    'vulnerability_id': vuln.vulnerability_id,
-                    'severity': vuln.severity,
-                    'epss': round(vuln.epss, 3),
-                    'description': (
-                        f"{vuln.description[:100]}..."
-                        if vuln.description and len(vuln.description) > 100
-                        else vuln.description
-                    ),
-                }
-                for vuln in top_vulnerabilities_by_epss
-            ],
-            'recent_activities': recent_activities[:10],
-            'weekly_threat_intel': weekly_threat_intel,
-            'risk_rankings': risk_rankings,
-            'fixability_analytics': fixability_analytics,
-            'recent_scan_deltas': recent_scan_deltas,
+            **_build_dashboard_overview_payload(),
+            **_build_dashboard_visualizations_payload(),
+            **_build_dashboard_top_lists_payload(),
+            **_build_dashboard_activity_payload(),
+            **_build_dashboard_threat_intel_payload(),
+            **_build_dashboard_analytics_payload(),
         })
+
+    @method_decorator(cache_page(60))
+    @action(detail=False, methods=['get'], url_path='dashboard-overview')
+    def dashboard_overview(self, request):
+        return Response(_build_dashboard_overview_payload())
+
+    @method_decorator(cache_page(60))
+    @action(detail=False, methods=['get'], url_path='dashboard-visualizations')
+    def dashboard_visualizations(self, request):
+        return Response(_build_dashboard_visualizations_payload())
+
+    @method_decorator(cache_page(60))
+    @action(detail=False, methods=['get'], url_path='dashboard-top-lists')
+    def dashboard_top_lists(self, request):
+        return Response(_build_dashboard_top_lists_payload())
+
+    @method_decorator(cache_page(60))
+    @action(detail=False, methods=['get'], url_path='dashboard-activity')
+    def dashboard_activity(self, request):
+        return Response(_build_dashboard_activity_payload())
+
+    @method_decorator(cache_page(60))
+    @action(detail=False, methods=['get'], url_path='dashboard-threat-intel')
+    def dashboard_threat_intel(self, request):
+        return Response(_build_dashboard_threat_intel_payload())
+
+    @method_decorator(cache_page(60))
+    @action(detail=False, methods=['get'], url_path='dashboard-analytics')
+    def dashboard_analytics(self, request):
+        return Response(_build_dashboard_analytics_payload())
 
     @method_decorator(cache_page(60))
     @action(detail=False, methods=['get'], url_path='recent-activities')

@@ -24,7 +24,20 @@
       <!-- Metrics Row -->
       <v-row>
         <v-col cols="12">
-          <v-row justify="center">
+          <v-alert
+            v-if="blockErrors.overview && !blockHasLoadedData('overview')"
+            type="warning"
+            variant="tonal"
+            class="mb-4"
+          >
+            {{ blockErrors.overview }}
+          </v-alert>
+          <v-row v-else-if="isBlockInitialLoading('overview')" justify="center">
+            <v-col v-for="index in 4" :key="`overview-metric-${index}`" cols="12" sm="6" md="3">
+              <v-skeleton-loader type="card" class="dashboard-skeleton-card" />
+            </v-col>
+          </v-row>
+          <v-row v-else justify="center">
             <v-col cols="12" sm="6" md="3">
               <MetricCard
                 title="Critical Vulnerabilities"
@@ -71,9 +84,14 @@
       </v-row>
 
       <!-- Additional Security Metrics -->
-      <v-row>
+      <v-row v-if="!blockErrors.overview || blockHasLoadedData('overview')">
         <v-col cols="12">
-          <v-row justify="center">
+          <v-row v-if="isBlockInitialLoading('overview')" justify="center">
+            <v-col v-for="index in 4" :key="`overview-security-${index}`" cols="12" sm="6" md="3">
+              <v-skeleton-loader type="card" class="dashboard-skeleton-card" />
+            </v-col>
+          </v-row>
+          <v-row v-else justify="center">
             <v-col cols="12" sm="6" md="3">
               <MetricCard
                 title="CISA KEV Vulnerabilities"
@@ -124,127 +142,180 @@
 
       <!-- Charts Row 1 -->
       <v-row>
-        <v-col cols="12" md="6">
-          <SeverityDistributionChart :data="dashboardData.severity_distribution || []" />
-        </v-col>
-        <v-col cols="12" md="6">
-          <VulnerabilityTrendChart :data="dashboardData.vulnerability_trends || []" />
+        <v-col cols="12">
+          <v-alert
+            v-if="blockErrors.visualizations && !blockHasLoadedData('visualizations')"
+            type="warning"
+            variant="tonal"
+            class="mb-4"
+          >
+            {{ blockErrors.visualizations }}
+          </v-alert>
+          <v-row v-else-if="isBlockInitialLoading('visualizations')">
+            <v-col cols="12" md="6">
+              <v-skeleton-loader type="card" class="dashboard-skeleton-card dashboard-skeleton-card--chart" />
+            </v-col>
+            <v-col cols="12" md="6">
+              <v-skeleton-loader type="card" class="dashboard-skeleton-card dashboard-skeleton-card--chart" />
+            </v-col>
+          </v-row>
+          <v-row v-else>
+            <v-col cols="12" md="6">
+              <SeverityDistributionChart :data="dashboardData.severity_distribution || []" />
+            </v-col>
+            <v-col cols="12" md="6">
+              <VulnerabilityTrendChart :data="dashboardData.vulnerability_trends || []" />
+            </v-col>
+          </v-row>
         </v-col>
       </v-row>
 
       <!-- Charts Row 2 -->
       <v-row>
-        <v-col cols="12" md="6">
-          <v-card class="chart-card" elevation="2">
-            <v-card-title class="text-h6 font-weight-bold pa-4 pb-2">
-              Top Vulnerable Components
-            </v-card-title>
-            <v-card-text class="pa-4 pt-0">
-              <div v-if="!dashboardData.top_vulnerable_components || dashboardData.top_vulnerable_components.length === 0" class="text-center pa-8">
-                <v-icon size="48" color="grey">mdi-cube-outline</v-icon>
-                <p class="text-body-2 text-medium-emphasis mt-2">No vulnerable components found</p>
-              </div>
-              <v-list v-else class="component-list">
-                <v-list-item
-                  v-for="(component, index) in dashboardData.top_vulnerable_components"
-                  :key="index"
-                  class="component-item"
-                >
-                  <template #prepend>
-                    <v-avatar color="error" size="32">
-                      <span class="text-white font-weight-bold">{{ index + 1 }}</span>
-                    </v-avatar>
-                  </template>
-                  
-                  <v-list-item-title class="component-title">
-                    {{ component.name }}
-                  </v-list-item-title>
-                  
-                  <v-list-item-subtitle class="component-subtitle">
-                    Version: {{ component.version }}
-                  </v-list-item-subtitle>
-                  
-                  <template #append>
-                    <v-chip
-                      color="error"
-                      size="small"
-                      variant="tonal"
+        <v-col cols="12">
+          <v-alert
+            v-if="blockErrors.topLists && !blockHasLoadedData('topLists')"
+            type="warning"
+            variant="tonal"
+            class="mb-4"
+          >
+            {{ blockErrors.topLists }}
+          </v-alert>
+          <v-row v-else-if="isBlockInitialLoading('topLists')">
+            <v-col cols="12" md="6">
+              <v-skeleton-loader type="card" class="dashboard-skeleton-card dashboard-skeleton-card--chart" />
+            </v-col>
+            <v-col cols="12" md="6">
+              <v-skeleton-loader type="card" class="dashboard-skeleton-card dashboard-skeleton-card--chart" />
+            </v-col>
+          </v-row>
+          <v-row v-else>
+            <v-col cols="12" md="6">
+              <v-card class="chart-card" elevation="2">
+                <v-card-title class="text-h6 font-weight-bold pa-4 pb-2">
+                  Top Vulnerable Components
+                </v-card-title>
+                <v-card-text class="pa-4 pt-0">
+                  <div v-if="!dashboardData.top_vulnerable_components || dashboardData.top_vulnerable_components.length === 0" class="text-center pa-8">
+                    <v-icon size="48" color="grey">mdi-cube-outline</v-icon>
+                    <p class="text-body-2 text-medium-emphasis mt-2">No vulnerable components found</p>
+                  </div>
+                  <v-list v-else class="component-list">
+                    <v-list-item
+                      v-for="(component, index) in dashboardData.top_vulnerable_components"
+                      :key="index"
+                      class="component-item"
                     >
-                      {{ component.vulnerability_count }} vulns
-                    </v-chip>
-                  </template>
-                </v-list-item>
-              </v-list>
-            </v-card-text>
-          </v-card>
-        </v-col>
-        <v-col cols="12" md="6">
-          <v-card class="chart-card" elevation="2">
-            <v-card-title class="text-h6 font-weight-bold pa-4 pb-2">
-              Top 10 Vulnerabilities by EPSS
-            </v-card-title>
-            <v-card-text class="pa-4 pt-0">
-              <div v-if="!dashboardData.top_vulnerabilities_by_epss || dashboardData.top_vulnerabilities_by_epss.length === 0" class="text-center pa-8">
-                <v-icon size="48" color="grey">mdi-shield-alert</v-icon>
-                <p class="text-body-2 text-medium-emphasis mt-2">No vulnerabilities with EPSS data found</p>
-              </div>
-              <v-list v-else class="vulnerability-list">
-                <v-list-item
-                  v-for="(vuln, index) in dashboardData.top_vulnerabilities_by_epss"
-                  :key="index"
-                  class="vulnerability-item clickable"
-                  @click="viewVulnerabilityDetail(vuln.uuid)"
-                >
-                  <template #prepend>
-                    <v-avatar :color="getSeverityColor(vuln.severity)" size="32">
-                      <span class="text-white font-weight-bold">{{ index + 1 }}</span>
-                    </v-avatar>
-                  </template>
-                  
-                  <v-list-item-title class="vulnerability-title">
-                    {{ vuln.vulnerability_id }}
-                  </v-list-item-title>
-                  
-                  <v-list-item-subtitle class="vulnerability-subtitle">
-                    {{ vuln.description }}
-                  </v-list-item-subtitle>
-                  
-                  <template #append>
-                    <div class="vulnerability-epss">
-                      <v-chip
-                        :size="'small'"
-                        :color="getEpssColor(vuln.epss)"
-                        class="mr-2"
-                      >
-                        EPSS: {{ vuln.epss }}
-                      </v-chip>
-                      <!-- EPSS Source Indicator -->
-                      <v-tooltip v-if="vuln.details?.epss_data_source" location="top">
-                        <template v-slot:activator="{ props }">
-                          <v-icon
-                            v-bind="props"
-                            size="16"
-                            :color="getEpssSourceColor(vuln.details.epss_data_source)"
-                            class="epss-source-icon"
+                      <template #prepend>
+                        <v-avatar color="error" size="32">
+                          <span class="text-white font-weight-bold">{{ index + 1 }}</span>
+                        </v-avatar>
+                      </template>
+
+                      <v-list-item-title class="component-title">
+                        {{ component.name }}
+                      </v-list-item-title>
+
+                      <v-list-item-subtitle class="component-subtitle">
+                        Version: {{ component.version }}
+                      </v-list-item-subtitle>
+
+                      <template #append>
+                        <v-chip
+                          color="error"
+                          size="small"
+                          variant="tonal"
+                        >
+                          {{ component.vulnerability_count }} vulns
+                        </v-chip>
+                      </template>
+                    </v-list-item>
+                  </v-list>
+                </v-card-text>
+              </v-card>
+            </v-col>
+            <v-col cols="12" md="6">
+              <v-card class="chart-card" elevation="2">
+                <v-card-title class="text-h6 font-weight-bold pa-4 pb-2">
+                  Top 10 Vulnerabilities by EPSS
+                </v-card-title>
+                <v-card-text class="pa-4 pt-0">
+                  <div v-if="!dashboardData.top_vulnerabilities_by_epss || dashboardData.top_vulnerabilities_by_epss.length === 0" class="text-center pa-8">
+                    <v-icon size="48" color="grey">mdi-shield-alert</v-icon>
+                    <p class="text-body-2 text-medium-emphasis mt-2">No vulnerabilities with EPSS data found</p>
+                  </div>
+                  <v-list v-else class="vulnerability-list">
+                    <v-list-item
+                      v-for="(vuln, index) in dashboardData.top_vulnerabilities_by_epss"
+                      :key="index"
+                      class="vulnerability-item clickable"
+                      @click="viewVulnerabilityDetail(vuln.uuid)"
+                    >
+                      <template #prepend>
+                        <v-avatar :color="getSeverityColor(vuln.severity)" size="32">
+                          <span class="text-white font-weight-bold">{{ index + 1 }}</span>
+                        </v-avatar>
+                      </template>
+
+                      <v-list-item-title class="vulnerability-title">
+                        {{ vuln.vulnerability_id }}
+                      </v-list-item-title>
+
+                      <v-list-item-subtitle class="vulnerability-subtitle">
+                        {{ vuln.description }}
+                      </v-list-item-subtitle>
+
+                      <template #append>
+                        <div class="vulnerability-epss">
+                          <v-chip
+                            :size="'small'"
+                            :color="getEpssColor(vuln.epss)"
+                            class="mr-2"
                           >
-                            {{ getEpssSourceIcon(vuln.details.epss_data_source) }}
-                          </v-icon>
-                        </template>
-                        <span>{{ getEpssSourceDisplay(vuln.details.epss_data_source) }}</span>
-                      </v-tooltip>
-                    </div>
-                  </template>
-                </v-list-item>
-              </v-list>
-            </v-card-text>
-          </v-card>
+                            EPSS: {{ vuln.epss }}
+                          </v-chip>
+                          <v-tooltip v-if="vuln.details?.epss_data_source" location="top">
+                            <template v-slot:activator="{ props }">
+                              <v-icon
+                                v-bind="props"
+                                size="16"
+                                :color="getEpssSourceColor(vuln.details.epss_data_source)"
+                                class="epss-source-icon"
+                              >
+                                {{ getEpssSourceIcon(vuln.details.epss_data_source) }}
+                              </v-icon>
+                            </template>
+                            <span>{{ getEpssSourceDisplay(vuln.details.epss_data_source) }}</span>
+                          </v-tooltip>
+                        </div>
+                      </template>
+                    </v-list-item>
+                  </v-list>
+                </v-card-text>
+              </v-card>
+            </v-col>
+          </v-row>
         </v-col>
       </v-row>
 
       <!-- Activity and Quick Actions -->
       <v-row>
         <v-col cols="12">
+          <v-alert
+            v-if="blockErrors.threatIntel && !blockHasLoadedData('threatIntel')"
+            type="warning"
+            variant="tonal"
+            class="mb-4"
+          >
+            {{ blockErrors.threatIntel }}
+          </v-alert>
+          <v-skeleton-loader
+            v-else-if="isBlockInitialLoading('threatIntel')"
+            type="card"
+            class="dashboard-skeleton-card dashboard-skeleton-card--chart"
+          />
           <WeeklyThreatIntelCard
+            v-else
             :intel="dashboardData.weekly_threat_intel"
             :show-view-all="true"
             @view-all="viewAllThreatIntel"
@@ -254,7 +325,20 @@
 
       <v-row>
         <v-col cols="12" md="7">
-          <v-card class="chart-card" elevation="2">
+          <v-alert
+            v-if="blockErrors.analytics && !blockHasLoadedData('analytics')"
+            type="warning"
+            variant="tonal"
+            class="mb-4"
+          >
+            {{ blockErrors.analytics }}
+          </v-alert>
+          <v-skeleton-loader
+            v-else-if="isBlockInitialLoading('analytics')"
+            type="card"
+            class="dashboard-skeleton-card dashboard-skeleton-card--chart"
+          />
+          <v-card v-else class="chart-card" elevation="2">
             <v-card-title class="text-h6 font-weight-bold pa-4 pb-2">
               Weighted Risk Rankings
             </v-card-title>
@@ -328,7 +412,12 @@
         </v-col>
 
         <v-col cols="12" md="5">
-          <v-card class="chart-card" elevation="2">
+          <v-skeleton-loader
+            v-if="isBlockInitialLoading('analytics')"
+            type="card"
+            class="dashboard-skeleton-card dashboard-skeleton-card--chart"
+          />
+          <v-card v-else class="chart-card" elevation="2">
             <v-card-title class="text-h6 font-weight-bold pa-4 pb-2">
               Fixability Analytics
             </v-card-title>
@@ -374,9 +463,14 @@
         </v-col>
       </v-row>
 
-      <v-row>
+      <v-row v-if="!blockErrors.analytics || blockHasLoadedData('analytics')">
         <v-col cols="12">
-          <v-card class="chart-card" elevation="2">
+          <v-skeleton-loader
+            v-if="isBlockInitialLoading('analytics')"
+            type="card"
+            class="dashboard-skeleton-card dashboard-skeleton-card--table"
+          />
+          <v-card v-else class="chart-card" elevation="2">
             <v-card-title class="text-h6 font-weight-bold pa-4 pb-2">
               Recent Scan Changes
             </v-card-title>
@@ -433,7 +527,21 @@
       <!-- Activity and Quick Actions -->
       <v-row>
         <v-col cols="12" md="6">
+          <v-alert
+            v-if="blockErrors.activity && !blockHasLoadedData('activity')"
+            type="warning"
+            variant="tonal"
+            class="mb-4"
+          >
+            {{ blockErrors.activity }}
+          </v-alert>
+          <v-skeleton-loader
+            v-else-if="isBlockInitialLoading('activity')"
+            type="card"
+            class="dashboard-skeleton-card dashboard-skeleton-card--chart"
+          />
           <RecentActivityFeed
+            v-else
             :activities="dashboardData.recent_activities || []"
             :show-view-all="true"
             @view-all="viewAllRecentActivities"
@@ -518,9 +626,62 @@ const router = useRouter()
 const theme = useTheme()
 const themeStore = useThemeStore()
 
+type DashboardBlockKey =
+  | 'overview'
+  | 'visualizations'
+  | 'topLists'
+  | 'activity'
+  | 'threatIntel'
+  | 'analytics'
+
+type DashboardPayload = Record<string, any>
+
+const dashboardBlockConfig: Record<DashboardBlockKey, { endpoint: string; keys: string[] }> = {
+  overview: {
+    endpoint: 'stats/dashboard-overview/',
+    keys: ['basic_stats', 'security_metrics'],
+  },
+  visualizations: {
+    endpoint: 'stats/dashboard-visualizations/',
+    keys: ['severity_distribution', 'vulnerability_trends'],
+  },
+  topLists: {
+    endpoint: 'stats/dashboard-top-lists/',
+    keys: ['top_vulnerable_components', 'top_vulnerabilities_by_epss'],
+  },
+  activity: {
+    endpoint: 'stats/dashboard-activity/',
+    keys: ['recent_activities'],
+  },
+  threatIntel: {
+    endpoint: 'stats/dashboard-threat-intel/',
+    keys: ['weekly_threat_intel'],
+  },
+  analytics: {
+    endpoint: 'stats/dashboard-analytics/',
+    keys: ['risk_rankings', 'fixability_analytics', 'recent_scan_deltas'],
+  },
+}
+
 // Data
-const dashboardData = ref<any>({})
-const loading = ref(false)
+const dashboardData = ref<DashboardPayload>({})
+const blockLoading = ref<Record<DashboardBlockKey, boolean>>({
+  overview: false,
+  visualizations: false,
+  topLists: false,
+  activity: false,
+  threatIntel: false,
+  analytics: false,
+})
+const blockErrors = ref<Record<DashboardBlockKey, string | null>>({
+  overview: null,
+  visualizations: null,
+  topLists: null,
+  activity: null,
+  threatIntel: null,
+  analytics: null,
+})
+const loading = computed(() => Object.values(blockLoading.value).some(Boolean))
 const scanning = ref(false)
 const riskRankingTab = ref<'vulnerabilities' | 'repositories' | 'tags' | 'images' | 'releases'>('vulnerabilities')
 const riskRankingOptions = [
@@ -545,21 +706,50 @@ function handleKeydown(e: KeyboardEvent) {
   }
 }
 
-const fetchDashboardData = async () => {
-  loading.value = true
+const hasDashboardKey = (key: string) => Object.prototype.hasOwnProperty.call(dashboardData.value, key)
+
+const blockHasLoadedData = (block: DashboardBlockKey) => (
+  dashboardBlockConfig[block].keys.some((key) => hasDashboardKey(key))
+)
+
+const isBlockInitialLoading = (block: DashboardBlockKey) => (
+  blockLoading.value[block] && !blockHasLoadedData(block)
+)
+
+const fetchDashboardBlock = async (block: DashboardBlockKey) => {
+  blockLoading.value[block] = true
+  blockErrors.value[block] = null
+
   try {
-    const response = await api.get('stats/dashboard_metrics/')
-    dashboardData.value = response.data
+    const response = await api.get(dashboardBlockConfig[block].endpoint)
+    dashboardData.value = {
+      ...dashboardData.value,
+      ...response.data,
+    }
+    return true
   } catch (error) {
-    console.error('Error fetching dashboard data:', error)
-    notificationService.error('Failed to fetch dashboard data')
+    console.error(`Error fetching dashboard block "${block}":`, error)
+    blockErrors.value[block] = 'Failed to load this dashboard section.'
+    return false
   } finally {
-    loading.value = false
+    blockLoading.value[block] = false
   }
 }
 
-const refreshData = () => {
-  fetchDashboardData()
+const fetchDashboardData = async (notifyOnPartialFailure = false) => {
+  const results = await Promise.allSettled(
+    Object.keys(dashboardBlockConfig).map((block) => fetchDashboardBlock(block as DashboardBlockKey))
+  )
+
+  const hasFailures = results.some((result) => result.status === 'fulfilled' && result.value === false)
+  if (notifyOnPartialFailure && hasFailures) {
+    notificationService.error('Some dashboard sections failed to refresh.')
+  }
+}
+
+const refreshData = async () => {
+  if (loading.value) return
+  await fetchDashboardData(true)
 }
 
 const viewAllThreatIntel = () => {
@@ -908,6 +1098,18 @@ onUnmounted(() => {
 .status-count {
   color: #7f8c8d;
   font-size: 0.75rem;
+}
+
+.dashboard-skeleton-card {
+  border-radius: 12px;
+}
+
+.dashboard-skeleton-card--chart {
+  min-height: 320px;
+}
+
+.dashboard-skeleton-card--table {
+  min-height: 260px;
 }
 
 .quick-actions-card {
