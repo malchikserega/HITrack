@@ -105,6 +105,17 @@ export interface Vulnerability extends BaseEntity {
   updated_at: string
 }
 
+export interface VulnerabilityRiskPrioritization {
+  weighted_risk_score: number
+  currently_present: boolean
+  fixability_category: string
+  affected_repositories_count: number
+  affected_tags_count: number
+  affected_releases_count: number
+  affected_images_count: number
+  active_images_count: number
+}
+
 /**
  * Repository Tag interface
  */

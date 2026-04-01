@@ -192,6 +192,17 @@ class VulnerabilityDetailSerializer(VulnerabilitySerializer):
         return self._get_analytics(obj)['active_images_count']
 
 
+class VulnerabilityRiskPrioritizationSerializer(serializers.Serializer):
+    weighted_risk_score = serializers.FloatField()
+    currently_present = serializers.BooleanField()
+    fixability_category = serializers.CharField()
+    affected_repositories_count = serializers.IntegerField()
+    affected_tags_count = serializers.IntegerField()
+    affected_releases_count = serializers.IntegerField()
+    affected_images_count = serializers.IntegerField()
+    active_images_count = serializers.IntegerField()
+
+
 class VulnerabilityListSerializer(serializers.ModelSerializer):
     has_details = serializers.SerializerMethodField()
     exploit_available = serializers.SerializerMethodField()

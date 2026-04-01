@@ -14,7 +14,7 @@ from .serializers import (
     StatsResponseSerializer, JobAddRepositoriesRequestSerializer,
     JobAddRepositoriesResponseSerializer, ImageDropdownSerializer,
     ReleaseSerializer, RepositoryTagReleaseSerializer, ReleaseAssignmentSerializer,
-    VulnerabilityListSerializer, VulnerabilityDetailsSerializer, VulnerabilityDetailSerializer,
+    VulnerabilityListSerializer, VulnerabilityDetailsSerializer, VulnerabilityDetailSerializer, VulnerabilityRiskPrioritizationSerializer,
     TaskResultSerializer, TaskResultListSerializer, PeriodicTaskSerializer, TaskStatisticsSerializer,
     ComponentLocationSerializer, VulnerabilityAffectedImageSerializer,
     ImageComparisonGroupSerializer
@@ -44,6 +44,7 @@ from .utils.analytics import (
     build_dashboard_risk_rankings,
     build_recent_scan_deltas,
     build_release_delta_summary,
+    build_vulnerability_detail_analytics,
 )
 
 logger = logging.getLogger(__name__)
@@ -2545,8 +2546,18 @@ class VulnerabilityViewSet(BaseViewSet):
         if self.action == 'list':
             return VulnerabilityListSerializer
         if self.action == 'retrieve':
+            include_analytics = self.request.query_params.get('include_analytics', '1').lower()
+            if include_analytics in {'0', 'false', 'no'}:
+                return VulnerabilitySerializer
             return VulnerabilityDetailSerializer
         return VulnerabilitySerializer
+
+    @action(detail=True, methods=['get'], url_path='risk-prioritization')
+    def risk_prioritization(self, request, uuid=None):
+        vulnerability = self.get_object()
+        payload = build_vulnerability_detail_analytics(vulnerability)
+        serializer = VulnerabilityRiskPrioritizationSerializer(payload)
+        return Response(serializer.data)
 
     @method_decorator(cache_page(60))
     @action(detail=False, methods=['get'])
