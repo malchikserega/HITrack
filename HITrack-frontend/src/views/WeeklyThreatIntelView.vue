@@ -5,7 +5,7 @@
         <div>
           <h1 class="text-h4 font-weight-bold mb-2">Weekly Threat Intel</h1>
           <p class="text-body-1 text-medium-emphasis">
-            Full weekly view of observed vulnerabilities, new KEV entries, and supply-chain advisories.
+            Full weekly view of observed vulnerabilities, new KEV entries, and supply-chain advisories enriched from GitHub and OSV.
           </p>
         </div>
         <v-btn
@@ -90,6 +90,21 @@
 
             <template #item.context="{ item }">
               <div class="context-cell">{{ item.context || '-' }}</div>
+            </template>
+
+            <template #item.attributes="{ item }">
+              <div v-if="getAttributeChips(item).length" class="attribute-cell">
+                <v-chip
+                  v-for="tag in getAttributeChips(item)"
+                  :key="`${item.id}-${tag}`"
+                  size="x-small"
+                  variant="outlined"
+                  :color="getAttributeColor(tag)"
+                >
+                  {{ tag }}
+                </v-chip>
+              </div>
+              <span v-else class="text-medium-emphasis">-</span>
             </template>
 
             <template #item.timestamp="{ item }">
@@ -197,6 +212,7 @@ const headers: DataTableHeader[] = [
   { title: 'Item', key: 'identifier', sortable: false, minWidth: 260 },
   { title: 'Type', key: 'type', sortable: false, width: 170 },
   { title: 'Context', key: 'context', sortable: false, minWidth: 280 },
+  { title: 'Attributes', key: 'attributes', sortable: false, minWidth: 250 },
   { title: 'When', key: 'timestamp', sortable: false, width: 220 },
   { title: 'HITrack', key: 'hitrack', sortable: false, width: 160 },
   { title: 'Signal', key: 'severity', sortable: false, width: 150 },
@@ -221,6 +237,12 @@ const formattedPeriod = computed(() => {
 
 const relevantTooltip = 'Matched in HITrack historical data at least once.'
 const presentTooltip = 'Currently linked to scanned images in HITrack.'
+
+const getAttributeChips = (item: WeeklyThreatIntelListItem) => {
+  const sourceLabels = item.source_labels || []
+  const tags = item.tags || []
+  return [...new Set([...sourceLabels, ...tags])].slice(0, 6)
+}
 
 const fetchThreatIntel = async () => {
   loading.value = true
@@ -328,6 +350,18 @@ const getSignalColor = (item: WeeklyThreatIntelListItem) => {
   return getSeverityColor(item.severity || 'UNKNOWN')
 }
 
+const getAttributeColor = (tag: string) => {
+  const normalized = tag.toLowerCase()
+  if (normalized === 'osv') return 'info'
+  if (normalized === 'github') return 'secondary'
+  if (normalized === 'cisa kev') return 'error'
+  if (normalized === 'malware') return 'error'
+  if (normalized.includes('fix available')) return 'success'
+  if (normalized.includes('no fix')) return 'error'
+  if (normalized.includes('severity:')) return 'warning'
+  return 'default'
+}
+
 watch(selectedIntelType, () => {
   if (page.value !== 1) {
     page.value = 1
@@ -399,6 +433,13 @@ onMounted(fetchThreatIntel)
 .context-cell {
   white-space: normal;
   line-height: 1.35;
+}
+
+.attribute-cell {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-height: 32px;
 }
 
 .presence-cell {

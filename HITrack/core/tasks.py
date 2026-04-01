@@ -1202,6 +1202,42 @@ def _merge_duplicate_image_group(images, normalized_digest):
     }
 
 
+def _capture_repository_tag_scan_snapshot(tag_id):
+    from .models import RepositoryTag, RepositoryTagScanSnapshot
+    from .utils.analytics import (
+        build_repository_tag_scan_summary,
+        compare_vulnerability_states,
+    )
+
+    tag = RepositoryTag.objects.get(pk=tag_id)
+    current_summary = build_repository_tag_scan_summary(tag)
+    previous_snapshot = tag.scan_snapshots.order_by('-created_at').first()
+    previous_state = previous_snapshot.vulnerability_state if previous_snapshot else {}
+    delta = compare_vulnerability_states(previous_state, current_summary['vulnerability_state'])
+    risk_score_delta = current_summary['weighted_risk_score'] - (
+        previous_snapshot.weighted_risk_score if previous_snapshot else 0.0
+    )
+
+    return RepositoryTagScanSnapshot.objects.create(
+        repository_tag=tag,
+        processing_status=current_summary['processing_status'],
+        total_images=current_summary['total_images'],
+        successful_images=current_summary['successful_images'],
+        unique_vulnerabilities_count=current_summary['unique_vulnerabilities_count'],
+        weighted_risk_score=current_summary['weighted_risk_score'],
+        previous_unique_vulnerabilities_count=delta['previous_unique_vulnerabilities_count'],
+        new_vulnerabilities_count=delta['new_vulnerabilities_count'],
+        fixed_vulnerabilities_count=delta['fixed_vulnerabilities_count'],
+        severity_increased_count=delta['severity_increased_count'],
+        new_kev_relevant_count=delta['new_kev_relevant_count'],
+        risk_score_delta=round(risk_score_delta, 2),
+        has_changes=delta['has_changes'] or round(risk_score_delta, 2) != 0,
+        fixability_breakdown=current_summary['fixability_breakdown'],
+        vulnerability_state=current_summary['vulnerability_state'],
+        delta_summary=delta['delta_summary'],
+    )
+
+
 def _sync_repository_tag_processing_statuses(tag_ids):
     from .models import RepositoryTag
 
@@ -1221,6 +1257,7 @@ def _sync_repository_tag_processing_statuses(tag_ids):
     now = timezone.now()
     updated_tags = []
     resolved_statuses = {}
+    snapshot_tag_ids = []
 
     for tag in status_rows:
         new_status = resolve_repository_tag_processing_status(
@@ -1233,12 +1270,20 @@ def _sync_repository_tag_processing_statuses(tag_ids):
         )
         resolved_statuses[str(tag.pk)] = new_status
         if tag.processing_status != new_status:
+            if new_status == 'success':
+                snapshot_tag_ids.append(tag.pk)
             tag.processing_status = new_status
             tag.updated_at = now
             updated_tags.append(tag)
 
     if updated_tags:
         RepositoryTag.objects.bulk_update(updated_tags, ['processing_status', 'updated_at'])
+
+    for tag_id in snapshot_tag_ids:
+        try:
+            _capture_repository_tag_scan_snapshot(tag_id)
+        except Exception as exc:
+            logger.error("Failed to capture repository tag snapshot for %s: %s", tag_id, exc)
 
     return resolved_statuses
 
@@ -3381,6 +3426,10 @@ def process_single_tag(tag_uuid: str):
         if total_images_linked == 0:
             tag.processing_status = 'success'
             tag.save(update_fields=['processing_status', 'updated_at'])
+            try:
+                _capture_repository_tag_scan_snapshot(tag.pk)
+            except Exception as exc:
+                logger.error("Failed to capture empty tag snapshot for %s: %s", tag.pk, exc)
         else:
             synced_statuses = _sync_repository_tag_processing_statuses(
                 list({tag.pk, *repaired_tag_ids})

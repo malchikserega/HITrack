@@ -8,6 +8,10 @@ from .utils.status import (
     resolve_repository_scan_status,
     resolve_repository_tag_processing_status,
 )
+from .utils.analytics import (
+    build_repository_exposure_summary,
+    build_vulnerability_detail_analytics,
+)
 # Celery Task Serializers
 from django_celery_results.models import TaskResult
 from django_celery_beat.models import PeriodicTask, IntervalSchedule, CrontabSchedule
@@ -131,6 +135,61 @@ class VulnerabilitySerializer(serializers.ModelSerializer):
             return bool(obj.details)
         except VulnerabilityDetails.DoesNotExist:
             return False
+
+
+class VulnerabilityDetailSerializer(VulnerabilitySerializer):
+    weighted_risk_score = serializers.SerializerMethodField()
+    currently_present = serializers.SerializerMethodField()
+    fixability_category = serializers.SerializerMethodField()
+    affected_repositories_count = serializers.SerializerMethodField()
+    affected_tags_count = serializers.SerializerMethodField()
+    affected_releases_count = serializers.SerializerMethodField()
+    affected_images_count = serializers.SerializerMethodField()
+    active_images_count = serializers.SerializerMethodField()
+
+    class Meta(VulnerabilitySerializer.Meta):
+        fields = VulnerabilitySerializer.Meta.fields + [
+            'weighted_risk_score',
+            'currently_present',
+            'fixability_category',
+            'affected_repositories_count',
+            'affected_tags_count',
+            'affected_releases_count',
+            'affected_images_count',
+            'active_images_count',
+        ]
+
+    def _get_analytics(self, obj):
+        analytics = getattr(obj, '_vulnerability_detail_analytics_cache', None)
+        if analytics is not None:
+            return analytics
+        analytics = build_vulnerability_detail_analytics(obj)
+        obj._vulnerability_detail_analytics_cache = analytics
+        return analytics
+
+    def get_weighted_risk_score(self, obj):
+        return self._get_analytics(obj)['weighted_risk_score']
+
+    def get_currently_present(self, obj):
+        return self._get_analytics(obj)['currently_present']
+
+    def get_fixability_category(self, obj):
+        return self._get_analytics(obj)['fixability_category']
+
+    def get_affected_repositories_count(self, obj):
+        return self._get_analytics(obj)['affected_repositories_count']
+
+    def get_affected_tags_count(self, obj):
+        return self._get_analytics(obj)['affected_tags_count']
+
+    def get_affected_releases_count(self, obj):
+        return self._get_analytics(obj)['affected_releases_count']
+
+    def get_affected_images_count(self, obj):
+        return self._get_analytics(obj)['affected_images_count']
+
+    def get_active_images_count(self, obj):
+        return self._get_analytics(obj)['active_images_count']
 
 
 class VulnerabilityListSerializer(serializers.ModelSerializer):
@@ -869,13 +928,17 @@ class RepositoryDetailSerializer(serializers.ModelSerializer):
     last_scanned = serializers.DateTimeField(read_only=True)
     image_fallback_repositories = serializers.SerializerMethodField()
     container_registry = serializers.UUIDField(source='container_registry_id', read_only=True)
+    current_unique_vulnerabilities_count = serializers.SerializerMethodField()
+    active_images_count = serializers.SerializerMethodField()
+    weighted_risk_score = serializers.SerializerMethodField()
 
     class Meta:
         model = Repository
         fields = [
             'uuid', 'name', 'url', 'repo_key', 'repository_type', 'tag_count',
             'scan_status', 'last_scanned', 'image_fallback_repositories',
-            'container_registry', 'created_at', 'updated_at'
+            'container_registry', 'current_unique_vulnerabilities_count',
+            'active_images_count', 'weighted_risk_score', 'created_at', 'updated_at'
         ]
         read_only_fields = ['created_at', 'updated_at', 'uuid']
 
@@ -895,6 +958,23 @@ class RepositoryDetailSerializer(serializers.ModelSerializer):
             {'uuid': str(r.uuid), 'name': r.name}
             for r in obj.image_fallback_repositories.all()
         ]
+
+    def _get_exposure_summary(self, obj):
+        summary = getattr(obj, '_repository_exposure_summary_cache', None)
+        if summary is not None:
+            return summary
+        summary = build_repository_exposure_summary(obj)
+        obj._repository_exposure_summary_cache = summary
+        return summary
+
+    def get_current_unique_vulnerabilities_count(self, obj):
+        return self._get_exposure_summary(obj)['current_unique_vulnerabilities_count']
+
+    def get_active_images_count(self, obj):
+        return self._get_exposure_summary(obj)['active_images_count']
+
+    def get_weighted_risk_score(self, obj):
+        return self._get_exposure_summary(obj)['weighted_risk_score']
 
 
 class RepositoryListSerializer(serializers.ModelSerializer):

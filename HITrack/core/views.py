@@ -14,7 +14,7 @@ from .serializers import (
     StatsResponseSerializer, JobAddRepositoriesRequestSerializer,
     JobAddRepositoriesResponseSerializer, ImageDropdownSerializer,
     ReleaseSerializer, RepositoryTagReleaseSerializer, ReleaseAssignmentSerializer,
-    VulnerabilityListSerializer, VulnerabilityDetailsSerializer,
+    VulnerabilityListSerializer, VulnerabilityDetailsSerializer, VulnerabilityDetailSerializer,
     TaskResultSerializer, TaskResultListSerializer, PeriodicTaskSerializer, TaskStatisticsSerializer,
     ComponentLocationSerializer, VulnerabilityAffectedImageSerializer
 )
@@ -38,6 +38,12 @@ import logging
 from django.conf import settings
 from .utils.status import resolve_repository_tag_processing_status
 from .utils.threat_intel import get_dashboard_weekly_threat_intel
+from .utils.analytics import (
+    build_dashboard_fixability_analytics,
+    build_dashboard_risk_rankings,
+    build_recent_scan_deltas,
+    build_release_delta_summary,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +209,14 @@ def _build_weekly_threat_intel_rows(summary, intel_type='all'):
                 'external_url': None,
                 'relevant_in_hitrack': bool(entry.get('relevant_in_hitrack', True)),
                 'currently_present': bool(entry.get('currently_present')),
+                'source_labels': ['HITrack'],
+                'tags': [
+                    tag for tag in [
+                        entry.get('type'),
+                        'KEV' if entry.get('cisa_kev') else None,
+                        'Exploit available' if entry.get('exploit_available') else None,
+                    ] if tag
+                ],
             })
 
     if selected_type in {'all', 'kev'}:
@@ -224,6 +238,13 @@ def _build_weekly_threat_intel_rows(summary, intel_type='all'):
                 'external_url': entry.get('url'),
                 'relevant_in_hitrack': bool(entry.get('relevant_in_hitrack')),
                 'currently_present': bool(entry.get('currently_present')),
+                'source_labels': ['CISA KEV'],
+                'tags': [
+                    tag for tag in [
+                        'CISA KEV',
+                        'Ransomware' if entry.get('ransomware_use') == 'Known' else None,
+                    ] if tag
+                ],
             })
 
     if selected_type in {'all', 'supply_chain'}:
@@ -238,9 +259,9 @@ def _build_weekly_threat_intel_rows(summary, intel_type='all'):
             rows.append({
                 'id': f"supply_chain:{entry.get('advisory_id') or entry.get('url')}",
                 'type': 'supply_chain',
-                'identifier': entry.get('advisory_id') or 'Advisory',
-                'title': entry.get('title') or entry.get('advisory_id') or 'Supply-chain advisory',
-                'context': " · ".join(part for part in context_parts if part) or 'GitHub Advisory',
+                'identifier': entry.get('advisory_id') or entry.get('osv_id') or 'Advisory',
+                'title': entry.get('title') or entry.get('advisory_id') or entry.get('osv_id') or 'Supply-chain advisory',
+                'context': " · ".join(part for part in context_parts if part) or ", ".join(entry.get('source_labels') or []) or 'Supply-chain advisory',
                 'timestamp': entry.get('published_at'),
                 'severity': entry.get('severity') or ('MALWARE' if entry.get('type') == 'malware' else None),
                 'target_type': entry.get('target_type'),
@@ -248,6 +269,8 @@ def _build_weekly_threat_intel_rows(summary, intel_type='all'):
                 'external_url': entry.get('url'),
                 'relevant_in_hitrack': bool(entry.get('relevant_in_hitrack')),
                 'currently_present': bool(entry.get('currently_present')),
+                'source_labels': entry.get('source_labels') or [],
+                'tags': entry.get('tags') or [],
             })
 
     rows.sort(key=lambda item: _parse_threat_intel_timestamp(item.get('timestamp')), reverse=True)
@@ -1954,6 +1977,7 @@ class ReleaseViewSet(BaseViewSet):
         )
         _attach_repository_tag_summary_data(tags)
         serialized_tags, summary = _build_release_repository_tag_payload(tags)
+        analytics = build_release_delta_summary(release)
 
         return Response({
             'release': {
@@ -1963,6 +1987,11 @@ class ReleaseViewSet(BaseViewSet):
                 'created_at': release.created_at,
             },
             'summary': summary,
+            'analytics': analytics['current'],
+            'delta_from_previous_release': {
+                'previous_release': analytics['previous_release'],
+                **analytics['delta'],
+            },
             'tags': serialized_tags,
         })
 
@@ -2176,6 +2205,8 @@ class VulnerabilityViewSet(BaseViewSet):
     def get_serializer_class(self):
         if self.action == 'list':
             return VulnerabilityListSerializer
+        if self.action == 'retrieve':
+            return VulnerabilityDetailSerializer
         return VulnerabilitySerializer
 
     @method_decorator(cache_page(60))
@@ -2572,6 +2603,9 @@ class StatsViewSet(viewsets.ViewSet):
             activity['status'] = activity.pop('activity_status')
 
         weekly_threat_intel = get_dashboard_weekly_threat_intel(limit=5)
+        risk_rankings = build_dashboard_risk_rankings(limit=5)
+        fixability_analytics = build_dashboard_fixability_analytics()
+        recent_scan_deltas = build_recent_scan_deltas(limit=10)
         
         return Response({
             'basic_stats': {
@@ -2617,6 +2651,9 @@ class StatsViewSet(viewsets.ViewSet):
             ],
             'recent_activities': recent_activities[:10],
             'weekly_threat_intel': weekly_threat_intel,
+            'risk_rankings': risk_rankings,
+            'fixability_analytics': fixability_analytics,
+            'recent_scan_deltas': recent_scan_deltas,
         })
 
     @method_decorator(cache_page(60))

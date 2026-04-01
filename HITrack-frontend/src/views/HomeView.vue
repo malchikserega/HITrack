@@ -252,6 +252,184 @@
         </v-col>
       </v-row>
 
+      <v-row>
+        <v-col cols="12" md="7">
+          <v-card class="chart-card" elevation="2">
+            <v-card-title class="text-h6 font-weight-bold pa-4 pb-2">
+              Weighted Risk Rankings
+            </v-card-title>
+            <v-card-text class="pa-4 pt-0">
+              <div class="d-flex flex-wrap ga-2 mb-4">
+                <v-btn
+                  v-for="option in riskRankingOptions"
+                  :key="option.value"
+                  :color="riskRankingTab === option.value ? 'primary' : 'default'"
+                  :variant="riskRankingTab === option.value ? 'tonal' : 'outlined'"
+                  size="small"
+                  @click="riskRankingTab = option.value"
+                >
+                  {{ option.label }}
+                </v-btn>
+              </div>
+
+              <div v-if="!activeRiskRankingItems.length" class="text-center pa-8">
+                <v-icon size="48" color="grey">mdi-finance</v-icon>
+                <p class="text-body-2 text-medium-emphasis mt-2">No ranked assets available</p>
+              </div>
+
+              <v-list v-else class="risk-ranking-list">
+                <v-list-item
+                  v-for="(item, index) in activeRiskRankingItems"
+                  :key="`${riskRankingTab}-${item.uuid}`"
+                  class="risk-ranking-item"
+                  :class="{ clickable: isRiskItemNavigable(item) }"
+                  @click="navigateToRiskAsset(item)"
+                >
+                  <template #prepend>
+                    <v-avatar color="primary" size="32">
+                      <span class="text-white font-weight-bold">{{ index + 1 }}</span>
+                    </v-avatar>
+                  </template>
+
+                  <v-list-item-title class="font-weight-medium">
+                    {{ item.name }}
+                  </v-list-item-title>
+                  <v-list-item-subtitle>
+                    {{ getRiskItemSubtitle(item) }}
+                  </v-list-item-subtitle>
+
+                  <template #append>
+                    <div class="d-flex align-center ga-2 flex-wrap justify-end">
+                      <v-chip size="small" color="primary" variant="tonal">
+                        Risk {{ formatRiskScore(item.weighted_risk_score) }}
+                      </v-chip>
+                      <v-chip
+                        v-if="item.critical_vulnerabilities"
+                        size="small"
+                        color="error"
+                        variant="tonal"
+                      >
+                        {{ item.critical_vulnerabilities }} critical
+                      </v-chip>
+                      <v-chip
+                        v-if="item.kev_vulnerabilities"
+                        size="small"
+                        color="warning"
+                        variant="tonal"
+                      >
+                        {{ item.kev_vulnerabilities }} KEV
+                      </v-chip>
+                    </div>
+                  </template>
+                </v-list-item>
+              </v-list>
+            </v-card-text>
+          </v-card>
+        </v-col>
+
+        <v-col cols="12" md="5">
+          <v-card class="chart-card" elevation="2">
+            <v-card-title class="text-h6 font-weight-bold pa-4 pb-2">
+              Fixability Analytics
+            </v-card-title>
+            <v-card-text class="pa-4 pt-0">
+              <div class="fixability-chip-grid">
+                <v-chip color="success" variant="tonal">
+                  Fixable now: {{ dashboardData.fixability_analytics?.breakdown?.fixable_now || 0 }}
+                </v-chip>
+                <v-chip color="warning" variant="tonal">
+                  Not in repo: {{ dashboardData.fixability_analytics?.breakdown?.fix_exists_but_not_in_repo || 0 }}
+                </v-chip>
+                <v-chip color="error" variant="tonal">
+                  No fix: {{ dashboardData.fixability_analytics?.breakdown?.no_fix || 0 }}
+                </v-chip>
+                <v-chip color="grey" variant="tonal">
+                  Unknown: {{ dashboardData.fixability_analytics?.breakdown?.fix_unknown || 0 }}
+                </v-chip>
+              </div>
+
+              <v-divider class="my-4" />
+
+              <div class="text-subtitle-2 font-weight-medium mb-2">
+                Age Of Fixable Critical/High
+              </div>
+              <div
+                v-for="bucket in dashboardData.fixability_analytics?.critical_high_fixable_age_buckets || []"
+                :key="bucket.label"
+                class="fixability-age-row"
+              >
+                <div class="d-flex justify-space-between text-body-2 mb-1">
+                  <span>{{ bucket.label }}</span>
+                  <span>{{ bucket.count }}</span>
+                </div>
+                <v-progress-linear
+                  :model-value="getFixabilityBucketPercent(bucket.count)"
+                  color="primary"
+                  rounded
+                  height="8"
+                />
+              </div>
+            </v-card-text>
+          </v-card>
+        </v-col>
+      </v-row>
+
+      <v-row>
+        <v-col cols="12">
+          <v-card class="chart-card" elevation="2">
+            <v-card-title class="text-h6 font-weight-bold pa-4 pb-2">
+              Recent Scan Changes
+            </v-card-title>
+            <v-card-text class="pa-0">
+              <div v-if="!(dashboardData.recent_scan_deltas || []).length" class="text-center pa-8">
+                <v-icon size="48" color="grey">mdi-chart-timeline-variant</v-icon>
+                <p class="text-body-2 text-medium-emphasis mt-2">No material scan deltas captured yet</p>
+              </div>
+              <v-table v-else density="compact" class="recent-scan-deltas-table">
+                <thead>
+                  <tr>
+                    <th>Tag</th>
+                    <th>New</th>
+                    <th>Fixed</th>
+                    <th>Severity Up</th>
+                    <th>New KEV</th>
+                    <th>Risk Delta</th>
+                    <th>When</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr
+                    v-for="item in dashboardData.recent_scan_deltas"
+                    :key="item.uuid"
+                    class="scan-delta-row"
+                    @click="openScanDelta(item)"
+                  >
+                    <td>
+                      <div class="font-weight-medium">{{ item.repository_name }}</div>
+                      <div class="text-caption text-medium-emphasis">{{ item.tag }}</div>
+                    </td>
+                    <td>{{ item.new_vulnerabilities_count }}</td>
+                    <td>{{ item.fixed_vulnerabilities_count }}</td>
+                    <td>{{ item.severity_increased_count }}</td>
+                    <td>{{ item.new_kev_relevant_count }}</td>
+                    <td>
+                      <v-chip
+                        size="small"
+                        :color="item.risk_score_delta >= 0 ? 'error' : 'success'"
+                        variant="tonal"
+                      >
+                        {{ formatRiskDelta(item.risk_score_delta) }}
+                      </v-chip>
+                    </td>
+                    <td>{{ $formatDate(item.timestamp) }}</td>
+                  </tr>
+                </tbody>
+              </v-table>
+            </v-card-text>
+          </v-card>
+        </v-col>
+      </v-row>
+
       <!-- Activity and Quick Actions -->
       <v-row>
         <v-col cols="12" md="6">
@@ -321,7 +499,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '../plugins/axios'
 import { notificationService } from '../plugins/notifications'
@@ -344,6 +522,14 @@ const themeStore = useThemeStore()
 const dashboardData = ref<any>({})
 const loading = ref(false)
 const scanning = ref(false)
+const riskRankingTab = ref<'vulnerabilities' | 'repositories' | 'tags' | 'images' | 'releases'>('vulnerabilities')
+const riskRankingOptions = [
+  { label: 'Vulnerabilities', value: 'vulnerabilities' },
+  { label: 'Repositories', value: 'repositories' },
+  { label: 'Tags', value: 'tags' },
+  { label: 'Images', value: 'images' },
+  { label: 'Releases', value: 'releases' },
+] as const
 
 // Easter egg
 let keyBuffer = ''
@@ -432,6 +618,63 @@ const viewAllRecentActivities = () => {
   router.push('/activities')
 }
 
+const activeRiskRankingItems = computed(() => (
+  dashboardData.value?.risk_rankings?.[riskRankingTab.value] || []
+))
+
+const getRiskItemSubtitle = (item: any) => {
+  if (item.asset_type === 'vulnerability') {
+    return `${item.severity || 'UNKNOWN'} · ${item.currently_present ? 'currently present' : 'historical only'}`
+  }
+  return `${item.unique_vulnerabilities || 0} unique vulnerabilities`
+}
+
+const isRiskItemNavigable = (item: any) => {
+  return ['vulnerability', 'repository', 'repository_tag', 'image', 'release'].includes(item.asset_type)
+}
+
+const navigateToRiskAsset = (item: any) => {
+  if (!item?.uuid) return
+  switch (item.asset_type) {
+    case 'vulnerability':
+      router.push(`/vulnerabilities/${item.uuid}`)
+      break
+    case 'repository':
+      router.push(`/repositories/${item.uuid}`)
+      break
+    case 'repository_tag':
+      router.push(`/repository-tags/${item.uuid}/images`)
+      break
+    case 'image':
+      router.push(`/images/${item.uuid}`)
+      break
+    case 'release':
+      router.push('/releases')
+      break
+    default:
+      break
+  }
+}
+
+const openScanDelta = (item: any) => {
+  if (!item?.tag_uuid) return
+  router.push(`/repository-tags/${item.tag_uuid}/images`)
+}
+
+const formatRiskScore = (value: number) => Number(value || 0).toFixed(1)
+
+const formatRiskDelta = (value: number) => {
+  const numericValue = Number(value || 0)
+  return `${numericValue >= 0 ? '+' : ''}${numericValue.toFixed(1)}`
+}
+
+const getFixabilityBucketPercent = (count: number) => {
+  const buckets = dashboardData.value?.fixability_analytics?.critical_high_fixable_age_buckets || []
+  const maxCount = Math.max(...buckets.map((bucket: any) => bucket.count || 0), 0)
+  if (maxCount === 0) return 0
+  return (count / maxCount) * 100
+}
+
 const viewVulnerabilitiesWithDetails = () => {
   router.push('/vulnerabilities?has_details=true')
 }
@@ -516,6 +759,26 @@ onUnmounted(() => {
 .v-theme--matrix .quick-actions-card {
   background: #000 !important;
   border: 1px solid #39FF14 !important;
+}
+
+.risk-ranking-item.clickable,
+.scan-delta-row {
+  cursor: pointer;
+}
+
+.fixability-chip-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.fixability-age-row + .fixability-age-row {
+  margin-top: 12px;
+}
+
+.recent-scan-deltas-table th,
+.recent-scan-deltas-table td {
+  white-space: nowrap;
 }
 
 /* Matrix theme for all cards */

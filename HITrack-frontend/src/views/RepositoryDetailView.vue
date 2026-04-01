@@ -17,6 +17,15 @@
           <v-chip class="mr-2">Type: {{ repository?.repository_type }}</v-chip>
           <v-chip class="mr-2">Tags: {{ repository?.tag_count }}</v-chip>
           <v-chip class="mr-2">URL: {{ repository?.url }}</v-chip>
+          <v-chip class="mr-2" color="primary" variant="tonal">
+            Current vulns: {{ repository?.current_unique_vulnerabilities_count || 0 }}
+          </v-chip>
+          <v-chip class="mr-2" color="error" variant="tonal">
+            Risk score: {{ formatRiskScore(repository?.weighted_risk_score) }}
+          </v-chip>
+          <v-chip class="mr-2" color="info" variant="tonal">
+            Active images: {{ repository?.active_images_count || 0 }}
+          </v-chip>
         </div>
         <!-- Helm: Image fallback Docker repositories are managed at registry level -->
         <v-row v-if="repository?.repository_type === 'helm'" class="mt-4">
@@ -880,6 +889,7 @@ const loadRegistryFallbacks = async () => {
 }
 
 const goBack = () => router.back()
+const formatRiskScore = (value: number | string | null | undefined) => Number(value || 0).toFixed(1)
 const navigateToTagImages = (item: any) => {
   router.push({ name: 'tag-images', params: { uuid: item.uuid } })
 }

@@ -290,7 +290,21 @@
                   {{ entry.advisory_id || 'Advisory' }}
                 </v-list-item-title>
                 <v-list-item-subtitle class="intel-item__subtitle">
-                  {{ entry.packages?.length ? entry.packages.slice(0, 2).join(', ') : entry.title }}
+                  <div>{{ entry.packages?.length ? entry.packages.slice(0, 2).join(', ') : entry.title }}</div>
+                  <div
+                    v-if="getSupplyChainChips(entry).length"
+                    class="intel-item__tags"
+                  >
+                    <v-chip
+                      v-for="tag in getSupplyChainChips(entry)"
+                      :key="`${entry.advisory_id || entry.url}-${tag}`"
+                      size="x-small"
+                      variant="outlined"
+                      :color="getSupplyChainTagColor(tag)"
+                    >
+                      {{ tag }}
+                    </v-chip>
+                  </div>
                 </v-list-item-subtitle>
                 <template #append>
                   <div class="intel-item__meta">
@@ -377,15 +391,20 @@ interface KevThreatEntry {
 
 interface SupplyChainEntry {
   advisory_id?: string | null
+  osv_id?: string | null
   ghsa_id?: string | null
   cve_id?: string | null
+  aliases?: string[]
   title: string
   severity?: string | null
   ecosystem: string
   type: string
   packages?: string[]
   published_at?: string | null
+  modified_at?: string | null
   url?: string | null
+  source_labels?: string[]
+  tags?: string[]
   relevant_in_hitrack?: boolean
   currently_present?: boolean
   target_uuid?: string | null
@@ -440,9 +459,27 @@ const formattedPeriod = computed(() => {
 
 const observedTooltip = 'Vulnerabilities first seen in HITrack during the current week.'
 const kevTooltip = 'New entries added to the official CISA Known Exploited Vulnerabilities catalog this week.'
-const supplyChainTooltip = 'New weekly package or malware advisories from external supply-chain sources such as GitHub Advisory data.'
+const supplyChainTooltip = 'New weekly package or malware advisories from external supply-chain sources such as GitHub Advisory data and OSV.'
 const relevantTooltip = 'This external advisory matches a vulnerability that exists in HITrack at least once in historical data.'
 const presentTooltip = 'This external advisory matches a vulnerability that is currently present in scanned images linked in HITrack.'
+
+const getSupplyChainChips = (entry: SupplyChainEntry) => {
+  const sourceLabels = entry.source_labels || []
+  const tags = (entry.tags || []).filter(
+    (tag) => !sourceLabels.includes(tag) && !tag.startsWith('Severity:')
+  )
+  return [...sourceLabels, ...tags].slice(0, 4)
+}
+
+const getSupplyChainTagColor = (tag: string) => {
+  const normalized = tag.toLowerCase()
+  if (normalized === 'osv') return 'info'
+  if (normalized === 'github') return 'secondary'
+  if (normalized === 'malware') return 'error'
+  if (normalized.includes('fix available')) return 'success'
+  if (normalized.includes('no fix')) return 'error'
+  return 'default'
+}
 
 const openLocalVulnerability = (uuid?: string) => {
   if (!uuid) return
@@ -537,6 +574,13 @@ const openExternal = (url?: string | null) => {
 
 .intel-item__subtitle {
   line-height: 1.25;
+}
+
+.intel-item__tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
 }
 
 .intel-item__meta {

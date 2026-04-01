@@ -185,7 +185,7 @@ def build_live_weekly_threat_intel_summary(limit: int | None = 5) -> Dict:
         kev_summary = {'count': 0, 'entries': []}
 
     try:
-        supply_chain_summary = collector.get_weekly_github_supply_chain_advisories(
+        supply_chain_summary = collector.get_weekly_supply_chain_advisories(
             week_start,
             week_end,
             limit=None,
@@ -202,8 +202,10 @@ def build_live_weekly_threat_intel_summary(limit: int | None = 5) -> Dict:
         supply_chain_summary.get('entries', []),
         lambda entry: [
             entry.get('advisory_id'),
+            entry.get('osv_id'),
             entry.get('ghsa_id'),
             entry.get('cve_id'),
+            *(entry.get('aliases') or []),
         ],
         total_count=supply_chain_summary.get('count'),
     )

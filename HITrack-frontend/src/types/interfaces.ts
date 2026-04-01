@@ -93,6 +93,14 @@ export interface Vulnerability extends BaseEntity {
   has_details: boolean
   exploit_available: boolean
   cisa_kev: boolean
+  weighted_risk_score?: number
+  currently_present?: boolean
+  fixability_category?: string
+  affected_repositories_count?: number
+  affected_tags_count?: number
+  affected_releases_count?: number
+  affected_images_count?: number
+  active_images_count?: number
   created_at: string
   updated_at: string
 }
@@ -213,6 +221,8 @@ export interface WeeklyThreatIntelListItem {
   context: string
   timestamp: string
   severity?: string | null
+  source_labels?: string[]
+  tags?: string[]
   relevant_in_hitrack?: boolean
   currently_present?: boolean
   target_type?: 'vulnerability' | null

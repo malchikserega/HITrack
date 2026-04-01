@@ -110,6 +110,43 @@ class RepositoryTag(models.Model):
         return f"{self.repository.name}:{self.tag}"
 
 
+class RepositoryTagScanSnapshot(models.Model):
+    uuid = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    repository_tag = models.ForeignKey(
+        RepositoryTag,
+        on_delete=models.CASCADE,
+        related_name='scan_snapshots',
+    )
+    processing_status = models.CharField(max_length=32, default='success')
+    total_images = models.IntegerField(default=0)
+    successful_images = models.IntegerField(default=0)
+    unique_vulnerabilities_count = models.IntegerField(default=0)
+    weighted_risk_score = models.FloatField(default=0.0)
+    previous_unique_vulnerabilities_count = models.IntegerField(default=0)
+    new_vulnerabilities_count = models.IntegerField(default=0)
+    fixed_vulnerabilities_count = models.IntegerField(default=0)
+    severity_increased_count = models.IntegerField(default=0)
+    new_kev_relevant_count = models.IntegerField(default=0)
+    risk_score_delta = models.FloatField(default=0.0)
+    has_changes = models.BooleanField(default=False)
+    fixability_breakdown = models.JSONField(default=dict, blank=True)
+    vulnerability_state = models.JSONField(default=dict, blank=True)
+    delta_summary = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Repository Tag Scan Snapshot'
+        verbose_name_plural = 'Repository Tag Scan Snapshots'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['repository_tag', '-created_at']),
+            models.Index(fields=['has_changes', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f"Snapshot for {self.repository_tag} at {self.created_at.isoformat()}"
+
+
 class Image(models.Model):
     uuid = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=255)

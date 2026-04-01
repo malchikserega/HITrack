@@ -283,6 +283,73 @@
               </v-col>
             </v-row>
 
+            <v-row class="mb-4">
+              <v-col cols="12" md="6">
+                <v-card variant="outlined" class="h-100">
+                  <v-card-title class="text-subtitle-1 font-weight-bold">Current Exposure</v-card-title>
+                  <v-card-text class="d-flex flex-wrap ga-2">
+                    <v-chip color="error" variant="tonal">
+                      Risk {{ formatRiskScore(releaseAnalytics.weighted_risk_score) }}
+                    </v-chip>
+                    <v-chip color="primary" variant="tonal">
+                      Unique vulns {{ releaseAnalytics.current_unique_vulnerabilities_count }}
+                    </v-chip>
+                    <v-chip color="info" variant="tonal">
+                      Active tags {{ releaseAnalytics.active_tags_count }}
+                    </v-chip>
+                    <v-chip color="secondary" variant="tonal">
+                      Active images {{ releaseAnalytics.active_images_count }}
+                    </v-chip>
+                    <v-chip color="success" variant="tonal">
+                      Fixable now {{ releaseAnalytics.fixability_breakdown.fixable_now }}
+                    </v-chip>
+                    <v-chip color="warning" variant="tonal">
+                      Not in repo {{ releaseAnalytics.fixability_breakdown.fix_exists_but_not_in_repo }}
+                    </v-chip>
+                  </v-card-text>
+                </v-card>
+              </v-col>
+
+              <v-col cols="12" md="6">
+                <v-card variant="outlined" class="h-100">
+                  <v-card-title class="text-subtitle-1 font-weight-bold">
+                    Delta Vs Previous Release
+                  </v-card-title>
+                  <v-card-text>
+                    <div class="text-body-2 mb-3">
+                      <template v-if="releaseDelta.previous_release">
+                        Comparing with {{ releaseDelta.previous_release.name }}
+                        ({{ formatDate(releaseDelta.previous_release.created_at) }})
+                      </template>
+                      <template v-else>
+                        No previous release found for comparison
+                      </template>
+                    </div>
+                    <div class="d-flex flex-wrap ga-2">
+                      <v-chip color="error" variant="tonal">
+                        New {{ releaseDelta.new_vulnerabilities_count }}
+                      </v-chip>
+                      <v-chip color="success" variant="tonal">
+                        Fixed {{ releaseDelta.fixed_vulnerabilities_count }}
+                      </v-chip>
+                      <v-chip color="warning" variant="tonal">
+                        Severity up {{ releaseDelta.severity_increased_count }}
+                      </v-chip>
+                      <v-chip color="deep-orange" variant="tonal">
+                        New KEV {{ releaseDelta.new_kev_relevant_count }}
+                      </v-chip>
+                      <v-chip
+                        :color="releaseDelta.risk_score_delta >= 0 ? 'error' : 'success'"
+                        variant="tonal"
+                      >
+                        Risk {{ formatRiskDelta(releaseDelta.risk_score_delta) }}
+                      </v-chip>
+                    </div>
+                  </v-card-text>
+                </v-card>
+              </v-col>
+            </v-row>
+
             <v-data-table
               :headers="releaseTagHeaders"
               :items="releaseTags"
@@ -762,6 +829,34 @@ interface ReleaseContentsResponse {
     created_at: string
   }
   summary: ReleaseContentsSummary
+  analytics?: {
+    active_images_count: number
+    active_tags_count: number
+    current_unique_vulnerabilities_count: number
+    weighted_risk_score: number
+    fixability_breakdown: {
+      fixable_now: number
+      fix_exists_but_not_in_repo: number
+      no_fix: number
+      fix_unknown: number
+    }
+  }
+  delta_from_previous_release?: {
+    previous_release?: {
+      uuid: string
+      name: string
+      created_at: string
+      weighted_risk_score: number
+      current_unique_vulnerabilities_count: number
+    } | null
+    previous_unique_vulnerabilities_count: number
+    current_unique_vulnerabilities_count: number
+    new_vulnerabilities_count: number
+    fixed_vulnerabilities_count: number
+    severity_increased_count: number
+    new_kev_relevant_count: number
+    risk_score_delta: number
+  }
   tags: ReleaseTagItem[]
 }
 
@@ -904,6 +999,30 @@ const releasableScanCount = computed(() => (
   releaseTags.value.filter(tag => !['success', 'pending', 'in_process'].includes(tag.processing_status)).length
 ))
 
+const releaseAnalytics = computed(() => releaseContents.value?.analytics || {
+  active_images_count: 0,
+  active_tags_count: 0,
+  current_unique_vulnerabilities_count: 0,
+  weighted_risk_score: 0,
+  fixability_breakdown: {
+    fixable_now: 0,
+    fix_exists_but_not_in_repo: 0,
+    no_fix: 0,
+    fix_unknown: 0,
+  },
+})
+
+const releaseDelta = computed(() => releaseContents.value?.delta_from_previous_release || {
+  previous_release: null,
+  previous_unique_vulnerabilities_count: 0,
+  current_unique_vulnerabilities_count: 0,
+  new_vulnerabilities_count: 0,
+  fixed_vulnerabilities_count: 0,
+  severity_increased_count: 0,
+  new_kev_relevant_count: 0,
+  risk_score_delta: 0,
+})
+
 function debounce(fn: Function, delay: number) {
   let timeout: ReturnType<typeof setTimeout> | null = null
   return (...args: any[]) => {
@@ -974,6 +1093,12 @@ const checkReleaseNameExists = (name: string, excludeUuid?: string) => {
     release.name.toLowerCase() === name.toLowerCase() && 
     release.uuid !== excludeUuid
   )
+}
+
+const formatRiskScore = (value: number | string | null | undefined) => Number(value || 0).toFixed(1)
+const formatRiskDelta = (value: number | string | null | undefined) => {
+  const numericValue = Number(value || 0)
+  return `${numericValue >= 0 ? '+' : ''}${numericValue.toFixed(1)}`
 }
 
 const openCreateDialog = () => {
