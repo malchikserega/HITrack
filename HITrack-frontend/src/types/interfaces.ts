@@ -146,6 +146,46 @@ export interface Image extends BaseEntity {
   component_versions?: ComponentVersion[]
 }
 
+export interface ImageComparisonVariantTag {
+  repository_name: string
+  repository_uuid: string
+  repository_type: string
+  tag: string
+  tag_uuid: string
+}
+
+export interface ImageComparisonVariant {
+  uuid: string
+  name: string
+  logical_name: string
+  registry_host: string
+  repository_path: string
+  digest: string | null
+  scan_status: string
+  has_sbom: boolean
+  has_grype: boolean
+  findings: number
+  unique_findings: number
+  components_count: number
+  repository_tags: ImageComparisonVariantTag[]
+  created_at: string
+  updated_at: string
+}
+
+export interface ImageComparisonGroup {
+  logical_name: string
+  variant_count: number
+  registry_count: number
+  distinct_digests: number
+  different_digests: boolean
+  max_findings: number
+  max_unique_findings: number
+  max_components_count: number
+  latest_updated_at: string
+  status_breakdown: Record<string, number>
+  variants: ImageComparisonVariant[]
+}
+
 export interface VulnerabilityAffectedImageTag {
   repository_name: string
   repository_uuid: string

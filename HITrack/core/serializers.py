@@ -651,6 +651,134 @@ class ImageListSerializer(serializers.ModelSerializer):
         return None
 
 
+class ImageComparisonVariantSerializer(serializers.ModelSerializer):
+    logical_name = serializers.SerializerMethodField()
+    registry_host = serializers.SerializerMethodField()
+    repository_path = serializers.SerializerMethodField()
+    has_sbom = serializers.SerializerMethodField()
+    has_grype = serializers.SerializerMethodField()
+    findings = serializers.SerializerMethodField()
+    unique_findings = serializers.SerializerMethodField()
+    components_count = serializers.SerializerMethodField()
+    repository_tags = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Image
+        fields = [
+            'uuid',
+            'name',
+            'logical_name',
+            'registry_host',
+            'repository_path',
+            'digest',
+            'scan_status',
+            'has_sbom',
+            'has_grype',
+            'findings',
+            'unique_findings',
+            'components_count',
+            'repository_tags',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = ['uuid', 'created_at', 'updated_at']
+
+    def _extract_logical_name(self, name: str | None) -> str:
+        if not name:
+            return ''
+        return name.rsplit('/', 1)[-1]
+
+    def _extract_registry_host(self, name: str | None) -> str:
+        if not name or '/' not in name:
+            return ''
+        return name.split('/', 1)[0]
+
+    def _extract_repository_path(self, name: str | None) -> str:
+        if not name or '/' not in name:
+            return ''
+        without_registry = name.split('/', 1)[1]
+        if ':' in without_registry:
+            return without_registry.rsplit(':', 1)[0]
+        return without_registry
+
+    @extend_schema_field(serializers.CharField())
+    def get_logical_name(self, obj):
+        return getattr(obj, 'logical_name', self._extract_logical_name(obj.name))
+
+    @extend_schema_field(serializers.CharField())
+    def get_registry_host(self, obj):
+        return getattr(obj, 'registry_host', self._extract_registry_host(obj.name))
+
+    @extend_schema_field(serializers.CharField())
+    def get_repository_path(self, obj):
+        return getattr(obj, 'repository_path', self._extract_repository_path(obj.name))
+
+    @extend_schema_field(serializers.BooleanField())
+    def get_has_sbom(self, obj):
+        if hasattr(obj, 'has_sbom'):
+            return obj.has_sbom
+        return bool(getattr(obj, 'sbom_data', None))
+
+    @extend_schema_field(serializers.BooleanField())
+    def get_has_grype(self, obj):
+        if hasattr(obj, 'has_grype'):
+            return obj.has_grype
+        return bool(getattr(obj, 'grype_data', None))
+
+    @extend_schema_field(serializers.IntegerField())
+    def get_findings(self, obj):
+        if hasattr(obj, 'findings_count'):
+            return obj.findings_count
+        return ComponentVersionVulnerability.objects.filter(
+            component_version__images=obj
+        ).count()
+
+    @extend_schema_field(serializers.IntegerField())
+    def get_unique_findings(self, obj):
+        if hasattr(obj, 'unique_findings_count'):
+            return obj.unique_findings_count
+        return ComponentVersionVulnerability.objects.filter(
+            component_version__images=obj
+        ).values('vulnerability').distinct().count()
+
+    @extend_schema_field(serializers.IntegerField())
+    def get_components_count(self, obj):
+        if hasattr(obj, 'components_count'):
+            return obj.components_count
+        return obj.component_versions.count()
+
+    @extend_schema_field(serializers.ListField())
+    def get_repository_tags(self, obj):
+        prefetched_tags = getattr(obj, '_prefetched_objects_cache', {}).get('repository_tags')
+        if prefetched_tags is None:
+            prefetched_tags = obj.repository_tags.select_related('repository').all()
+
+        return [
+            {
+                'repository_name': tag.repository.name,
+                'repository_uuid': str(tag.repository.uuid),
+                'repository_type': tag.repository.repository_type,
+                'tag': tag.tag,
+                'tag_uuid': str(tag.uuid),
+            }
+            for tag in prefetched_tags
+        ]
+
+
+class ImageComparisonGroupSerializer(serializers.Serializer):
+    logical_name = serializers.CharField()
+    variant_count = serializers.IntegerField()
+    registry_count = serializers.IntegerField()
+    distinct_digests = serializers.IntegerField()
+    different_digests = serializers.BooleanField()
+    max_findings = serializers.IntegerField()
+    max_unique_findings = serializers.IntegerField()
+    max_components_count = serializers.IntegerField()
+    latest_updated_at = serializers.DateTimeField()
+    status_breakdown = serializers.DictField()
+    variants = ImageComparisonVariantSerializer(many=True)
+
+
 class VulnerabilityImageRepositoryTagSerializer(serializers.Serializer):
     repository_name = serializers.CharField()
     repository_uuid = serializers.UUIDField()

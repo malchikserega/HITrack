@@ -16,13 +16,14 @@ from .serializers import (
     ReleaseSerializer, RepositoryTagReleaseSerializer, ReleaseAssignmentSerializer,
     VulnerabilityListSerializer, VulnerabilityDetailsSerializer, VulnerabilityDetailSerializer,
     TaskResultSerializer, TaskResultListSerializer, PeriodicTaskSerializer, TaskStatisticsSerializer,
-    ComponentLocationSerializer, VulnerabilityAffectedImageSerializer
+    ComponentLocationSerializer, VulnerabilityAffectedImageSerializer,
+    ImageComparisonGroupSerializer
 )
 from django.db import models
 from .pagination import CustomPageNumberPagination
-from django.db.models import Q, Count, Prefetch, Case, When, Value, BooleanField, IntegerField, F, CharField, TextField
+from django.db.models import Q, Count, Prefetch, Case, When, Value, BooleanField, IntegerField, F, CharField, TextField, Func, Max, OuterRef, Subquery
 from django.db.models.query import prefetch_related_objects
-from django.db.models.functions import Cast, Concat, TruncDate
+from django.db.models.functions import Cast, Concat, TruncDate, Coalesce
 from django.utils import timezone
 from django.utils.decorators import method_decorator
 from django.views.decorators.cache import cache_page
@@ -90,6 +91,25 @@ VULNERABILITY_IMAGE_ORDERING_MAP = {
     '-name': '-name',
     'scan_status': 'scan_status',
     '-scan_status': '-scan_status',
+}
+
+IMAGE_COMPARISON_ORDERING_MAP = {
+    'logical_name': 'logical_name',
+    '-logical_name': '-logical_name',
+    'variant_count': 'variant_count',
+    '-variant_count': '-variant_count',
+    'registry_count': 'registry_count',
+    '-registry_count': '-registry_count',
+    'distinct_digests': 'distinct_digests',
+    '-distinct_digests': '-distinct_digests',
+    'max_findings': 'max_findings',
+    '-max_findings': '-max_findings',
+    'max_unique_findings': 'max_unique_findings',
+    '-max_unique_findings': '-max_unique_findings',
+    'max_components_count': 'max_components_count',
+    '-max_components_count': '-max_components_count',
+    'latest_updated_at': 'latest_updated_at',
+    '-latest_updated_at': '-latest_updated_at',
 }
 
 
@@ -436,6 +456,52 @@ def _build_dashboard_analytics_payload():
     }
 
 
+def _annotate_image_comparison_fields(queryset):
+    return queryset.annotate(
+        logical_name=Func(
+            F('name'),
+            Value(r'^.*/'),
+            Value(''),
+            function='regexp_replace',
+            output_field=CharField(),
+        ),
+        registry_host=Func(
+            F('name'),
+            Value(r'/.*$'),
+            Value(''),
+            function='regexp_replace',
+            output_field=CharField(),
+        ),
+        repository_path=Func(
+            Func(
+                F('name'),
+                Value(r'^[^/]*/'),
+                Value(''),
+                function='regexp_replace',
+                output_field=CharField(),
+            ),
+            Value(r':[^:]+$'),
+            Value(''),
+            function='regexp_replace',
+            output_field=CharField(),
+        ),
+    )
+
+
+def _apply_image_comparison_ordering(queryset, ordering, default='-variant_count'):
+    requested = []
+    for field in (ordering or default).split(','):
+        field = field.strip()
+        if not field:
+            continue
+        resolved = IMAGE_COMPARISON_ORDERING_MAP.get(field)
+        if resolved:
+            requested.append(resolved)
+    if not requested:
+        requested = [IMAGE_COMPARISON_ORDERING_MAP[default]]
+    return queryset.order_by(*requested)
+
+
 def _build_optimized_image_list_queryset(queryset):
     """Annotate lightweight image summary fields without loading large JSON blobs."""
     return queryset.annotate(
@@ -464,6 +530,24 @@ def _build_optimized_image_list_queryset(queryset):
     ).prefetch_related(
         'repository_tags__repository'
     ).defer('sbom_data', 'grype_data')
+
+
+def _build_image_comparison_base_queryset(queryset):
+    return _annotate_image_comparison_fields(
+        queryset.only(
+            'uuid',
+            'name',
+            'digest',
+            'scan_status',
+            'updated_at',
+        )
+    )
+
+
+def _build_image_comparison_member_queryset(queryset):
+    return _annotate_image_comparison_fields(
+        _build_optimized_image_list_queryset(queryset)
+    )
 
 
 def _build_vulnerability_image_queryset(queryset, vulnerability):
@@ -1462,6 +1546,136 @@ class ImageViewSet(BaseViewSet):
             ).defer('sbom_data', 'grype_data')
         
         return queryset
+
+    @action(detail=False, methods=['get'], url_path='comparisons')
+    def comparisons(self, request):
+        base_queryset = _build_image_comparison_base_queryset(super().get_queryset())
+
+        search = (request.query_params.get('search') or '').strip()
+        if search:
+            base_queryset = base_queryset.filter(
+                Q(logical_name__icontains=search) |
+                Q(name__icontains=search) |
+                Q(registry_host__icontains=search) |
+                Q(repository_path__icontains=search)
+            )
+
+        duplicates_only_param = request.query_params.get('duplicates_only', 'true')
+        duplicates_only = str(duplicates_only_param).lower() not in {'false', '0', 'no'}
+        requested_ordering = request.query_params.get('ordering', '-variant_count')
+        expensive_sort_fields = {'max_findings', '-max_findings', 'max_unique_findings', '-max_unique_findings', 'max_components_count', '-max_components_count'}
+        needs_global_metric_sort = any(
+            field.strip() in expensive_sort_fields
+            for field in requested_ordering.split(',')
+            if field.strip()
+        )
+
+        grouped_queryset = base_queryset.values('logical_name').annotate(
+            variant_count=Count('uuid'),
+            registry_count=Count('registry_host', distinct=True),
+            distinct_digests=Count('digest', distinct=True),
+            latest_updated_at=Max('updated_at'),
+            success_count=Count('uuid', filter=Q(scan_status='success')),
+            error_count=Count('uuid', filter=Q(scan_status='error')),
+            in_process_count=Count('uuid', filter=Q(scan_status='in_process')),
+            pending_count=Count('uuid', filter=Q(scan_status='pending')),
+            none_count=Count('uuid', filter=Q(scan_status='none')),
+        )
+
+        if needs_global_metric_sort:
+            metric_queryset = _build_image_comparison_member_queryset(super().get_queryset())
+            if search:
+                metric_queryset = metric_queryset.filter(
+                    Q(logical_name__icontains=search) |
+                    Q(name__icontains=search) |
+                    Q(registry_host__icontains=search) |
+                    Q(repository_path__icontains=search)
+                )
+
+            findings_subquery = Subquery(
+                metric_queryset.filter(logical_name=OuterRef('logical_name'))
+                .order_by('-findings_count')
+                .values('findings_count')[:1],
+                output_field=IntegerField(),
+            )
+            unique_findings_subquery = Subquery(
+                metric_queryset.filter(logical_name=OuterRef('logical_name'))
+                .order_by('-unique_findings_count')
+                .values('unique_findings_count')[:1],
+                output_field=IntegerField(),
+            )
+            components_subquery = Subquery(
+                metric_queryset.filter(logical_name=OuterRef('logical_name'))
+                .order_by('-components_count')
+                .values('components_count')[:1],
+                output_field=IntegerField(),
+            )
+            grouped_queryset = grouped_queryset.annotate(
+                max_findings=Coalesce(findings_subquery, Value(0)),
+                max_unique_findings=Coalesce(unique_findings_subquery, Value(0)),
+                max_components_count=Coalesce(components_subquery, Value(0)),
+            )
+        else:
+            grouped_queryset = grouped_queryset.annotate(
+                max_findings=Value(0, output_field=IntegerField()),
+                max_unique_findings=Value(0, output_field=IntegerField()),
+                max_components_count=Value(0, output_field=IntegerField()),
+            )
+
+        if duplicates_only:
+            grouped_queryset = grouped_queryset.filter(variant_count__gt=1)
+
+        grouped_queryset = _apply_image_comparison_ordering(
+            grouped_queryset,
+            requested_ordering,
+        )
+
+        page = self.paginate_queryset(grouped_queryset)
+        grouped_rows = list(page) if page is not None else list(grouped_queryset)
+        logical_names = [row['logical_name'] for row in grouped_rows]
+
+        comparison_members = _apply_image_list_ordering(
+            _build_image_comparison_member_queryset(
+                super().get_queryset()
+            ).filter(logical_name__in=logical_names),
+            request.query_params.get('member_ordering', 'name'),
+            default='name',
+        )
+
+        members_by_logical_name = defaultdict(list)
+        for image in comparison_members:
+            members_by_logical_name[getattr(image, 'logical_name', image.name)].append(image)
+
+        serialized_groups = []
+        for row in grouped_rows:
+            variants = members_by_logical_name.get(row['logical_name'], [])
+            max_findings = max((getattr(image, 'findings_count', 0) or 0) for image in variants) if variants else (row['max_findings'] or 0)
+            max_unique_findings = max((getattr(image, 'unique_findings_count', 0) or 0) for image in variants) if variants else (row['max_unique_findings'] or 0)
+            max_components_count = max((getattr(image, 'components_count', 0) or 0) for image in variants) if variants else (row['max_components_count'] or 0)
+            serialized_groups.append({
+                'logical_name': row['logical_name'],
+                'variant_count': row['variant_count'],
+                'registry_count': row['registry_count'],
+                'distinct_digests': row['distinct_digests'],
+                'different_digests': (row['distinct_digests'] or 0) > 1,
+                'max_findings': max_findings,
+                'max_unique_findings': max_unique_findings,
+                'max_components_count': max_components_count,
+                'latest_updated_at': row['latest_updated_at'],
+                'status_breakdown': {
+                    'success': row['success_count'] or 0,
+                    'error': row['error_count'] or 0,
+                    'in_process': row['in_process_count'] or 0,
+                    'pending': row['pending_count'] or 0,
+                    'none': row['none_count'] or 0,
+                },
+                'variants': variants,
+            })
+
+        serializer = ImageComparisonGroupSerializer(serialized_groups, many=True)
+        if page is not None:
+            return self.get_paginated_response(serializer.data)
+        return Response(serializer.data)
 
     @action(detail=True, methods=['post'])
     def update_latest_versions(self, request, uuid=None):

@@ -208,6 +208,7 @@ const menuItems = [
   { title: 'Home', path: '/' },
   { title: 'Repositories', path: '/repositories' },
   { title: 'Images', path: '/images' },
+  { title: 'Image Comparisons', path: '/image-comparisons' },
   { title: 'Components', path: '/components' },
   { title: 'Vulnerabilities', path: '/vulnerabilities' },
   { title: 'Releases', path: '/releases' },

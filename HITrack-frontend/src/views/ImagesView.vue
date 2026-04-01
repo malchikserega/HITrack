@@ -4,9 +4,19 @@
       <v-row>
         <v-col cols="12">
           <h1 class="text-h4 mb-4 font-weight-black">Images</h1>
-          <v-btn color="primary" @click="openDialog('New Image')" class="mb-4">
-            Add Image
-          </v-btn>
+          <div class="d-flex align-center ga-3 mb-4">
+            <v-btn color="primary" @click="openDialog('New Image')">
+              Add Image
+            </v-btn>
+            <v-btn
+              variant="outlined"
+              color="primary"
+              prepend-icon="mdi-compare"
+              @click="openImageComparisons"
+            >
+              Compare By Logical Name
+            </v-btn>
+          </div>
         </v-col>
       </v-row>
 
@@ -603,6 +613,10 @@ const onRescanGrype = async (image: Image) => {
 const onViewComponentLocations = (image: Image) => {
   if (!image.uuid) return
   router.push({ name: 'component-locations', params: { uuid: image.uuid } })
+}
+
+const openImageComparisons = () => {
+  router.push({ name: 'image-comparisons' })
 }
 
 const formatDigest = (digest: string) => {

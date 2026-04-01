@@ -30,6 +30,12 @@ const router = createRouter({
       meta: { requiresAuth: true }
     },
     {
+      path: '/image-comparisons',
+      name: 'image-comparisons',
+      component: () => import('../views/ImageComparisonsView.vue'),
+      meta: { requiresAuth: true }
+    },
+    {
       path: '/images/:uuid',
       name: 'image-detail',
       component: () => import('../views/ImageDetailView.vue'),
