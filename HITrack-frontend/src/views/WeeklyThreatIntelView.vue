@@ -116,32 +116,40 @@
 
             <template #item.hitrack="{ item }">
               <div class="presence-cell">
-                <v-tooltip v-if="item.currently_present" location="top">
-                  <template #activator="{ props }">
-                    <v-chip
-                      v-bind="props"
-                      size="small"
-                      color="primary"
-                      variant="tonal"
-                    >
-                      Present
-                    </v-chip>
-                  </template>
-                  <span>{{ presentTooltip }}</span>
-                </v-tooltip>
-                <v-tooltip v-else-if="item.relevant_in_hitrack" location="top">
-                  <template #activator="{ props }">
-                    <v-chip
-                      v-bind="props"
-                      size="small"
-                      color="success"
-                      variant="tonal"
-                    >
-                      Relevant
-                    </v-chip>
-                  </template>
-                  <span>{{ relevantTooltip }}</span>
-                </v-tooltip>
+                <template v-if="item.currently_present || item.relevant_in_hitrack">
+                  <v-tooltip v-if="item.currently_present" location="top">
+                    <template #activator="{ props }">
+                      <v-chip
+                        v-bind="props"
+                        size="small"
+                        color="primary"
+                        variant="tonal"
+                      >
+                        Present
+                      </v-chip>
+                    </template>
+                    <span>{{ presentTooltip }}</span>
+                  </v-tooltip>
+                  <v-tooltip v-else location="top">
+                    <template #activator="{ props }">
+                      <v-chip
+                        v-bind="props"
+                        size="small"
+                        color="success"
+                        variant="tonal"
+                      >
+                        Relevant
+                      </v-chip>
+                    </template>
+                    <span>{{ relevantTooltip }}</span>
+                  </v-tooltip>
+                  <div
+                    v-if="getThreatIntelMatchSummary(item)"
+                    class="presence-cell__summary"
+                  >
+                    {{ getThreatIntelMatchSummary(item) }}
+                  </div>
+                </template>
                 <span v-else class="text-medium-emphasis">-</span>
               </div>
             </template>
@@ -242,6 +250,34 @@ const getAttributeChips = (item: WeeklyThreatIntelListItem) => {
   const sourceLabels = item.source_labels || []
   const tags = item.tags || []
   return [...new Set([...sourceLabels, ...tags])].slice(0, 6)
+}
+
+const getThreatIntelMatchSummary = (item: WeeklyThreatIntelListItem) => {
+  const match = item.hitrack_match
+  if (!match) return ''
+
+  const summaryParts = []
+  if (item.matched_by && item.matched_identifier) {
+    summaryParts.push(`By ${item.matched_by}: ${item.matched_identifier}`)
+  } else if (item.matched_vulnerability_id) {
+    summaryParts.push(`Matched ${item.matched_vulnerability_id}`)
+  }
+
+  if (match.tags?.length) {
+    const tagPreview = match.tags.slice(0, 2).join(', ')
+    const extraTagCount = Math.max(match.tag_count - Math.min(match.tag_count, 2), 0)
+    summaryParts.push(`Seen in ${tagPreview}${extraTagCount > 0 ? ` +${extraTagCount}` : ''}`)
+  } else if (match.images?.length) {
+    const imagePreview = match.images.slice(0, 1).join(', ')
+    const extraImageCount = Math.max(match.image_count - Math.min(match.image_count, 1), 0)
+    summaryParts.push(`Image ${imagePreview}${extraImageCount > 0 ? ` +${extraImageCount}` : ''}`)
+  } else if (match.repositories?.length) {
+    const repositoryPreview = match.repositories.slice(0, 2).join(', ')
+    const extraRepositoryCount = Math.max(match.repository_count - Math.min(match.repository_count, 2), 0)
+    summaryParts.push(`Repo ${repositoryPreview}${extraRepositoryCount > 0 ? ` +${extraRepositoryCount}` : ''}`)
+  }
+
+  return summaryParts.join(' · ')
 }
 
 const fetchThreatIntel = async () => {
@@ -444,8 +480,17 @@ onMounted(fetchThreatIntel)
 
 .presence-cell {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
   min-height: 32px;
+}
+
+.presence-cell__summary {
+  color: rgba(0, 0, 0, 0.62);
+  font-size: 0.78rem;
+  line-height: 1.3;
+  white-space: normal;
 }
 
 .intel-tooltip {

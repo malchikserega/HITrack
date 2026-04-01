@@ -238,6 +238,10 @@ def _build_weekly_threat_intel_rows(summary, intel_type='all'):
                         'Exploit available' if entry.get('exploit_available') else None,
                     ] if tag
                 ],
+                'matched_identifier': entry.get('matched_identifier'),
+                'matched_by': entry.get('matched_by'),
+                'matched_vulnerability_id': entry.get('matched_vulnerability_id'),
+                'hitrack_match': entry.get('hitrack_match'),
             })
 
     if selected_type in {'all', 'kev'}:
@@ -266,6 +270,10 @@ def _build_weekly_threat_intel_rows(summary, intel_type='all'):
                         'Ransomware' if entry.get('ransomware_use') == 'Known' else None,
                     ] if tag
                 ],
+                'matched_identifier': entry.get('matched_identifier'),
+                'matched_by': entry.get('matched_by'),
+                'matched_vulnerability_id': entry.get('matched_vulnerability_id'),
+                'hitrack_match': entry.get('hitrack_match'),
             })
 
     if selected_type in {'all', 'supply_chain'}:
@@ -292,6 +300,10 @@ def _build_weekly_threat_intel_rows(summary, intel_type='all'):
                 'currently_present': bool(entry.get('currently_present')),
                 'source_labels': entry.get('source_labels') or [],
                 'tags': entry.get('tags') or [],
+                'matched_identifier': entry.get('matched_identifier'),
+                'matched_by': entry.get('matched_by'),
+                'matched_vulnerability_id': entry.get('matched_vulnerability_id'),
+                'hitrack_match': entry.get('hitrack_match'),
             })
 
     rows.sort(key=lambda item: _parse_threat_intel_timestamp(item.get('timestamp')), reverse=True)

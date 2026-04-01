@@ -69,7 +69,13 @@
                   {{ entry.vulnerability_id }}
                 </v-list-item-title>
                 <v-list-item-subtitle class="intel-item__subtitle">
-                  {{ entry.type }} · {{ formatDate(entry.created_at) }}
+                  <div>{{ entry.type }} · {{ formatDate(entry.created_at) }}</div>
+                  <div
+                    v-if="getThreatIntelMatchSummary(entry)"
+                    class="intel-item__match"
+                  >
+                    {{ getThreatIntelMatchSummary(entry) }}
+                  </div>
                 </v-list-item-subtitle>
                 <template #append>
                   <div class="intel-item__meta">
@@ -168,7 +174,13 @@
                   {{ entry.vulnerability_id }}
                 </v-list-item-title>
                 <v-list-item-subtitle class="intel-item__subtitle">
-                  {{ entry.vendor || 'Unknown vendor' }} · {{ entry.product || 'Unknown product' }}
+                  <div>{{ entry.vendor || 'Unknown vendor' }} · {{ entry.product || 'Unknown product' }}</div>
+                  <div
+                    v-if="getThreatIntelMatchSummary(entry)"
+                    class="intel-item__match"
+                  >
+                    {{ getThreatIntelMatchSummary(entry) }}
+                  </div>
                 </v-list-item-subtitle>
                 <template #append>
                   <div class="intel-item__meta">
@@ -292,6 +304,12 @@
                 <v-list-item-subtitle class="intel-item__subtitle">
                   <div>{{ entry.packages?.length ? entry.packages.slice(0, 2).join(', ') : entry.title }}</div>
                   <div
+                    v-if="getThreatIntelMatchSummary(entry)"
+                    class="intel-item__match"
+                  >
+                    {{ getThreatIntelMatchSummary(entry) }}
+                  </div>
+                  <div
                     v-if="getSupplyChainChips(entry).length"
                     class="intel-item__tags"
                   >
@@ -366,6 +384,15 @@ import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { getSeverityColor } from '../utils/colors'
 
+interface ThreatIntelHitrackMatch {
+  repository_count: number
+  repositories: string[]
+  tag_count: number
+  tags: string[]
+  image_count: number
+  images: string[]
+}
+
 interface ObservedThreatEntry {
   uuid: string
   vulnerability_id: string
@@ -375,6 +402,10 @@ interface ObservedThreatEntry {
   epss: number
   cisa_kev: boolean
   exploit_available: boolean
+  matched_identifier?: string | null
+  matched_by?: string | null
+  matched_vulnerability_id?: string | null
+  hitrack_match?: ThreatIntelHitrackMatch | null
 }
 
 interface KevThreatEntry {
@@ -387,6 +418,10 @@ interface KevThreatEntry {
   relevant_in_hitrack?: boolean
   currently_present?: boolean
   target_uuid?: string | null
+  matched_identifier?: string | null
+  matched_by?: string | null
+  matched_vulnerability_id?: string | null
+  hitrack_match?: ThreatIntelHitrackMatch | null
 }
 
 interface SupplyChainEntry {
@@ -408,6 +443,10 @@ interface SupplyChainEntry {
   relevant_in_hitrack?: boolean
   currently_present?: boolean
   target_uuid?: string | null
+  matched_identifier?: string | null
+  matched_by?: string | null
+  matched_vulnerability_id?: string | null
+  hitrack_match?: ThreatIntelHitrackMatch | null
 }
 
 interface WeeklyThreatIntel {
@@ -462,6 +501,36 @@ const kevTooltip = 'New entries added to the official CISA Known Exploited Vulne
 const supplyChainTooltip = 'New weekly package or malware advisories from external supply-chain sources such as GitHub Advisory data and OSV.'
 const relevantTooltip = 'This external advisory matches a vulnerability that exists in HITrack at least once in historical data.'
 const presentTooltip = 'This external advisory matches a vulnerability that is currently present in scanned images linked in HITrack.'
+
+const getThreatIntelMatchSummary = (
+  entry: ObservedThreatEntry | KevThreatEntry | SupplyChainEntry,
+) => {
+  const match = entry.hitrack_match
+  if (!match) return ''
+
+  const summaryParts = []
+  if (entry.matched_by && entry.matched_identifier) {
+    summaryParts.push(`Matched by ${entry.matched_by}: ${entry.matched_identifier}`)
+  } else if (entry.matched_vulnerability_id) {
+    summaryParts.push(`Matched to ${entry.matched_vulnerability_id}`)
+  }
+
+  if (match.tags?.length) {
+    const tagPreview = match.tags.slice(0, 2).join(', ')
+    const extraTagCount = Math.max(match.tag_count - Math.min(match.tag_count, 2), 0)
+    summaryParts.push(`Seen in ${tagPreview}${extraTagCount > 0 ? ` +${extraTagCount}` : ''}`)
+  } else if (match.images?.length) {
+    const imagePreview = match.images.slice(0, 1).join(', ')
+    const extraImageCount = Math.max(match.image_count - Math.min(match.image_count, 1), 0)
+    summaryParts.push(`Image ${imagePreview}${extraImageCount > 0 ? ` +${extraImageCount}` : ''}`)
+  } else if (match.repositories?.length) {
+    const repositoryPreview = match.repositories.slice(0, 2).join(', ')
+    const extraRepositoryCount = Math.max(match.repository_count - Math.min(match.repository_count, 2), 0)
+    summaryParts.push(`Repo ${repositoryPreview}${extraRepositoryCount > 0 ? ` +${extraRepositoryCount}` : ''}`)
+  }
+
+  return summaryParts.join(' · ')
+}
 
 const getSupplyChainChips = (entry: SupplyChainEntry) => {
   const sourceLabels = entry.source_labels || []
@@ -574,6 +643,13 @@ const openExternal = (url?: string | null) => {
 
 .intel-item__subtitle {
   line-height: 1.25;
+}
+
+.intel-item__match {
+  margin-top: 4px;
+  color: rgba(0, 0, 0, 0.62);
+  font-size: 0.78rem;
+  line-height: 1.3;
 }
 
 .intel-item__tags {

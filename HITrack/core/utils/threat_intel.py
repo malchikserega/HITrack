@@ -1,10 +1,11 @@
 from datetime import date, datetime, timedelta
 from typing import Dict
+from collections import defaultdict
 
 from django.db.models import Exists, OuterRef
 from django.utils import timezone
 
-from core.models import ComponentVersionVulnerability, ThreatIntelSnapshot, Vulnerability
+from core.models import ComponentVersionVulnerability, Image, RepositoryTag, ThreatIntelSnapshot, Vulnerability
 from core.utils.vulnerability_sources import VulnerabilityDataCollector
 
 
@@ -47,6 +48,65 @@ def _normalize_vulnerability_identifier(identifier: str | None) -> str | None:
     return normalized or None
 
 
+def _build_hitrack_location_preview(vulnerability_queryset) -> Dict[int, Dict]:
+    vulnerability_ids = [vulnerability.pk for vulnerability in vulnerability_queryset]
+    if not vulnerability_ids:
+        return {}
+
+    repositories_map = defaultdict(set)
+    tags_map = defaultdict(set)
+    images_map = defaultdict(set)
+
+    tag_rows = RepositoryTag.objects.filter(
+        images__component_versions__componentversionvulnerability__vulnerability_id__in=vulnerability_ids,
+    ).values(
+        'images__component_versions__componentversionvulnerability__vulnerability_id',
+        'repository__name',
+        'tag',
+    ).distinct()
+
+    for row in tag_rows:
+        vulnerability_id = row['images__component_versions__componentversionvulnerability__vulnerability_id']
+        repository_name = row.get('repository__name')
+        tag_name = row.get('tag')
+        if repository_name:
+            repositories_map[vulnerability_id].add(repository_name)
+        if repository_name or tag_name:
+            tag_label = " : ".join(part for part in [repository_name, tag_name] if part)
+            if tag_label:
+                tags_map[vulnerability_id].add(tag_label)
+
+    image_rows = Image.objects.filter(
+        component_versions__componentversionvulnerability__vulnerability_id__in=vulnerability_ids,
+        repository_tags__isnull=False,
+    ).values(
+        'component_versions__componentversionvulnerability__vulnerability_id',
+        'name',
+    ).distinct()
+
+    for row in image_rows:
+        vulnerability_id = row['component_versions__componentversionvulnerability__vulnerability_id']
+        image_name = row.get('name')
+        if image_name:
+            images_map[vulnerability_id].add(image_name)
+
+    preview_map = {}
+    for vulnerability in vulnerability_queryset:
+        repository_names = sorted(repositories_map.get(vulnerability.pk, set()))
+        tag_names = sorted(tags_map.get(vulnerability.pk, set()))
+        image_names = sorted(images_map.get(vulnerability.pk, set()))
+        preview_map[vulnerability.pk] = {
+            'repository_count': len(repository_names),
+            'repositories': repository_names[:3],
+            'tag_count': len(tag_names),
+            'tags': tag_names[:3],
+            'image_count': len(image_names),
+            'images': image_names[:3],
+        }
+
+    return preview_map
+
+
 def _build_vulnerability_presence_map(identifiers) -> Dict[str, Dict]:
     normalized_identifiers = {
         normalized
@@ -66,30 +126,56 @@ def _build_vulnerability_presence_map(identifiers) -> Dict[str, Dict]:
             )
         )
     ).only('uuid', 'vulnerability_id')
+    vulnerabilities = list(queryset)
+    location_preview_map = _build_hitrack_location_preview(vulnerabilities)
 
     return {
         vulnerability.vulnerability_id.upper(): {
             'uuid': str(vulnerability.uuid),
+            'vulnerability_id': vulnerability.vulnerability_id,
             'currently_present': bool(vulnerability.currently_present),
+            'hitrack_match': location_preview_map.get(vulnerability.pk, {
+                'repository_count': 0,
+                'repositories': [],
+                'tag_count': 0,
+                'tags': [],
+                'image_count': 0,
+                'images': [],
+            }),
         }
-        for vulnerability in queryset
+        for vulnerability in vulnerabilities
     }
+
+
+def _normalize_identifier_candidates(identifier_candidates):
+    normalized_candidates = []
+
+    for candidate in identifier_candidates or []:
+        match_type = 'Identifier'
+        identifier = candidate
+        if isinstance(candidate, dict):
+            identifier = candidate.get('identifier')
+            match_type = candidate.get('match_type') or match_type
+
+        normalized_identifier = _normalize_vulnerability_identifier(identifier)
+        if not normalized_identifier:
+            continue
+
+        normalized_candidates.append({
+            'identifier': normalized_identifier,
+            'match_type': match_type,
+        })
+
+    return normalized_candidates
 
 
 def _augment_entries_with_hitrack_presence(entries, identifier_resolver, total_count: int | None = None) -> Dict:
     candidate_ids = []
     resolved_entry_ids = []
     for entry in entries:
-        resolved_ids = [
-            normalized_id
-            for normalized_id in (
-                _normalize_vulnerability_identifier(identifier)
-                for identifier in identifier_resolver(entry)
-            )
-            if normalized_id
-        ]
-        resolved_entry_ids.append(resolved_ids)
-        candidate_ids.extend(resolved_ids)
+        resolved_identifiers = _normalize_identifier_candidates(identifier_resolver(entry))
+        resolved_entry_ids.append(resolved_identifiers)
+        candidate_ids.extend(identifier['identifier'] for identifier in resolved_identifiers)
 
     presence_map = _build_vulnerability_presence_map(candidate_ids)
     relevant_count = 0
@@ -98,9 +184,13 @@ def _augment_entries_with_hitrack_presence(entries, identifier_resolver, total_c
 
     for entry, resolved_ids in zip(entries, resolved_entry_ids):
         matched_record = None
+        matched_identifier = None
+        matched_by = None
         for resolved_id in resolved_ids:
-            matched_record = presence_map.get(resolved_id)
+            matched_record = presence_map.get(resolved_id['identifier'])
             if matched_record:
+                matched_identifier = resolved_id['identifier']
+                matched_by = resolved_id['match_type']
                 break
 
         if matched_record:
@@ -114,6 +204,10 @@ def _augment_entries_with_hitrack_presence(entries, identifier_resolver, total_c
             'currently_present': bool(matched_record and matched_record['currently_present']),
             'target_type': 'vulnerability' if matched_record else None,
             'target_uuid': matched_record['uuid'] if matched_record else None,
+            'matched_identifier': matched_identifier,
+            'matched_by': matched_by,
+            'matched_vulnerability_id': matched_record['vulnerability_id'] if matched_record else None,
+            'hitrack_match': matched_record['hitrack_match'] if matched_record else None,
         })
 
     return {
@@ -157,6 +251,10 @@ def build_live_weekly_threat_intel_summary(limit: int | None = 5) -> Dict:
         'details__exploit_available',
     ).order_by('-created_at')
 
+    observed_presence_map = _build_vulnerability_presence_map(
+        vulnerability.vulnerability_id for vulnerability in observed_queryset
+    )
+
     observed_entries = [
         {
             'uuid': str(vulnerability.uuid),
@@ -173,6 +271,20 @@ def build_live_weekly_threat_intel_summary(limit: int | None = 5) -> Dict:
             if getattr(vulnerability, 'details', None) else False,
             'exploit_available': bool(getattr(vulnerability.details, 'exploit_available', False))
             if getattr(vulnerability, 'details', None) else False,
+            'matched_identifier': vulnerability.vulnerability_id,
+            'matched_by': 'Vulnerability ID',
+            'matched_vulnerability_id': vulnerability.vulnerability_id,
+            'hitrack_match': observed_presence_map.get(
+                vulnerability.vulnerability_id.upper(),
+                {
+                    'repository_count': 0,
+                    'repositories': [],
+                    'tag_count': 0,
+                    'tags': [],
+                    'image_count': 0,
+                    'images': [],
+                },
+            ).get('hitrack_match'),
         }
         for vulnerability in observed_queryset
     ]
@@ -195,17 +307,40 @@ def build_live_weekly_threat_intel_summary(limit: int | None = 5) -> Dict:
 
     kev_summary = _augment_entries_with_hitrack_presence(
         kev_summary.get('entries', []),
-        lambda entry: [entry.get('vulnerability_id')],
+        lambda entry: [
+            {
+                'identifier': entry.get('vulnerability_id'),
+                'match_type': 'CVE ID',
+            }
+        ],
         total_count=kev_summary.get('count'),
     )
     supply_chain_summary = _augment_entries_with_hitrack_presence(
         supply_chain_summary.get('entries', []),
         lambda entry: [
-            entry.get('advisory_id'),
-            entry.get('osv_id'),
-            entry.get('ghsa_id'),
-            entry.get('cve_id'),
-            *(entry.get('aliases') or []),
+            {
+                'identifier': entry.get('ghsa_id'),
+                'match_type': 'GHSA ID',
+            },
+            {
+                'identifier': entry.get('cve_id'),
+                'match_type': 'CVE ID',
+            },
+            {
+                'identifier': entry.get('osv_id'),
+                'match_type': 'OSV ID',
+            },
+            *[
+                {
+                    'identifier': alias,
+                    'match_type': 'Alias',
+                }
+                for alias in (entry.get('aliases') or [])
+            ],
+            {
+                'identifier': entry.get('advisory_id'),
+                'match_type': 'Advisory ID',
+            },
         ],
         total_count=supply_chain_summary.get('count'),
     )

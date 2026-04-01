@@ -264,6 +264,15 @@ export interface RecentActivity {
 
 export type WeeklyThreatIntelType = 'all' | 'observed' | 'kev' | 'supply_chain'
 
+export interface WeeklyThreatIntelMatch {
+  repository_count: number
+  repositories: string[]
+  tag_count: number
+  tags: string[]
+  image_count: number
+  images: string[]
+}
+
 export interface WeeklyThreatIntelListItem {
   id: string
   type: 'observed' | 'kev' | 'supply_chain'
@@ -279,6 +288,10 @@ export interface WeeklyThreatIntelListItem {
   target_type?: 'vulnerability' | null
   target_uuid?: string | null
   external_url?: string | null
+  matched_identifier?: string | null
+  matched_by?: string | null
+  matched_vulnerability_id?: string | null
+  hitrack_match?: WeeklyThreatIntelMatch | null
 }
 
 export interface WeeklyThreatIntelResponse extends PaginatedResponse<WeeklyThreatIntelListItem> {
