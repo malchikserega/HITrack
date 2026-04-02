@@ -12,6 +12,7 @@ from .utils.analytics import (
     build_repository_exposure_summary,
     build_vulnerability_detail_analytics,
 )
+from .utils.threat_intel import get_vulnerability_weekly_threat_intel_match
 # Celery Task Serializers
 from django_celery_results.models import TaskResult
 from django_celery_beat.models import PeriodicTask, IntervalSchedule, CrontabSchedule
@@ -137,7 +138,44 @@ class VulnerabilitySerializer(serializers.ModelSerializer):
             return False
 
 
-class VulnerabilityDetailSerializer(VulnerabilitySerializer):
+class VulnerabilityThreatIntelEntrySerializer(serializers.Serializer):
+    intel_type = serializers.CharField()
+    label = serializers.CharField()
+    identifier = serializers.CharField()
+    title = serializers.CharField()
+    timestamp = serializers.CharField(allow_null=True)
+    source_labels = serializers.ListField(child=serializers.CharField(), required=False)
+    tags = serializers.ListField(child=serializers.CharField(), required=False)
+    matched_by = serializers.CharField(allow_null=True, required=False)
+    matched_identifier = serializers.CharField(allow_null=True, required=False)
+    matched_vulnerability_id = serializers.CharField(allow_null=True, required=False)
+    currently_present = serializers.BooleanField(required=False)
+    relevant_in_hitrack = serializers.BooleanField(required=False)
+    hitrack_match = serializers.DictField(required=False)
+
+
+class VulnerabilityThreatIntelMatchSerializer(serializers.Serializer):
+    matched_this_week = serializers.BooleanField()
+    period_start = serializers.CharField(allow_null=True)
+    period_end = serializers.CharField(allow_null=True)
+    has_external_matches = serializers.BooleanField()
+    entries = VulnerabilityThreatIntelEntrySerializer(many=True)
+
+
+class VulnerabilityBaseDetailSerializer(VulnerabilitySerializer):
+    threat_intel_match = serializers.SerializerMethodField()
+
+    class Meta(VulnerabilitySerializer.Meta):
+        fields = VulnerabilitySerializer.Meta.fields + [
+            'threat_intel_match',
+        ]
+
+    @extend_schema_field(VulnerabilityThreatIntelMatchSerializer())
+    def get_threat_intel_match(self, obj):
+        return get_vulnerability_weekly_threat_intel_match(obj)
+
+
+class VulnerabilityDetailSerializer(VulnerabilityBaseDetailSerializer):
     weighted_risk_score = serializers.SerializerMethodField()
     currently_present = serializers.SerializerMethodField()
     fixability_category = serializers.SerializerMethodField()
@@ -147,8 +185,8 @@ class VulnerabilityDetailSerializer(VulnerabilitySerializer):
     affected_images_count = serializers.SerializerMethodField()
     active_images_count = serializers.SerializerMethodField()
 
-    class Meta(VulnerabilitySerializer.Meta):
-        fields = VulnerabilitySerializer.Meta.fields + [
+    class Meta(VulnerabilityBaseDetailSerializer.Meta):
+        fields = VulnerabilityBaseDetailSerializer.Meta.fields + [
             'weighted_risk_score',
             'currently_present',
             'fixability_category',

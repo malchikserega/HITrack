@@ -93,6 +93,7 @@ export interface Vulnerability extends BaseEntity {
   has_details: boolean
   exploit_available: boolean
   cisa_kev: boolean
+  threat_intel_match?: VulnerabilityThreatIntelMatch
   weighted_risk_score?: number
   currently_present?: boolean
   fixability_category?: string
@@ -114,6 +115,30 @@ export interface VulnerabilityRiskPrioritization {
   affected_releases_count: number
   affected_images_count: number
   active_images_count: number
+}
+
+export interface VulnerabilityThreatIntelEntry {
+  intel_type: 'observed' | 'kev' | 'supply_chain'
+  label: string
+  identifier: string
+  title: string
+  timestamp?: string | null
+  source_labels?: string[]
+  tags?: string[]
+  matched_by?: string | null
+  matched_identifier?: string | null
+  matched_vulnerability_id?: string | null
+  currently_present?: boolean
+  relevant_in_hitrack?: boolean
+  hitrack_match?: WeeklyThreatIntelMatch | null
+}
+
+export interface VulnerabilityThreatIntelMatch {
+  matched_this_week: boolean
+  period_start?: string | null
+  period_end?: string | null
+  has_external_matches: boolean
+  entries: VulnerabilityThreatIntelEntry[]
 }
 
 /**

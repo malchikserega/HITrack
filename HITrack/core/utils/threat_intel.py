@@ -48,6 +48,18 @@ def _normalize_vulnerability_identifier(identifier: str | None) -> str | None:
     return normalized or None
 
 
+def _parse_match_timestamp(value):
+    if not value:
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+    try:
+        if isinstance(value, str) and 'T' in value:
+            return datetime.fromisoformat(value.replace('Z', '+00:00'))
+        return datetime.fromisoformat(f"{value}T00:00:00+00:00")
+    except Exception:
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
 def _build_hitrack_location_preview(vulnerability_queryset) -> Dict[int, Dict]:
     vulnerability_ids = [vulnerability.pk for vulnerability in vulnerability_queryset]
     if not vulnerability_ids:
@@ -407,3 +419,141 @@ def get_dashboard_weekly_threat_intel(limit: int | None = 5) -> Dict:
         }, limit)
 
     return build_live_weekly_threat_intel_summary(limit=limit)
+
+
+def _entry_matches_vulnerability(entry: Dict, vulnerability: Vulnerability) -> bool:
+    vulnerability_uuid = str(vulnerability.uuid)
+    vulnerability_id = _normalize_vulnerability_identifier(vulnerability.vulnerability_id)
+    if not vulnerability_id:
+        return False
+
+    if entry.get('target_uuid') == vulnerability_uuid:
+        return True
+
+    candidate_identifiers = [
+        entry.get('matched_vulnerability_id'),
+        entry.get('vulnerability_id'),
+        entry.get('matched_identifier'),
+        entry.get('ghsa_id'),
+        entry.get('cve_id'),
+        entry.get('osv_id'),
+        entry.get('advisory_id'),
+        *(entry.get('aliases') or []),
+    ]
+    normalized_candidates = {
+        normalized
+        for normalized in (
+            _normalize_vulnerability_identifier(identifier)
+            for identifier in candidate_identifiers
+        )
+        if normalized
+    }
+    return vulnerability_id in normalized_candidates
+
+
+def _build_vulnerability_threat_intel_match(summary: Dict, vulnerability: Vulnerability) -> Dict:
+    entry_groups = [
+        ('observed', 'Observed In HITrack', (summary.get('observed_this_week') or {}).get('entries', [])),
+        ('kev', 'New KEV This Week', (summary.get('kev_added_this_week') or {}).get('entries', [])),
+        ('supply_chain', 'Supply-Chain Advisories', (summary.get('supply_chain_this_week') or {}).get('entries', [])),
+    ]
+
+    matched_entries = []
+    for intel_type, label, entries in entry_groups:
+        for entry in entries:
+            if not _entry_matches_vulnerability(entry, vulnerability):
+                continue
+            matched_entries.append({
+                'intel_type': intel_type,
+                'label': label,
+                'identifier': entry.get('advisory_id')
+                or entry.get('osv_id')
+                or entry.get('vulnerability_id')
+                or entry.get('matched_identifier')
+                or vulnerability.vulnerability_id,
+                'title': entry.get('title') or entry.get('vulnerability_id') or vulnerability.vulnerability_id,
+                'timestamp': entry.get('published_at') or entry.get('date_added') or entry.get('created_at'),
+                'source_labels': entry.get('source_labels') or [],
+                'tags': entry.get('tags') or [],
+                'matched_by': entry.get('matched_by'),
+                'matched_identifier': entry.get('matched_identifier'),
+                'matched_vulnerability_id': entry.get('matched_vulnerability_id'),
+                'currently_present': bool(entry.get('currently_present')),
+                'relevant_in_hitrack': bool(entry.get('relevant_in_hitrack', True)),
+                'hitrack_match': entry.get('hitrack_match') or {
+                    'repository_count': 0,
+                    'repositories': [],
+                    'tag_count': 0,
+                    'tags': [],
+                    'image_count': 0,
+                    'images': [],
+                },
+            })
+
+    matched_entries.sort(
+        key=lambda item: _parse_match_timestamp(item.get('timestamp')),
+        reverse=True,
+    )
+
+    return {
+        'matched_this_week': bool(matched_entries),
+        'period_start': summary.get('period_start'),
+        'period_end': summary.get('period_end'),
+        'has_external_matches': any(entry['intel_type'] != 'observed' for entry in matched_entries),
+        'entries': matched_entries[:5],
+    }
+
+
+def get_vulnerability_weekly_threat_intel_match(vulnerability: Vulnerability) -> Dict:
+    week_start, week_end = get_current_week_period()
+    latest_snapshot = ThreatIntelSnapshot.objects.filter(
+        snapshot_date__gte=week_start,
+    ).order_by('-snapshot_date', '-updated_at').first()
+
+    if latest_snapshot:
+        return _build_vulnerability_threat_intel_match({
+            'period_start': latest_snapshot.period_start.isoformat(),
+            'period_end': latest_snapshot.period_end.isoformat(),
+            'observed_this_week': latest_snapshot.observed_this_week,
+            'kev_added_this_week': latest_snapshot.kev_added_this_week,
+            'supply_chain_this_week': latest_snapshot.supply_chain_this_week,
+        }, vulnerability)
+
+    created_date = timezone.localtime(vulnerability.created_at).date() if vulnerability.created_at else None
+    if created_date and week_start <= created_date <= week_end:
+        return {
+            'matched_this_week': True,
+            'period_start': week_start.isoformat(),
+            'period_end': week_end.isoformat(),
+            'has_external_matches': False,
+            'entries': [{
+                'intel_type': 'observed',
+                'label': 'Observed In HITrack',
+                'identifier': vulnerability.vulnerability_id,
+                'title': vulnerability.vulnerability_id,
+                'timestamp': vulnerability.created_at.isoformat() if vulnerability.created_at else None,
+                'source_labels': ['HITrack'],
+                'tags': [vulnerability.vulnerability_type],
+                'matched_by': 'Vulnerability ID',
+                'matched_identifier': vulnerability.vulnerability_id,
+                'matched_vulnerability_id': vulnerability.vulnerability_id,
+                'currently_present': False,
+                'relevant_in_hitrack': True,
+                'hitrack_match': {
+                    'repository_count': 0,
+                    'repositories': [],
+                    'tag_count': 0,
+                    'tags': [],
+                    'image_count': 0,
+                    'images': [],
+                },
+            }],
+        }
+
+    return {
+        'matched_this_week': False,
+        'period_start': week_start.isoformat(),
+        'period_end': week_end.isoformat(),
+        'has_external_matches': False,
+        'entries': [],
+    }

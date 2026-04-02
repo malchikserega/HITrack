@@ -14,7 +14,7 @@ from .serializers import (
     StatsResponseSerializer, JobAddRepositoriesRequestSerializer,
     JobAddRepositoriesResponseSerializer, ImageDropdownSerializer,
     ReleaseSerializer, RepositoryTagReleaseSerializer, ReleaseAssignmentSerializer,
-    VulnerabilityListSerializer, VulnerabilityDetailsSerializer, VulnerabilityDetailSerializer, VulnerabilityRiskPrioritizationSerializer,
+    VulnerabilityListSerializer, VulnerabilityDetailsSerializer, VulnerabilityDetailSerializer, VulnerabilityRiskPrioritizationSerializer, VulnerabilityBaseDetailSerializer,
     TaskResultSerializer, TaskResultListSerializer, PeriodicTaskSerializer, TaskStatisticsSerializer,
     ComponentLocationSerializer, VulnerabilityAffectedImageSerializer,
     ImageComparisonGroupSerializer
@@ -2560,7 +2560,7 @@ class VulnerabilityViewSet(BaseViewSet):
         if self.action == 'retrieve':
             include_analytics = self.request.query_params.get('include_analytics', '1').lower()
             if include_analytics in {'0', 'false', 'no'}:
-                return VulnerabilitySerializer
+                return VulnerabilityBaseDetailSerializer
             return VulnerabilityDetailSerializer
         return VulnerabilitySerializer
 
