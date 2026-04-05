@@ -297,22 +297,49 @@
                           >
                             Preview will load when expanded.
                           </div>
-                          <div v-else-if="!item.repositories_preview.length" class="text-body-2 text-medium-emphasis">
-                            No repository preview available.
-                          </div>
-                          <div v-else class="preview-list">
-                            <button
-                              v-for="repository in item.repositories_preview"
-                              :key="`${item.key}-${repository.repository_uuid}`"
-                              type="button"
-                              class="preview-pill"
-                              @click="openRepository(repository.repository_uuid)"
+                          <div
+                            v-else
+                            class="preview-scroll"
+                            @scroll.passive="onSectionScroll(item, 'repositories', $event)"
+                          >
+                            <div v-if="!repositorySectionItems(item).length" class="text-body-2 text-medium-emphasis">
+                              No repository preview available.
+                            </div>
+                            <div v-else class="preview-list">
+                              <button
+                                v-for="repository in repositorySectionItems(item)"
+                                :key="`${item.key}-${repository.repository_uuid}`"
+                                type="button"
+                                class="preview-pill"
+                                @click="openRepository(repository.repository_uuid)"
+                              >
+                                <span class="preview-pill__title">{{ repository.repository_name }}</span>
+                                <span class="preview-pill__meta">
+                                  {{ repository.affected_images_count }} images · {{ repository.affected_tags_count }} tags
+                                </span>
+                              </button>
+                            </div>
+                            <div v-if="isSectionLoading(item, 'repositories')" class="section-loading">
+                              Loading more repositories...
+                            </div>
+                            <div v-else-if="hasSectionError(item, 'repositories')" class="section-loading section-loading--error">
+                              <span>Could not load more repositories.</span>
+                              <v-btn
+                                size="small"
+                                variant="text"
+                                color="primary"
+                                class="px-0"
+                                @click="retrySectionLoad(item, 'repositories')"
+                              >
+                                Retry
+                              </v-btn>
+                            </div>
+                            <div
+                              v-else-if="!sectionHasMore(item, 'repositories') && repositorySectionItems(item).length"
+                              class="section-loading section-loading--done"
                             >
-                              <span class="preview-pill__title">{{ repository.repository_name }}</span>
-                              <span class="preview-pill__meta">
-                                {{ repository.affected_images_count }} images · {{ repository.affected_tags_count }} tags
-                              </span>
-                            </button>
+                              All affected repositories loaded.
+                            </div>
                           </div>
                         </div>
 
@@ -350,22 +377,49 @@
                           >
                             Preview will load when expanded.
                           </div>
-                          <div v-else-if="!item.components_preview.length" class="text-body-2 text-medium-emphasis">
-                            No component preview available.
-                          </div>
-                          <div v-else class="preview-list">
-                            <button
-                              v-for="component in item.components_preview"
-                              :key="`${item.key}-${component.component_uuid}-${component.version}`"
-                              type="button"
-                              class="preview-pill"
-                              @click="openComponent(component.component_uuid)"
+                          <div
+                            v-else
+                            class="preview-scroll"
+                            @scroll.passive="onSectionScroll(item, 'components', $event)"
+                          >
+                            <div v-if="!componentSectionItems(item).length" class="text-body-2 text-medium-emphasis">
+                              No component preview available.
+                            </div>
+                            <div v-else class="preview-list">
+                              <button
+                                v-for="component in componentSectionItems(item)"
+                                :key="`${item.key}-${component.component_uuid}-${component.version}`"
+                                type="button"
+                                class="preview-pill"
+                                @click="openComponent(component.component_uuid)"
+                              >
+                                <span class="preview-pill__title">{{ component.component_name }}@{{ component.version }}</span>
+                                <span class="preview-pill__meta">
+                                  {{ component.component_type }} · {{ component.affected_images_count }} images · {{ component.vulnerabilities_count }} vulns
+                                </span>
+                              </button>
+                            </div>
+                            <div v-if="isSectionLoading(item, 'components')" class="section-loading">
+                              Loading more components...
+                            </div>
+                            <div v-else-if="hasSectionError(item, 'components')" class="section-loading section-loading--error">
+                              <span>Could not load more components.</span>
+                              <v-btn
+                                size="small"
+                                variant="text"
+                                color="primary"
+                                class="px-0"
+                                @click="retrySectionLoad(item, 'components')"
+                              >
+                                Retry
+                              </v-btn>
+                            </div>
+                            <div
+                              v-else-if="!sectionHasMore(item, 'components') && componentSectionItems(item).length"
+                              class="section-loading section-loading--done"
                             >
-                              <span class="preview-pill__title">{{ component.component_name }}@{{ component.version }}</span>
-                              <span class="preview-pill__meta">
-                                {{ component.component_type }} · {{ component.affected_images_count }} images · {{ component.vulnerabilities_count }} vulns
-                              </span>
-                            </button>
+                              All visible components loaded.
+                            </div>
                           </div>
                         </div>
 
@@ -403,24 +457,51 @@
                           >
                             Preview will load when expanded.
                           </div>
-                          <div v-else-if="!item.vulnerabilities_preview.length" class="text-body-2 text-medium-emphasis">
-                            No vulnerability preview available.
-                          </div>
-                          <div v-else class="preview-list">
-                            <button
-                              v-for="vulnerability in item.vulnerabilities_preview"
-                              :key="`${item.key}-${vulnerability.uuid}`"
-                              type="button"
-                              class="preview-pill preview-pill--vulnerability"
-                              @click="openVulnerability(vulnerability.uuid)"
+                          <div
+                            v-else
+                            class="preview-scroll preview-scroll--wide"
+                            @scroll.passive="onSectionScroll(item, 'vulnerabilities', $event)"
+                          >
+                            <div v-if="!vulnerabilitySectionItems(item).length" class="text-body-2 text-medium-emphasis">
+                              No vulnerability preview available.
+                            </div>
+                            <div v-else class="preview-list">
+                              <button
+                                v-for="vulnerability in vulnerabilitySectionItems(item)"
+                                :key="`${item.key}-${vulnerability.uuid}`"
+                                type="button"
+                                class="preview-pill preview-pill--vulnerability"
+                                @click="openVulnerability(vulnerability.uuid)"
+                              >
+                                <span class="preview-pill__title">{{ vulnerability.vulnerability_id }}</span>
+                                <span class="preview-pill__meta">
+                                  {{ vulnerability.severity }} · EPSS {{ vulnerability.epss.toFixed(3) }}
+                                  <span v-if="vulnerability.cisa_kev"> · KEV</span>
+                                  <span v-if="vulnerability.exploit_available"> · Exploit</span>
+                                </span>
+                              </button>
+                            </div>
+                            <div v-if="isSectionLoading(item, 'vulnerabilities')" class="section-loading">
+                              Loading more vulnerabilities...
+                            </div>
+                            <div v-else-if="hasSectionError(item, 'vulnerabilities')" class="section-loading section-loading--error">
+                              <span>Could not load more vulnerabilities.</span>
+                              <v-btn
+                                size="small"
+                                variant="text"
+                                color="primary"
+                                class="px-0"
+                                @click="retrySectionLoad(item, 'vulnerabilities')"
+                              >
+                                Retry
+                              </v-btn>
+                            </div>
+                            <div
+                              v-else-if="!sectionHasMore(item, 'vulnerabilities') && vulnerabilitySectionItems(item).length"
+                              class="section-loading section-loading--done"
                             >
-                              <span class="preview-pill__title">{{ vulnerability.vulnerability_id }}</span>
-                              <span class="preview-pill__meta">
-                                {{ vulnerability.severity }} · EPSS {{ vulnerability.epss.toFixed(3) }}
-                                <span v-if="vulnerability.cisa_kev"> · KEV</span>
-                                <span v-if="vulnerability.exploit_available"> · Exploit</span>
-                              </span>
-                            </button>
+                              All visible vulnerabilities loaded.
+                            </div>
                           </div>
                         </div>
                       </div>
@@ -442,14 +523,34 @@ import { useRouter } from 'vue-router'
 import api from '../plugins/axios'
 import type {
   BaseLineageRootCauseBatchPreviewResponse,
+  BaseLineageRootCauseSectionName,
+  BaseLineageRootCauseSectionResponse,
   BaseLineageRootCause,
+  BaseLineageComponentPreview,
   BaseLineageRootCausePreviewResponse,
   BaseLineageRootCauseResponse,
+  RootCauseRepositoryPreview,
+  RootCauseVulnerabilityPreview,
 } from '../types/interfaces'
 
 const router = useRouter()
 
 type PreviewStatus = 'idle' | 'ready' | 'error'
+type InfiniteSectionState<T> = {
+  items: T[]
+  nextOffset: number
+  hasMore: boolean
+  loading: boolean
+  initialized: boolean
+  error: boolean
+}
+
+type BaseLineageSectionState = {
+  repositories: InfiniteSectionState<RootCauseRepositoryPreview>
+  components: InfiniteSectionState<BaseLineageComponentPreview>
+  vulnerabilities: InfiniteSectionState<RootCauseVulnerabilityPreview>
+}
+
 type BaseLineageRootCauseViewItem = BaseLineageRootCause & {
   preview_status: PreviewStatus
 }
@@ -464,6 +565,7 @@ const sortBy = ref<{ key: string; order: 'asc' | 'desc' }[]>([
 ])
 const expandedIds = ref<string[]>([])
 const previewLoadingKeys = ref<string[]>([])
+const sectionStates = ref<Record<string, BaseLineageSectionState>>({})
 const search = ref('')
 const appliedSearch = ref('')
 const scope = ref('cross_repository')
@@ -471,6 +573,7 @@ const fixability = ref('all')
 const includeUnknown = ref(false)
 const lastOptionsKey = ref('')
 const PREFETCH_PREVIEW_LIMIT = 4
+const SECTION_PAGE_SIZE = 20
 const hasPreviewContent = (item: {
   repositories_preview?: unknown[]
   components_preview?: unknown[]
@@ -490,6 +593,117 @@ const canExpectPreview = (item: {
   || (item.affected_images_count || 0) > 0
   || (item.vulnerabilities_count || 0) > 0
 )
+
+const uniqueSectionItems = <T>(items: T[], getKey: (item: T) => string) => {
+  const seen = new Set<string>()
+  return items.filter((item) => {
+    const key = getKey(item)
+    if (seen.has(key)) {
+      return false
+    }
+    seen.add(key)
+    return true
+  })
+}
+
+const repositoryPreviewKey = (item: RootCauseRepositoryPreview) => item.repository_uuid
+const componentPreviewKey = (item: BaseLineageComponentPreview) => `${item.component_uuid}:${item.version}`
+const vulnerabilityPreviewKey = (item: RootCauseVulnerabilityPreview) => item.uuid
+
+const createInfiniteSectionState = <T>(seedItems: T[], hasMore: boolean): InfiniteSectionState<T> => ({
+  items: seedItems,
+  nextOffset: seedItems.length,
+  hasMore,
+  loading: false,
+  initialized: true,
+  error: false,
+})
+
+const getSectionSeed = (item: BaseLineageRootCauseViewItem, section: BaseLineageRootCauseSectionName) => {
+  switch (section) {
+    case 'repositories':
+      return item.repositories_preview || []
+    case 'components':
+      return item.components_preview || []
+    case 'vulnerabilities':
+      return item.vulnerabilities_preview || []
+  }
+}
+
+const getInitialHasMore = (item: BaseLineageRootCauseViewItem, section: BaseLineageRootCauseSectionName, seedLength: number) => {
+  switch (section) {
+    case 'repositories':
+      return (item.affected_repositories_count || 0) > seedLength
+    case 'components':
+      return seedLength > 0 || (item.affected_images_count || 0) > 0
+    case 'vulnerabilities':
+      return (item.vulnerabilities_count || 0) > seedLength
+  }
+}
+
+const buildSectionState = (item: BaseLineageRootCauseViewItem): BaseLineageSectionState => ({
+  repositories: createInfiniteSectionState(
+    uniqueSectionItems(item.repositories_preview || [], repositoryPreviewKey),
+    getInitialHasMore(item, 'repositories', (item.repositories_preview || []).length),
+  ),
+  components: createInfiniteSectionState(
+    uniqueSectionItems(item.components_preview || [], componentPreviewKey),
+    getInitialHasMore(item, 'components', (item.components_preview || []).length),
+  ),
+  vulnerabilities: createInfiniteSectionState(
+    uniqueSectionItems(item.vulnerabilities_preview || [], vulnerabilityPreviewKey),
+    getInitialHasMore(item, 'vulnerabilities', (item.vulnerabilities_preview || []).length),
+  ),
+})
+
+const ensureSectionState = (item: BaseLineageRootCauseViewItem) => {
+  if (!sectionStates.value[item.key]) {
+    sectionStates.value[item.key] = buildSectionState(item)
+  }
+  return sectionStates.value[item.key]
+}
+
+const syncSectionStateFromItem = (item: BaseLineageRootCauseViewItem, overwrite = false) => {
+  const state = sectionStates.value[item.key]
+  if (!state) {
+    sectionStates.value[item.key] = buildSectionState(item)
+    return
+  }
+
+  const repositoriesSeed = uniqueSectionItems(item.repositories_preview || [], repositoryPreviewKey)
+  const componentsSeed = uniqueSectionItems(item.components_preview || [], componentPreviewKey)
+  const vulnerabilitiesSeed = uniqueSectionItems(item.vulnerabilities_preview || [], vulnerabilityPreviewKey)
+
+  if (overwrite || !state.repositories.initialized) {
+    state.repositories = createInfiniteSectionState(
+      repositoriesSeed,
+      getInitialHasMore(item, 'repositories', repositoriesSeed.length),
+    )
+  }
+
+  if (overwrite || !state.components.initialized) {
+    state.components = createInfiniteSectionState(
+      componentsSeed,
+      getInitialHasMore(item, 'components', componentsSeed.length),
+    )
+  }
+
+  if (overwrite || !state.vulnerabilities.initialized) {
+    state.vulnerabilities = createInfiniteSectionState(
+      vulnerabilitiesSeed,
+      getInitialHasMore(item, 'vulnerabilities', vulnerabilitiesSeed.length),
+    )
+  }
+}
+
+const getSectionState = (
+  item: BaseLineageRootCauseViewItem,
+  section: BaseLineageRootCauseSectionName,
+) => ensureSectionState(item)[section]
+
+const repositorySectionState = (item: BaseLineageRootCauseViewItem) => ensureSectionState(item).repositories
+const componentSectionState = (item: BaseLineageRootCauseViewItem) => ensureSectionState(item).components
+const vulnerabilitySectionState = (item: BaseLineageRootCauseViewItem) => ensureSectionState(item).vulnerabilities
 
 const headers = [
   { title: '', key: 'expand', sortable: false, width: 56 },
@@ -556,6 +770,7 @@ const fetchItems = async () => {
       vulnerabilities_preview: item.vulnerabilities_preview || [],
       preview_status: hasPreviewContent(item) ? 'ready' as PreviewStatus : 'idle' as PreviewStatus,
     }))
+    items.value.forEach((item) => syncSectionStateFromItem(item, true))
     totalItems.value = response.data.count || 0
     const optionsKey = buildOptionsKey()
     void prefetchVisiblePreviews(optionsKey)
@@ -646,6 +861,10 @@ const fetchPreview = async (key: string, lineageSource?: string) => {
         ? 'ready'
         : (canExpectPreview(item) ? 'error' : 'idle'),
     } : item)
+    const updatedItem = items.value.find((item) => item.key === key)
+    if (updatedItem) {
+      syncSectionStateFromItem(updatedItem, true)
+    }
   } catch (error) {
     items.value = items.value.map((item) => item.key === key ? {
       ...item,
@@ -707,10 +926,153 @@ const prefetchVisiblePreviews = async (optionsKey: string) => {
         preview_status: hasPreviewContent(preview) ? 'ready' : 'idle',
       }
     })
+    items.value.forEach((item) => {
+      if (previewMap.has(item.key)) {
+        syncSectionStateFromItem(item)
+      }
+    })
   } finally {
     previewLoadingKeys.value = previewLoadingKeys.value.filter((value) => !loadingKeys.includes(value))
   }
 }
+
+const fetchSectionPage = async (
+  item: BaseLineageRootCauseViewItem,
+  section: BaseLineageRootCauseSectionName,
+) => {
+  const state = getSectionState(item, section)
+  if (state.loading || !state.hasMore) {
+    return
+  }
+
+  state.loading = true
+  state.error = false
+  try {
+    if (item.preview_status !== 'ready') {
+      await fetchPreview(item.key, item.lineage_source)
+    }
+
+    const refreshedItem = items.value.find((entry) => entry.key === item.key)
+    const targetItem = refreshedItem || item
+    if (section === 'repositories') {
+      const targetState = repositorySectionState(targetItem)
+      const response = await api.get<BaseLineageRootCauseSectionResponse<RootCauseRepositoryPreview>>(
+        'stats/base-lineage-root-causes-section/',
+        {
+          params: {
+            lineage_label: targetItem.key,
+            lineage_source: targetItem.lineage_source,
+            include_unknown: includeUnknown.value ? 1 : 0,
+            section,
+            offset: targetState.nextOffset,
+            limit: SECTION_PAGE_SIZE,
+          },
+        },
+      )
+      targetState.items = uniqueSectionItems(
+        [...targetState.items, ...(response.data.results || [])],
+        repositoryPreviewKey,
+      )
+      targetState.nextOffset = response.data.next_offset ?? targetState.items.length
+      targetState.hasMore = Boolean(response.data.has_more)
+      targetState.initialized = true
+      targetState.error = false
+    } else if (section === 'components') {
+      const targetState = componentSectionState(targetItem)
+      const response = await api.get<BaseLineageRootCauseSectionResponse<BaseLineageComponentPreview>>(
+        'stats/base-lineage-root-causes-section/',
+        {
+          params: {
+            lineage_label: targetItem.key,
+            lineage_source: targetItem.lineage_source,
+            include_unknown: includeUnknown.value ? 1 : 0,
+            section,
+            offset: targetState.nextOffset,
+            limit: SECTION_PAGE_SIZE,
+          },
+        },
+      )
+      targetState.items = uniqueSectionItems(
+        [...targetState.items, ...(response.data.results || [])],
+        componentPreviewKey,
+      )
+      targetState.nextOffset = response.data.next_offset ?? targetState.items.length
+      targetState.hasMore = Boolean(response.data.has_more)
+      targetState.initialized = true
+      targetState.error = false
+    } else {
+      const targetState = vulnerabilitySectionState(targetItem)
+      const response = await api.get<BaseLineageRootCauseSectionResponse<RootCauseVulnerabilityPreview>>(
+        'stats/base-lineage-root-causes-section/',
+        {
+          params: {
+            lineage_label: targetItem.key,
+            lineage_source: targetItem.lineage_source,
+            include_unknown: includeUnknown.value ? 1 : 0,
+            section,
+            offset: targetState.nextOffset,
+            limit: SECTION_PAGE_SIZE,
+          },
+        },
+      )
+      targetState.items = uniqueSectionItems(
+        [...targetState.items, ...(response.data.results || [])],
+        vulnerabilityPreviewKey,
+      )
+      targetState.nextOffset = response.data.next_offset ?? targetState.items.length
+      targetState.hasMore = Boolean(response.data.has_more)
+      targetState.initialized = true
+      targetState.error = false
+    }
+  } catch (error) {
+    state.error = true
+  } finally {
+    state.loading = false
+  }
+}
+
+const onSectionScroll = async (
+  item: BaseLineageRootCauseViewItem,
+  section: BaseLineageRootCauseSectionName,
+  event: Event,
+) => {
+  const target = event.target as HTMLElement | null
+  if (!target) {
+    return
+  }
+  const distanceToBottom = target.scrollHeight - target.scrollTop - target.clientHeight
+  if (distanceToBottom <= 96) {
+    await fetchSectionPage(item, section)
+  }
+}
+
+const retrySectionLoad = async (
+  item: BaseLineageRootCauseViewItem,
+  section: BaseLineageRootCauseSectionName,
+) => {
+  const state = getSectionState(item, section)
+  state.error = false
+  await fetchSectionPage(item, section)
+}
+
+const repositorySectionItems = (item: BaseLineageRootCauseViewItem) => repositorySectionState(item).items
+const componentSectionItems = (item: BaseLineageRootCauseViewItem) => componentSectionState(item).items
+const vulnerabilitySectionItems = (item: BaseLineageRootCauseViewItem) => vulnerabilitySectionState(item).items
+
+const isSectionLoading = (
+  item: BaseLineageRootCauseViewItem,
+  section: BaseLineageRootCauseSectionName,
+) => getSectionState(item, section).loading
+
+const hasSectionError = (
+  item: BaseLineageRootCauseViewItem,
+  section: BaseLineageRootCauseSectionName,
+) => getSectionState(item, section).error
+
+const sectionHasMore = (
+  item: BaseLineageRootCauseViewItem,
+  section: BaseLineageRootCauseSectionName,
+) => getSectionState(item, section).hasMore
 
 const toggleExpanded = async (key: string) => {
   if (isExpanded(key)) {
@@ -720,7 +1082,11 @@ const toggleExpanded = async (key: string) => {
 
   expandedIds.value = [...expandedIds.value, key]
   const item = items.value.find((entry) => entry.key === key)
-  if (item && item.preview_status !== 'ready') {
+  if (!item) {
+    return
+  }
+  ensureSectionState(item)
+  if (item.preview_status !== 'ready') {
     await fetchPreview(key, item.lineage_source)
   }
 }
@@ -878,11 +1244,38 @@ refreshIfNeeded()
   gap: 10px;
 }
 
+.preview-scroll {
+  max-height: 360px;
+  overflow-y: auto;
+  padding-right: 6px;
+}
+
+.preview-scroll--wide {
+  max-height: 320px;
+}
+
 .preview-status-block {
   display: flex;
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
+}
+
+.section-loading {
+  padding-top: 12px;
+  color: rgba(0, 0, 0, 0.6);
+  font-size: 0.9rem;
+}
+
+.section-loading--error {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.section-loading--done {
+  color: rgba(0, 0, 0, 0.45);
 }
 
 .preview-pill {

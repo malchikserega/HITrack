@@ -18,7 +18,9 @@ from .serializers import (
     TaskResultSerializer, TaskResultListSerializer, PeriodicTaskSerializer, TaskStatisticsSerializer,
     ComponentLocationSerializer, VulnerabilityAffectedImageSerializer,
     ImageComparisonGroupSerializer, SharedRootCauseSerializer, SharedRootCausePreviewSerializer,
-    BaseLineageRootCauseSerializer, BaseLineageRootCausePreviewSerializer
+    BaseLineageRootCauseSerializer, BaseLineageRootCausePreviewSerializer,
+    RootCauseRepositoryPreviewSerializer, RootCauseVulnerabilityPreviewSerializer,
+    BaseLineageComponentPreviewSerializer,
 )
 from django.db import models
 from .pagination import CustomPageNumberPagination
@@ -1029,6 +1031,163 @@ def _build_base_lineage_preview_payload(lineage_label, lineage_members):
         'components_preview': components_preview_map.get(lineage_label, []),
         'vulnerabilities_preview': vulnerabilities_preview_map.get(lineage_label, []),
     }
+
+
+def _parse_bounded_integer(value, default, minimum=0, maximum=None):
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+
+    if parsed < minimum:
+        parsed = minimum
+    if maximum is not None and parsed > maximum:
+        parsed = maximum
+    return parsed
+
+
+def _paginate_section_results(results, offset, limit, has_more=False):
+    paged_results = results[:limit]
+    return {
+        'offset': offset,
+        'limit': limit,
+        'next_offset': offset + limit if has_more else None,
+        'has_more': has_more,
+        'results': paged_results,
+    }
+
+
+def _build_base_lineage_repositories_section_payload(lineage_members, offset=0, limit=20):
+    rows = list(
+        lineage_members
+        .filter(repository_tags__repository__uuid__isnull=False)
+        .values(
+            repository_uuid=F('repository_tags__repository__uuid'),
+            repository_name=F('repository_tags__repository__name'),
+        )
+        .annotate(
+            affected_images_count=Count('pk', distinct=True),
+            affected_tags_count=Count('repository_tags', distinct=True),
+        )
+        .order_by('-affected_images_count', '-affected_tags_count', 'repository_name')[offset:offset + limit + 1]
+    )
+    serialized = RootCauseRepositoryPreviewSerializer(rows[:limit], many=True).data
+    return _paginate_section_results(serialized, offset, limit, has_more=len(rows) > limit)
+
+
+def _build_base_lineage_components_section_payload(lineage_members, offset=0, limit=20):
+    rows = list(
+        lineage_members
+        .filter(
+            component_versions__component__uuid__isnull=False,
+            component_versions__version__isnull=False,
+        )
+        .values(
+            component_uuid=F('component_versions__component__uuid'),
+            component_name=F('component_versions__component__name'),
+            version=F('component_versions__version'),
+            component_type=F('component_versions__component__type'),
+        )
+        .annotate(
+            affected_images_count=Count('pk', distinct=True),
+            vulnerabilities_count=Count(
+                'component_versions__componentversionvulnerability__vulnerability',
+                distinct=True,
+            ),
+        )
+        .order_by(
+            '-affected_images_count',
+            '-vulnerabilities_count',
+            'component_name',
+            'version',
+        )[offset:offset + limit + 1]
+    )
+    serialized = BaseLineageComponentPreviewSerializer(rows[:limit], many=True).data
+    return _paginate_section_results(serialized, offset, limit, has_more=len(rows) > limit)
+
+
+def _build_base_lineage_vulnerabilities_section_payload(lineage_members, offset=0, limit=20):
+    severity_rank = Case(
+        When(
+            component_versions__componentversionvulnerability__vulnerability__severity__iexact='CRITICAL',
+            then=Value(4),
+        ),
+        When(
+            component_versions__componentversionvulnerability__vulnerability__severity__iexact='HIGH',
+            then=Value(3),
+        ),
+        When(
+            component_versions__componentversionvulnerability__vulnerability__severity__iexact='MEDIUM',
+            then=Value(2),
+        ),
+        When(
+            component_versions__componentversionvulnerability__vulnerability__severity__iexact='LOW',
+            then=Value(1),
+        ),
+        default=Value(0),
+        output_field=IntegerField(),
+    )
+    rows = list(
+        lineage_members
+        .filter(component_versions__componentversionvulnerability__vulnerability__uuid__isnull=False)
+        .values(
+            vulnerability_uuid=F('component_versions__componentversionvulnerability__vulnerability__uuid'),
+            vulnerability_id=F('component_versions__componentversionvulnerability__vulnerability__vulnerability_id'),
+            severity=F('component_versions__componentversionvulnerability__vulnerability__severity'),
+            epss=F('component_versions__componentversionvulnerability__vulnerability__epss'),
+        )
+        .annotate(
+            affected_images_count=Count('pk', distinct=True),
+            cisa_kev_int=Max(
+                Case(
+                    When(
+                        component_versions__componentversionvulnerability__vulnerability__details__cisa_kev_known_exploited=True,
+                        then=Value(1),
+                    ),
+                    default=Value(0),
+                    output_field=IntegerField(),
+                )
+            ),
+            exploit_available_int=Max(
+                Case(
+                    When(
+                        component_versions__componentversionvulnerability__vulnerability__details__exploit_available=True,
+                        then=Value(1),
+                    ),
+                    default=Value(0),
+                    output_field=IntegerField(),
+                )
+            ),
+            severity_rank=severity_rank,
+        )
+        .order_by('-severity_rank', '-epss', '-affected_images_count', 'vulnerability_id')[offset:offset + limit + 1]
+    )
+
+    payload = [
+        {
+            'uuid': str(row['vulnerability_uuid']),
+            'vulnerability_id': row['vulnerability_id'],
+            'severity': row['severity'] or 'UNKNOWN',
+            'epss': round(float(row['epss'] or 0.0), 3),
+            'cisa_kev': bool(row['cisa_kev_int']),
+            'exploit_available': bool(row['exploit_available_int']),
+            'fix_status': None,
+        }
+        for row in rows[:limit]
+        if row.get('vulnerability_uuid') and row.get('vulnerability_id')
+    ]
+    serialized = RootCauseVulnerabilityPreviewSerializer(payload, many=True).data
+    return _paginate_section_results(serialized, offset, limit, has_more=len(rows) > limit)
+
+
+def _build_base_lineage_section_payload(lineage_members, section, offset=0, limit=20):
+    if section == 'repositories':
+        return _build_base_lineage_repositories_section_payload(lineage_members, offset=offset, limit=limit)
+    if section == 'components':
+        return _build_base_lineage_components_section_payload(lineage_members, offset=offset, limit=limit)
+    if section == 'vulnerabilities':
+        return _build_base_lineage_vulnerabilities_section_payload(lineage_members, offset=offset, limit=limit)
+    raise ValueError(f'Unsupported base lineage section: {section}')
 
 
 def _build_targeted_base_lineage_members_queryset(lineage_label, lineage_source=None, include_unknown=False):
@@ -3927,6 +4086,51 @@ class StatsViewSet(viewsets.ViewSet):
             })
 
         return Response({'results': results})
+
+    @method_decorator(cache_page(60))
+    @action(detail=False, methods=['get'], url_path='base-lineage-root-causes-section')
+    def base_lineage_root_causes_section(self, request):
+        section = (request.query_params.get('section') or '').strip()
+        lineage_label = (request.query_params.get('lineage_label') or '').strip()
+        lineage_source = (request.query_params.get('lineage_source') or '').strip()
+        include_unknown = str(request.query_params.get('include_unknown', '0')).lower() in {'1', 'true', 'yes'}
+        offset = _parse_bounded_integer(request.query_params.get('offset'), 0, minimum=0)
+        limit = _parse_bounded_integer(request.query_params.get('limit'), 20, minimum=1, maximum=50)
+
+        if section not in {'repositories', 'components', 'vulnerabilities'}:
+            return Response(
+                {'detail': 'section must be one of repositories, components, vulnerabilities'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not lineage_label:
+            return Response(
+                {'detail': 'lineage_label query parameter is required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        lineage_members = _build_targeted_base_lineage_members_queryset(
+            lineage_label=lineage_label,
+            lineage_source=lineage_source or None,
+            include_unknown=include_unknown,
+        )
+        if not lineage_members.exists():
+            return Response(
+                {'detail': 'Base lineage not found'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        try:
+            payload = _build_base_lineage_section_payload(
+                lineage_members,
+                section=section,
+                offset=offset,
+                limit=limit,
+            )
+        except ValueError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(payload)
 
 class JobViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]

@@ -533,7 +533,6 @@ def _bulk_insert_shared_root_cause_rows(snapshot, serialized_rows, batch_size=50
             fix_unknown_count=row['fixability_breakdown']['fix_unknown'],
             latest_seen_at=row.get('latest_seen_at'),
             repositories_preview=row.get('repositories_preview', []),
-            components_preview=row.get('components_preview', []),
             vulnerabilities_preview=row.get('vulnerabilities_preview', []),
         )
         for row in serialized_rows

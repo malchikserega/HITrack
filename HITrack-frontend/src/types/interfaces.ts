@@ -339,6 +339,16 @@ export interface BaseLineageRootCauseBatchPreviewResponse {
   results: BaseLineageRootCauseBatchPreviewEntry[]
 }
 
+export type BaseLineageRootCauseSectionName = 'repositories' | 'components' | 'vulnerabilities'
+
+export interface BaseLineageRootCauseSectionResponse<T> {
+  offset: number
+  limit: number
+  next_offset: number | null
+  has_more: boolean
+  results: T[]
+}
+
 export interface VulnerabilityAffectedImageTag {
   repository_name: string
   repository_uuid: string

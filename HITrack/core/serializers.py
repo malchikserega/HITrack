@@ -912,6 +912,14 @@ class BaseLineageRootCausePreviewSerializer(serializers.Serializer):
     vulnerabilities_preview = RootCauseVulnerabilityPreviewSerializer(many=True)
 
 
+class BaseLineageRootCauseSectionResponseSerializer(serializers.Serializer):
+    offset = serializers.IntegerField()
+    limit = serializers.IntegerField()
+    next_offset = serializers.IntegerField(allow_null=True)
+    has_more = serializers.BooleanField()
+    results = serializers.ListField()
+
+
 class VulnerabilityImageRepositoryTagSerializer(serializers.Serializer):
     repository_name = serializers.CharField()
     repository_uuid = serializers.UUIDField()
