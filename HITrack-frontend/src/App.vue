@@ -209,6 +209,8 @@ const menuItems = [
   { title: 'Repositories', path: '/repositories' },
   { title: 'Images', path: '/images' },
   { title: 'Image Comparisons', path: '/image-comparisons' },
+  { title: 'Shared Root Causes', path: '/root-causes' },
+  { title: 'Base Images & Distros', path: '/base-lineage-root-causes' },
   { title: 'Components', path: '/components' },
   { title: 'Vulnerabilities', path: '/vulnerabilities' },
   { title: 'Releases', path: '/releases' },

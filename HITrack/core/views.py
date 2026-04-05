@@ -17,11 +17,12 @@ from .serializers import (
     VulnerabilityListSerializer, VulnerabilityDetailsSerializer, VulnerabilityDetailSerializer, VulnerabilityRiskPrioritizationSerializer, VulnerabilityBaseDetailSerializer,
     TaskResultSerializer, TaskResultListSerializer, PeriodicTaskSerializer, TaskStatisticsSerializer,
     ComponentLocationSerializer, VulnerabilityAffectedImageSerializer,
-    ImageComparisonGroupSerializer
+    ImageComparisonGroupSerializer, SharedRootCauseSerializer, SharedRootCausePreviewSerializer,
+    BaseLineageRootCauseSerializer, BaseLineageRootCausePreviewSerializer
 )
 from django.db import models
 from .pagination import CustomPageNumberPagination
-from django.db.models import Q, Count, Prefetch, Case, When, Value, BooleanField, IntegerField, F, CharField, TextField, Func, Max, OuterRef, Subquery
+from django.db.models import Q, Count, Prefetch, Case, When, Value, BooleanField, IntegerField, F, CharField, TextField, Func, Max, OuterRef, Subquery, Sum
 from django.db.models.query import prefetch_related_objects
 from django.db.models.functions import Cast, Concat, TruncDate, Coalesce
 from django.utils import timezone
@@ -41,10 +42,17 @@ from .utils.status import resolve_repository_tag_processing_status
 from .utils.threat_intel import get_dashboard_weekly_threat_intel
 from .utils.analytics import (
     build_dashboard_fixability_analytics,
+    build_base_lineage_grouped_queryset,
+    build_base_lineage_image_queryset,
     build_dashboard_risk_rankings,
+    build_shared_root_cause_queryset,
     build_recent_scan_deltas,
     build_release_delta_summary,
+    get_latest_root_cause_analytics_snapshots,
+    serialize_base_lineage_root_cause_summary_rows,
+    serialize_shared_root_cause_summary_rows,
     build_vulnerability_detail_analytics,
+    get_fixability_category_from_priority,
 )
 
 logger = logging.getLogger(__name__)
@@ -111,6 +119,90 @@ IMAGE_COMPARISON_ORDERING_MAP = {
     '-max_components_count': '-max_components_count',
     'latest_updated_at': 'latest_updated_at',
     '-latest_updated_at': '-latest_updated_at',
+}
+
+ROOT_CAUSE_ORDERING_MAP = {
+    'component_name': 'component__name',
+    '-component_name': '-component__name',
+    'version': 'version',
+    '-version': '-version',
+    'component_type': 'component__type',
+    '-component_type': '-component__type',
+    'affected_repositories_count': 'affected_repositories_count',
+    '-affected_repositories_count': '-affected_repositories_count',
+    'affected_images_count': 'affected_images_count',
+    '-affected_images_count': '-affected_images_count',
+    'vulnerabilities_count': 'vulnerabilities_count',
+    '-vulnerabilities_count': '-vulnerabilities_count',
+    'critical_vulnerabilities_count': 'critical_vulnerabilities_count',
+    '-critical_vulnerabilities_count': '-critical_vulnerabilities_count',
+    'kev_vulnerabilities_count': 'kev_vulnerabilities_count',
+    '-kev_vulnerabilities_count': '-kev_vulnerabilities_count',
+    'weighted_risk_score': 'weighted_risk_score',
+    '-weighted_risk_score': '-weighted_risk_score',
+    'latest_seen_at': 'latest_seen_at',
+    '-latest_seen_at': '-latest_seen_at',
+}
+
+ROOT_CAUSE_SNAPSHOT_ORDERING_MAP = {
+    'component_name': 'component_name',
+    '-component_name': '-component_name',
+    'version': 'version',
+    '-version': '-version',
+    'component_type': 'component_type',
+    '-component_type': '-component_type',
+    'affected_repositories_count': 'affected_repositories_count',
+    '-affected_repositories_count': '-affected_repositories_count',
+    'affected_images_count': 'affected_images_count',
+    '-affected_images_count': '-affected_images_count',
+    'vulnerabilities_count': 'vulnerabilities_count',
+    '-vulnerabilities_count': '-vulnerabilities_count',
+    'critical_vulnerabilities_count': 'critical_vulnerabilities_count',
+    '-critical_vulnerabilities_count': '-critical_vulnerabilities_count',
+    'kev_vulnerabilities_count': 'kev_vulnerabilities_count',
+    '-kev_vulnerabilities_count': '-kev_vulnerabilities_count',
+    'weighted_risk_score': 'weighted_risk_score',
+    '-weighted_risk_score': '-weighted_risk_score',
+    'latest_seen_at': 'latest_seen_at',
+    '-latest_seen_at': '-latest_seen_at',
+}
+
+BASE_LINEAGE_ORDERING_MAP = {
+    'lineage_label': 'lineage_label',
+    '-lineage_label': '-lineage_label',
+    'affected_repositories_count': 'affected_repositories_count',
+    '-affected_repositories_count': '-affected_repositories_count',
+    'affected_images_count': 'affected_images_count',
+    '-affected_images_count': '-affected_images_count',
+    'vulnerabilities_count': 'vulnerabilities_count',
+    '-vulnerabilities_count': '-vulnerabilities_count',
+    'critical_vulnerabilities_count': 'critical_vulnerabilities_count',
+    '-critical_vulnerabilities_count': '-critical_vulnerabilities_count',
+    'kev_vulnerabilities_count': 'kev_vulnerabilities_count',
+    '-kev_vulnerabilities_count': '-kev_vulnerabilities_count',
+    'weighted_risk_score': 'weighted_risk_score',
+    '-weighted_risk_score': '-weighted_risk_score',
+    'latest_seen_at': 'latest_seen_at',
+    '-latest_seen_at': '-latest_seen_at',
+}
+
+BASE_LINEAGE_SNAPSHOT_ORDERING_MAP = {
+    'lineage_label': 'lineage_label',
+    '-lineage_label': '-lineage_label',
+    'affected_repositories_count': 'affected_repositories_count',
+    '-affected_repositories_count': '-affected_repositories_count',
+    'affected_images_count': 'affected_images_count',
+    '-affected_images_count': '-affected_images_count',
+    'vulnerabilities_count': 'vulnerabilities_count',
+    '-vulnerabilities_count': '-vulnerabilities_count',
+    'critical_vulnerabilities_count': 'critical_vulnerabilities_count',
+    '-critical_vulnerabilities_count': '-critical_vulnerabilities_count',
+    'kev_vulnerabilities_count': 'kev_vulnerabilities_count',
+    '-kev_vulnerabilities_count': '-kev_vulnerabilities_count',
+    'weighted_risk_score': 'weighted_risk_score',
+    '-weighted_risk_score': '-weighted_risk_score',
+    'latest_seen_at': 'latest_seen_at',
+    '-latest_seen_at': '-latest_seen_at',
 }
 
 
@@ -469,6 +561,78 @@ def _build_dashboard_analytics_payload():
     }
 
 
+def _build_dashboard_root_causes_payload():
+    from .models import SharedRootCauseAnalyticsSnapshotRow
+
+    latest_snapshots = get_latest_root_cause_analytics_snapshots()
+    latest_snapshot = latest_snapshots.get('shared')
+    if latest_snapshot:
+        queryset = _apply_root_cause_ordering(
+            SharedRootCauseAnalyticsSnapshotRow.objects.filter(
+                snapshot=latest_snapshot,
+                affected_repositories_count__gt=1,
+            ).defer('repositories_preview', 'vulnerabilities_preview'),
+            '-weighted_risk_score',
+            ordering_map=ROOT_CAUSE_SNAPSHOT_ORDERING_MAP,
+        )[:5]
+        return {
+            'shared_root_causes': SharedRootCauseSerializer(queryset, many=True).data,
+            'root_cause_snapshot_generated_at': latest_snapshot.updated_at.isoformat(),
+        }
+
+    queryset = _apply_root_cause_ordering(
+        build_shared_root_cause_queryset().filter(
+            affected_repositories_count__gt=1,
+        ),
+        '-weighted_risk_score',
+    )[:5]
+    return {
+        'shared_root_causes': _serialize_root_causes(list(queryset), include_previews=True),
+    }
+
+
+def _build_dashboard_base_lineage_root_causes_payload():
+    from .models import BaseLineageRootCauseAnalyticsSnapshotRow
+
+    latest_snapshots = get_latest_root_cause_analytics_snapshots()
+    latest_snapshot = latest_snapshots.get('base_lineage')
+    if latest_snapshot:
+        queryset = _apply_base_lineage_ordering(
+            BaseLineageRootCauseAnalyticsSnapshotRow.objects.filter(
+                snapshot=latest_snapshot,
+                lineage_label__isnull=False,
+            ).exclude(
+                lineage_label='unknown',
+            ).filter(
+                affected_images_count__gt=0,
+                affected_repositories_count__gt=1,
+            ).defer('repositories_preview', 'components_preview', 'vulnerabilities_preview'),
+            '-weighted_risk_score',
+            ordering_map=BASE_LINEAGE_SNAPSHOT_ORDERING_MAP,
+        )[:5]
+        return {
+            'base_lineage_root_causes': BaseLineageRootCauseSerializer(queryset, many=True).data,
+            'base_lineage_snapshot_generated_at': latest_snapshot.updated_at.isoformat(),
+        }
+
+    lineage_members = build_base_lineage_image_queryset().exclude(lineage_label='unknown')
+    grouped_queryset = build_base_lineage_grouped_queryset(lineage_members).filter(
+        affected_images_count__gt=0,
+        affected_repositories_count__gt=1,
+    )
+    grouped_queryset = _apply_base_lineage_ordering(grouped_queryset, '-weighted_risk_score')[:5]
+    grouped_rows = list(grouped_queryset)
+    labels = [row['lineage_label'] for row in grouped_rows]
+    page_members = lineage_members.filter(lineage_label__in=labels)
+    return {
+        'base_lineage_root_causes': _serialize_base_lineage_root_causes(
+            grouped_rows,
+            page_members,
+            include_previews=True,
+        ),
+    }
+
+
 def _annotate_image_comparison_fields(queryset):
     return queryset.annotate(
         logical_name=Func(
@@ -513,6 +677,403 @@ def _apply_image_comparison_ordering(queryset, ordering, default='-variant_count
     if not requested:
         requested = [IMAGE_COMPARISON_ORDERING_MAP[default]]
     return queryset.order_by(*requested)
+
+
+def _apply_root_cause_ordering(queryset, ordering, default='-weighted_risk_score', ordering_map=None):
+    ordering_map = ordering_map or ROOT_CAUSE_ORDERING_MAP
+    requested = []
+    for field in (ordering or default).split(','):
+        field = field.strip()
+        if not field:
+            continue
+        resolved = ordering_map.get(field)
+        if resolved:
+            requested.append(resolved)
+    if not requested:
+        requested = [ordering_map[default]]
+    if ordering_map is ROOT_CAUSE_SNAPSHOT_ORDERING_MAP:
+        return queryset.order_by(*requested, 'component_name', 'version')
+    return queryset.order_by(*requested, 'component__name', 'version')
+
+
+def _apply_base_lineage_ordering(queryset, ordering, default='-weighted_risk_score', ordering_map=None):
+    ordering_map = ordering_map or BASE_LINEAGE_ORDERING_MAP
+    requested = []
+    for field in (ordering or default).split(','):
+        field = field.strip()
+        if not field:
+            continue
+        resolved = ordering_map.get(field)
+        if resolved:
+            requested.append(resolved)
+    if not requested:
+        requested = [ordering_map[default]]
+    return queryset.order_by(*requested, 'lineage_label')
+
+
+def _build_root_cause_preview_maps(component_versions):
+    component_version_ids = [component_version.pk for component_version in component_versions]
+    if not component_version_ids:
+        return {}, {}
+
+    repository_rows = Repository.objects.filter(
+        tags__images__component_versions__pk__in=component_version_ids,
+        tags__images__scan_status='success',
+    ).values(
+        'tags__images__component_versions__pk',
+        'uuid',
+        'name',
+    ).annotate(
+        affected_images_count=Count(
+            'tags__images',
+            filter=Q(tags__images__scan_status='success'),
+            distinct=True,
+        ),
+        affected_tags_count=Count(
+            'tags',
+            filter=Q(tags__images__scan_status='success'),
+            distinct=True,
+        ),
+    ).order_by(
+        'tags__images__component_versions__pk',
+        '-affected_images_count',
+        'name',
+    )
+
+    repositories_preview_map = defaultdict(list)
+    for row in repository_rows:
+        component_version_id = row['tags__images__component_versions__pk']
+        preview_list = repositories_preview_map[component_version_id]
+        if len(preview_list) >= 5:
+            continue
+        preview_list.append({
+            'repository_uuid': str(row['uuid']),
+            'repository_name': row['name'],
+            'affected_images_count': row['affected_images_count'] or 0,
+            'affected_tags_count': row['affected_tags_count'] or 0,
+        })
+
+    vulnerability_rows = ComponentVersionVulnerability.objects.filter(
+        component_version__pk__in=component_version_ids,
+    ).values(
+        'component_version__pk',
+        'vulnerability__uuid',
+        'vulnerability__vulnerability_id',
+        'vulnerability__severity',
+        'vulnerability__epss',
+        'vulnerability__details__cisa_kev_known_exploited',
+        'vulnerability__details__exploit_available',
+        'fix_status',
+    )
+
+    severity_rank_map = {
+        'CRITICAL': 4,
+        'HIGH': 3,
+        'MEDIUM': 2,
+        'LOW': 1,
+        'UNKNOWN': 0,
+    }
+    vulnerabilities_preview_map = defaultdict(list)
+    grouped_vulnerability_rows = defaultdict(list)
+    for row in vulnerability_rows:
+        grouped_vulnerability_rows[row['component_version__pk']].append(row)
+
+    for component_version_id, rows in grouped_vulnerability_rows.items():
+        rows.sort(
+            key=lambda row: (
+                -severity_rank_map.get((row['vulnerability__severity'] or 'UNKNOWN').upper(), 0),
+                -(row['vulnerability__epss'] or 0.0),
+                row['vulnerability__vulnerability_id'] or '',
+            )
+        )
+        vulnerabilities_preview_map[component_version_id] = [
+            {
+                'uuid': str(row['vulnerability__uuid']),
+                'vulnerability_id': row['vulnerability__vulnerability_id'],
+                'severity': row['vulnerability__severity'] or 'UNKNOWN',
+                'epss': round(float(row['vulnerability__epss'] or 0.0), 3),
+                'cisa_kev': bool(row['vulnerability__details__cisa_kev_known_exploited']),
+                'exploit_available': bool(row['vulnerability__details__exploit_available']),
+                'fix_status': row['fix_status'],
+            }
+            for row in rows[:5]
+        ]
+
+    return repositories_preview_map, vulnerabilities_preview_map
+
+
+def _serialize_root_causes(component_versions, include_previews=False):
+    repositories_preview_map = {}
+    vulnerabilities_preview_map = {}
+    if include_previews:
+        repositories_preview_map, vulnerabilities_preview_map = _build_root_cause_preview_maps(component_versions)
+    rows = []
+    for component_version in component_versions:
+        fixability_category = get_fixability_category_from_priority(
+            getattr(component_version, 'max_fix_priority', 0) or 0
+        )
+        rows.append({
+            'uuid': str(component_version.uuid),
+            'component_uuid': str(component_version.component.uuid),
+            'component_name': component_version.component.name,
+            'version': component_version.version,
+            'component_type': component_version.component.type,
+            'purl': component_version.purl,
+            'latest_version': component_version.latest_version,
+            'affected_repositories_count': getattr(component_version, 'affected_repositories_count', 0) or 0,
+            'affected_tags_count': getattr(component_version, 'affected_tags_count', 0) or 0,
+            'affected_releases_count': getattr(component_version, 'affected_releases_count', 0) or 0,
+            'affected_images_count': getattr(component_version, 'affected_images_count', 0) or 0,
+            'vulnerabilities_count': getattr(component_version, 'vulnerabilities_count', 0) or 0,
+            'critical_vulnerabilities_count': getattr(component_version, 'critical_vulnerabilities_count', 0) or 0,
+            'high_vulnerabilities_count': getattr(component_version, 'high_vulnerabilities_count', 0) or 0,
+            'kev_vulnerabilities_count': getattr(component_version, 'kev_vulnerabilities_count', 0) or 0,
+            'exploit_vulnerabilities_count': getattr(component_version, 'exploit_vulnerabilities_count', 0) or 0,
+            'weighted_risk_score': round(float(getattr(component_version, 'weighted_risk_score', 0.0) or 0.0), 2),
+            'fixability_category': fixability_category,
+            'fixability_breakdown': {
+                'fixable_now': getattr(component_version, 'fixable_now_count', 0) or 0,
+                'fix_exists_but_not_in_repo': getattr(component_version, 'fix_exists_but_not_in_repo_count', 0) or 0,
+                'no_fix': getattr(component_version, 'no_fix_count', 0) or 0,
+                'fix_unknown': getattr(component_version, 'fix_unknown_count', 0) or 0,
+            },
+            'latest_seen_at': getattr(component_version, 'latest_seen_at', None),
+            'repositories_preview': repositories_preview_map.get(component_version.pk, []),
+            'vulnerabilities_preview': vulnerabilities_preview_map.get(component_version.pk, []),
+        })
+    return rows
+
+
+def _build_shared_root_cause_preview_payload(component_version):
+    repositories_preview_map, vulnerabilities_preview_map = _build_root_cause_preview_maps([component_version])
+    return {
+        'repositories_preview': repositories_preview_map.get(component_version.pk, []),
+        'vulnerabilities_preview': vulnerabilities_preview_map.get(component_version.pk, []),
+    }
+
+
+def _build_base_lineage_preview_maps(lineage_members):
+    image_ids = [image.pk for image in lineage_members]
+    if not image_ids:
+        return {}, {}, {}
+
+    repositories_preview_map = defaultdict(list)
+    repository_rows = lineage_members.values(
+        'lineage_label',
+        'repository_tags__repository__uuid',
+        'repository_tags__repository__name',
+    ).annotate(
+        affected_images_count=Count('uuid', distinct=True),
+        affected_tags_count=Count('repository_tags', distinct=True),
+    ).order_by('lineage_label', '-affected_images_count', 'repository_tags__repository__name')
+
+    for row in repository_rows:
+        lineage_label = row['lineage_label']
+        preview_list = repositories_preview_map[lineage_label]
+        if len(preview_list) >= 5:
+            continue
+        repository_uuid = row['repository_tags__repository__uuid']
+        repository_name = row['repository_tags__repository__name']
+        if not repository_uuid or not repository_name:
+            continue
+        preview_list.append({
+            'repository_uuid': str(repository_uuid),
+            'repository_name': repository_name,
+            'affected_images_count': row['affected_images_count'] or 0,
+            'affected_tags_count': row['affected_tags_count'] or 0,
+        })
+
+    components_preview_map = defaultdict(list)
+    component_rows = lineage_members.values(
+        'lineage_label',
+        'component_versions__component__uuid',
+        'component_versions__component__name',
+        'component_versions__version',
+        'component_versions__component__type',
+    ).annotate(
+        affected_images_count=Count('uuid', distinct=True),
+        vulnerabilities_count=Count(
+            'component_versions__componentversionvulnerability__vulnerability',
+            distinct=True,
+        ),
+    ).order_by(
+        'lineage_label',
+        '-affected_images_count',
+        '-vulnerabilities_count',
+        'component_versions__component__name',
+        'component_versions__version',
+    )
+
+    for row in component_rows:
+        lineage_label = row['lineage_label']
+        preview_list = components_preview_map[lineage_label]
+        if len(preview_list) >= 5:
+            continue
+        component_uuid = row['component_versions__component__uuid']
+        component_name = row['component_versions__component__name']
+        component_version = row['component_versions__version']
+        if not component_uuid or not component_name or not component_version:
+            continue
+        preview_list.append({
+            'component_uuid': str(component_uuid),
+            'component_name': component_name,
+            'version': component_version,
+            'component_type': row['component_versions__component__type'] or 'unknown',
+            'affected_images_count': row['affected_images_count'] or 0,
+            'vulnerabilities_count': row['vulnerabilities_count'] or 0,
+        })
+
+    severity_rank_map = {
+        'CRITICAL': 4,
+        'HIGH': 3,
+        'MEDIUM': 2,
+        'LOW': 1,
+        'UNKNOWN': 0,
+    }
+    vulnerabilities_preview_map = defaultdict(list)
+    vulnerability_rows = list(
+        lineage_members.values(
+            'lineage_label',
+            'component_versions__componentversionvulnerability__vulnerability__uuid',
+            'component_versions__componentversionvulnerability__vulnerability__vulnerability_id',
+            'component_versions__componentversionvulnerability__vulnerability__severity',
+            'component_versions__componentversionvulnerability__vulnerability__epss',
+            'component_versions__componentversionvulnerability__vulnerability__details__cisa_kev_known_exploited',
+            'component_versions__componentversionvulnerability__vulnerability__details__exploit_available',
+            'component_versions__componentversionvulnerability__fix_status',
+        ).annotate(
+            affected_images_count=Count('uuid', distinct=True),
+        )
+    )
+    vulnerability_rows.sort(
+        key=lambda row: (
+            row['lineage_label'] or '',
+            -severity_rank_map.get(
+                (row['component_versions__componentversionvulnerability__vulnerability__severity'] or 'UNKNOWN').upper(),
+                0,
+            ),
+            -(row['component_versions__componentversionvulnerability__vulnerability__epss'] or 0.0),
+            -(row['affected_images_count'] or 0),
+            row['component_versions__componentversionvulnerability__vulnerability__vulnerability_id'] or '',
+        )
+    )
+
+    for row in vulnerability_rows:
+        lineage_label = row['lineage_label']
+        preview_list = vulnerabilities_preview_map[lineage_label]
+        if len(preview_list) >= 5:
+            continue
+        vulnerability_uuid = row['component_versions__componentversionvulnerability__vulnerability__uuid']
+        vulnerability_id = row['component_versions__componentversionvulnerability__vulnerability__vulnerability_id']
+        if not vulnerability_uuid or not vulnerability_id:
+            continue
+        preview_list.append({
+            'uuid': str(vulnerability_uuid),
+            'vulnerability_id': vulnerability_id,
+            'severity': row['component_versions__componentversionvulnerability__vulnerability__severity'] or 'UNKNOWN',
+            'epss': round(float(row['component_versions__componentversionvulnerability__vulnerability__epss'] or 0.0), 3),
+            'cisa_kev': bool(row['component_versions__componentversionvulnerability__vulnerability__details__cisa_kev_known_exploited']),
+            'exploit_available': bool(row['component_versions__componentversionvulnerability__vulnerability__details__exploit_available']),
+            'fix_status': row['component_versions__componentversionvulnerability__fix_status'],
+        })
+
+    return repositories_preview_map, components_preview_map, vulnerabilities_preview_map
+
+
+def _serialize_base_lineage_root_causes(grouped_rows, lineage_members=None, include_previews=False):
+    repositories_preview_map = {}
+    components_preview_map = {}
+    vulnerabilities_preview_map = {}
+    if include_previews and lineage_members is not None:
+        repositories_preview_map, components_preview_map, vulnerabilities_preview_map = _build_base_lineage_preview_maps(lineage_members)
+
+    rows = []
+    for row in grouped_rows:
+        fixability_category = get_fixability_category_from_priority(
+            row.get('max_fix_priority', 0) or 0
+        )
+        lineage_label = row['lineage_label']
+        rows.append({
+            'key': lineage_label,
+            'lineage_label': lineage_label,
+            'lineage_source': row.get('lineage_source') or 'unknown',
+            'affected_repositories_count': row.get('affected_repositories_count', 0) or 0,
+            'affected_tags_count': row.get('affected_tags_count', 0) or 0,
+            'affected_releases_count': row.get('affected_releases_count', 0) or 0,
+            'affected_images_count': row.get('affected_images_count', 0) or 0,
+            'vulnerabilities_count': row.get('vulnerabilities_count', 0) or 0,
+            'critical_vulnerabilities_count': row.get('critical_vulnerabilities_count', 0) or 0,
+            'high_vulnerabilities_count': row.get('high_vulnerabilities_count', 0) or 0,
+            'kev_vulnerabilities_count': row.get('kev_vulnerabilities_count', 0) or 0,
+            'exploit_vulnerabilities_count': row.get('exploit_vulnerabilities_count', 0) or 0,
+            'weighted_risk_score': round(float(row.get('weighted_risk_score', 0.0) or 0.0), 2),
+            'fixability_category': fixability_category,
+            'fixability_breakdown': {
+                'fixable_now': row.get('fixable_now_count', 0) or 0,
+                'fix_exists_but_not_in_repo': row.get('fix_exists_but_not_in_repo_count', 0) or 0,
+                'no_fix': row.get('no_fix_count', 0) or 0,
+                'fix_unknown': row.get('fix_unknown_count', 0) or 0,
+            },
+            'latest_seen_at': row.get('latest_seen_at'),
+            'repositories_preview': repositories_preview_map.get(lineage_label, []),
+            'components_preview': components_preview_map.get(lineage_label, []),
+            'vulnerabilities_preview': vulnerabilities_preview_map.get(lineage_label, []),
+        })
+    return rows
+
+
+def _build_base_lineage_preview_payload(lineage_label, lineage_members):
+    repositories_preview_map, components_preview_map, vulnerabilities_preview_map = _build_base_lineage_preview_maps(lineage_members)
+    return {
+        'repositories_preview': repositories_preview_map.get(lineage_label, []),
+        'components_preview': components_preview_map.get(lineage_label, []),
+        'vulnerabilities_preview': vulnerabilities_preview_map.get(lineage_label, []),
+    }
+
+
+def _build_targeted_base_lineage_members_queryset(lineage_label, lineage_source=None, include_unknown=False):
+    base_queryset = Image.objects.filter(
+        scan_status='success',
+        repository_tags__isnull=False,
+    ).distinct()
+
+    if lineage_label == 'unknown':
+        if not include_unknown:
+            return base_queryset.none()
+        return build_base_lineage_image_queryset(
+            base_queryset=base_queryset,
+            include_risk_score=False,
+        ).filter(lineage_label='unknown')
+
+    if lineage_source == 'sbom_distro':
+        distro_name = lineage_label
+        distro_version = None
+        if '-' in lineage_label:
+            distro_name, distro_version = lineage_label.rsplit('-', 1)
+
+        filters = Q(sbom_data__distro__name__iexact=distro_name)
+        if distro_version:
+            filters &= Q(sbom_data__distro__version=distro_version)
+
+        return build_base_lineage_image_queryset(
+            base_queryset=base_queryset.filter(filters),
+            include_risk_score=False,
+        ).filter(lineage_label=lineage_label)
+
+    if lineage_source == 'package_distro':
+        narrowed = base_queryset.filter(
+            component_versions__component__type__in=['deb', 'rpm', 'apk'],
+            component_versions__purl__icontains='distro=',
+        ).distinct()
+        return build_base_lineage_image_queryset(
+            base_queryset=narrowed,
+            include_risk_score=False,
+        ).filter(lineage_label=lineage_label)
+
+    return build_base_lineage_image_queryset(
+        base_queryset=base_queryset,
+        include_risk_score=False,
+    ).filter(lineage_label=lineage_label)
 
 
 def _build_optimized_image_list_queryset(queryset):
@@ -2909,6 +3470,8 @@ class StatsViewSet(viewsets.ViewSet):
             **_build_dashboard_activity_payload(),
             **_build_dashboard_threat_intel_payload(),
             **_build_dashboard_analytics_payload(),
+            **_build_dashboard_root_causes_payload(),
+            **_build_dashboard_base_lineage_root_causes_payload(),
         })
 
     @method_decorator(cache_page(60))
@@ -2940,6 +3503,14 @@ class StatsViewSet(viewsets.ViewSet):
     @action(detail=False, methods=['get'], url_path='dashboard-analytics')
     def dashboard_analytics(self, request):
         return Response(_build_dashboard_analytics_payload())
+
+    @method_decorator(cache_page(60))
+    @action(detail=False, methods=['get'], url_path='dashboard-root-causes')
+    def dashboard_root_causes(self, request):
+        return Response({
+            **_build_dashboard_root_causes_payload(),
+            **_build_dashboard_base_lineage_root_causes_payload(),
+        })
 
     @method_decorator(cache_page(60))
     @action(detail=False, methods=['get'], url_path='recent-activities')
@@ -2996,6 +3567,366 @@ class StatsViewSet(viewsets.ViewSet):
             'selected_type': selected_type,
             'results': results,
         })
+
+    @method_decorator(cache_page(60))
+    @action(detail=False, methods=['get'], url_path='shared-root-causes')
+    def shared_root_causes(self, request):
+        from .models import SharedRootCauseAnalyticsSnapshotRow
+
+        search = (request.query_params.get('search') or '').strip()
+        component_type = (request.query_params.get('component_type') or 'all').strip().lower()
+        scope = (request.query_params.get('scope') or 'cross_repository').strip().lower()
+        fixability = (request.query_params.get('fixability') or 'all').strip().lower()
+        latest_snapshot = get_latest_root_cause_analytics_snapshots().get('shared')
+        snapshot_generated_at = latest_snapshot.updated_at.isoformat() if latest_snapshot else None
+
+        if latest_snapshot:
+            queryset = SharedRootCauseAnalyticsSnapshotRow.objects.filter(
+                snapshot=latest_snapshot,
+            ).defer('repositories_preview', 'vulnerabilities_preview')
+
+            if search:
+                queryset = queryset.filter(
+                    Q(component_name__icontains=search)
+                    | Q(version__icontains=search)
+                    | Q(purl__icontains=search)
+                )
+
+            if component_type not in {'', 'all'}:
+                queryset = queryset.filter(component_type__iexact=component_type)
+
+            if scope == 'cross_repository':
+                queryset = queryset.filter(affected_repositories_count__gt=1)
+            elif scope == 'single_repository':
+                queryset = queryset.filter(affected_repositories_count__lte=1)
+
+            if fixability == 'fixable_now':
+                queryset = queryset.filter(max_fix_priority__gte=3)
+            elif fixability == 'fix_exists_but_not_in_repo':
+                queryset = queryset.filter(max_fix_priority=2)
+            elif fixability == 'no_fix':
+                queryset = queryset.filter(max_fix_priority=1)
+            elif fixability == 'fix_unknown':
+                queryset = queryset.filter(max_fix_priority__lte=0)
+
+            ordered = _apply_root_cause_ordering(
+                queryset,
+                request.query_params.get('ordering', '-weighted_risk_score'),
+                ordering_map=ROOT_CAUSE_SNAPSHOT_ORDERING_MAP,
+            )
+        else:
+            queryset = build_shared_root_cause_queryset()
+
+            if search:
+                queryset = queryset.filter(
+                    Q(component__name__icontains=search)
+                    | Q(version__icontains=search)
+                    | Q(purl__icontains=search)
+                )
+
+            if component_type not in {'', 'all'}:
+                queryset = queryset.filter(component__type__iexact=component_type)
+
+            if scope == 'cross_repository':
+                queryset = queryset.filter(affected_repositories_count__gt=1)
+            elif scope == 'single_repository':
+                queryset = queryset.filter(affected_repositories_count__lte=1)
+
+            if fixability == 'fixable_now':
+                queryset = queryset.filter(max_fix_priority__gte=3)
+            elif fixability == 'fix_exists_but_not_in_repo':
+                queryset = queryset.filter(max_fix_priority=2)
+            elif fixability == 'no_fix':
+                queryset = queryset.filter(max_fix_priority=1)
+            elif fixability == 'fix_unknown':
+                queryset = queryset.filter(max_fix_priority__lte=0)
+
+            ordered = _apply_root_cause_ordering(
+                queryset,
+                request.query_params.get('ordering', '-weighted_risk_score'),
+            )
+
+        paginator = CustomPageNumberPagination()
+        page = paginator.paginate_queryset(ordered, request)
+        component_versions = list(page) if page is not None else list(ordered)
+        if latest_snapshot:
+            serialized = SharedRootCauseSerializer(component_versions, many=True).data
+        else:
+            serialized = SharedRootCauseSerializer(
+                _serialize_root_causes(component_versions, include_previews=False),
+                many=True,
+            ).data
+
+        if page is not None:
+            response = paginator.get_paginated_response(serialized)
+            response.data['scope'] = scope
+            response.data['component_type'] = component_type
+            response.data['fixability'] = fixability
+            response.data['snapshot_generated_at'] = snapshot_generated_at
+            return response
+
+        return Response({
+            'count': len(serialized),
+            'next': None,
+            'previous': None,
+            'scope': scope,
+            'component_type': component_type,
+            'fixability': fixability,
+            'snapshot_generated_at': snapshot_generated_at,
+            'results': serialized,
+        })
+
+    @method_decorator(cache_page(60))
+    @action(detail=False, methods=['get'], url_path='shared-root-causes-preview')
+    def shared_root_causes_preview(self, request):
+        from .models import SharedRootCauseAnalyticsSnapshotRow
+        from .models import ComponentVersion
+
+        component_version_uuid = (request.query_params.get('component_version_uuid') or '').strip()
+        if not component_version_uuid:
+            return Response(
+                {'detail': 'component_version_uuid query parameter is required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        latest_snapshot = get_latest_root_cause_analytics_snapshots().get('shared')
+        if latest_snapshot:
+            snapshot_row = SharedRootCauseAnalyticsSnapshotRow.objects.filter(
+                snapshot=latest_snapshot,
+                component_version_uuid=component_version_uuid,
+            ).first()
+            if snapshot_row and (
+                snapshot_row.repositories_preview or snapshot_row.vulnerabilities_preview
+            ):
+                return Response(SharedRootCausePreviewSerializer(snapshot_row).data)
+
+        component_version = get_object_or_404(
+            ComponentVersion.objects.select_related('component'),
+            uuid=component_version_uuid,
+        )
+        serialized = SharedRootCausePreviewSerializer(
+            _build_shared_root_cause_preview_payload(component_version)
+        ).data
+        return Response(serialized)
+
+    @method_decorator(cache_page(60))
+    @action(detail=False, methods=['get'], url_path='base-lineage-root-causes')
+    def base_lineage_root_causes(self, request):
+        from .models import BaseLineageRootCauseAnalyticsSnapshotRow
+
+        search = (request.query_params.get('search') or '').strip()
+        scope = (request.query_params.get('scope') or 'cross_repository').strip().lower()
+        fixability = (request.query_params.get('fixability') or 'all').strip().lower()
+        include_unknown = str(request.query_params.get('include_unknown', '0')).lower() in {'1', 'true', 'yes'}
+        latest_snapshot = get_latest_root_cause_analytics_snapshots().get('base_lineage')
+        snapshot_generated_at = latest_snapshot.updated_at.isoformat() if latest_snapshot else None
+
+        if latest_snapshot:
+            grouped_queryset = BaseLineageRootCauseAnalyticsSnapshotRow.objects.filter(
+                snapshot=latest_snapshot,
+            )
+
+            if not include_unknown:
+                grouped_queryset = grouped_queryset.exclude(lineage_label='unknown')
+
+            if search:
+                grouped_queryset = grouped_queryset.filter(
+                    Q(lineage_label__icontains=search)
+                )
+
+            if scope == 'cross_repository':
+                grouped_queryset = grouped_queryset.filter(affected_repositories_count__gt=1)
+            elif scope == 'single_repository':
+                grouped_queryset = grouped_queryset.filter(affected_repositories_count__lte=1)
+
+            if fixability == 'fixable_now':
+                grouped_queryset = grouped_queryset.filter(max_fix_priority__gte=3)
+            elif fixability == 'fix_exists_but_not_in_repo':
+                grouped_queryset = grouped_queryset.filter(max_fix_priority=2)
+            elif fixability == 'no_fix':
+                grouped_queryset = grouped_queryset.filter(max_fix_priority=1)
+            elif fixability == 'fix_unknown':
+                grouped_queryset = grouped_queryset.filter(max_fix_priority__lte=0)
+
+            ordered = _apply_base_lineage_ordering(
+                grouped_queryset,
+                request.query_params.get('ordering', '-weighted_risk_score'),
+                ordering_map=BASE_LINEAGE_SNAPSHOT_ORDERING_MAP,
+            )
+        else:
+            lineage_members = build_base_lineage_image_queryset()
+
+            if not include_unknown:
+                lineage_members = lineage_members.exclude(lineage_label='unknown')
+
+            if search:
+                lineage_members = lineage_members.filter(
+                    Q(lineage_label__icontains=search)
+                    | Q(package_distro_hint__icontains=search)
+                    | Q(sbom_distro_name__icontains=search)
+                )
+
+            grouped_queryset = build_base_lineage_grouped_queryset(lineage_members)
+
+            if scope == 'cross_repository':
+                grouped_queryset = grouped_queryset.filter(affected_repositories_count__gt=1)
+            elif scope == 'single_repository':
+                grouped_queryset = grouped_queryset.filter(affected_repositories_count__lte=1)
+
+            if fixability == 'fixable_now':
+                grouped_queryset = grouped_queryset.filter(max_fix_priority__gte=3)
+            elif fixability == 'fix_exists_but_not_in_repo':
+                grouped_queryset = grouped_queryset.filter(max_fix_priority=2)
+            elif fixability == 'no_fix':
+                grouped_queryset = grouped_queryset.filter(max_fix_priority=1)
+            elif fixability == 'fix_unknown':
+                grouped_queryset = grouped_queryset.filter(max_fix_priority__lte=0)
+
+            ordered = _apply_base_lineage_ordering(
+                grouped_queryset,
+                request.query_params.get('ordering', '-weighted_risk_score'),
+            )
+
+        paginator = CustomPageNumberPagination()
+        page = paginator.paginate_queryset(ordered, request)
+        grouped_rows = list(page) if page is not None else list(ordered)
+        if latest_snapshot:
+            serialized = BaseLineageRootCauseSerializer(grouped_rows, many=True).data
+        else:
+            serialized = BaseLineageRootCauseSerializer(
+                _serialize_base_lineage_root_causes(grouped_rows, include_previews=False),
+                many=True,
+            ).data
+
+        if page is not None:
+            response = paginator.get_paginated_response(serialized)
+            response.data['scope'] = scope
+            response.data['fixability'] = fixability
+            response.data['include_unknown'] = include_unknown
+            response.data['snapshot_generated_at'] = snapshot_generated_at
+            return response
+
+        return Response({
+            'count': len(serialized),
+            'next': None,
+            'previous': None,
+            'scope': scope,
+            'fixability': fixability,
+            'include_unknown': include_unknown,
+            'snapshot_generated_at': snapshot_generated_at,
+            'results': serialized,
+        })
+
+    @method_decorator(cache_page(60))
+    @action(detail=False, methods=['get'], url_path='base-lineage-root-causes-preview')
+    def base_lineage_root_causes_preview(self, request):
+        from .models import BaseLineageRootCauseAnalyticsSnapshotRow
+
+        lineage_label = (request.query_params.get('lineage_label') or '').strip()
+        lineage_source = (request.query_params.get('lineage_source') or '').strip()
+        include_unknown = str(request.query_params.get('include_unknown', '0')).lower() in {'1', 'true', 'yes'}
+
+        if not lineage_label:
+            return Response(
+                {'detail': 'lineage_label query parameter is required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        latest_snapshot = get_latest_root_cause_analytics_snapshots().get('base_lineage')
+        if latest_snapshot:
+            snapshot_row = BaseLineageRootCauseAnalyticsSnapshotRow.objects.filter(
+                snapshot=latest_snapshot,
+                lineage_label=lineage_label,
+            ).first()
+            if snapshot_row and (
+                snapshot_row.repositories_preview
+                or snapshot_row.components_preview
+                or snapshot_row.vulnerabilities_preview
+            ):
+                return Response(BaseLineageRootCausePreviewSerializer(snapshot_row).data)
+            if snapshot_row and not lineage_source:
+                lineage_source = snapshot_row.lineage_source
+
+        lineage_members = _build_targeted_base_lineage_members_queryset(
+            lineage_label=lineage_label,
+            lineage_source=lineage_source or None,
+            include_unknown=include_unknown,
+        )
+        if not lineage_members.exists():
+            return Response(
+                {'detail': 'Base lineage not found'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        serialized = BaseLineageRootCausePreviewSerializer(
+            _build_base_lineage_preview_payload(lineage_label, lineage_members)
+        ).data
+        return Response(serialized)
+
+    @action(detail=False, methods=['post'], url_path='base-lineage-root-causes-previews-batch')
+    def base_lineage_root_causes_previews_batch(self, request):
+        from .models import BaseLineageRootCauseAnalyticsSnapshotRow
+
+        entries = request.data.get('entries') or []
+        if not isinstance(entries, list):
+            return Response(
+                {'detail': 'entries must be a list'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        latest_snapshot = get_latest_root_cause_analytics_snapshots().get('base_lineage')
+        results = []
+
+        for entry in entries[:10]:
+            if not isinstance(entry, dict):
+                continue
+
+            lineage_label = (entry.get('lineage_label') or '').strip()
+            lineage_source = (entry.get('lineage_source') or '').strip()
+            include_unknown = str(entry.get('include_unknown', '0')).lower() in {'1', 'true', 'yes'}
+
+            if not lineage_label:
+                continue
+
+            payload = None
+            if latest_snapshot:
+                snapshot_row = BaseLineageRootCauseAnalyticsSnapshotRow.objects.filter(
+                    snapshot=latest_snapshot,
+                    lineage_label=lineage_label,
+                ).first()
+                if snapshot_row and (
+                    snapshot_row.repositories_preview
+                    or snapshot_row.components_preview
+                    or snapshot_row.vulnerabilities_preview
+                ):
+                    payload = BaseLineageRootCausePreviewSerializer(snapshot_row).data
+                    if not lineage_source:
+                        lineage_source = snapshot_row.lineage_source
+
+            if payload is None:
+                lineage_members = _build_targeted_base_lineage_members_queryset(
+                    lineage_label=lineage_label,
+                    lineage_source=lineage_source or None,
+                    include_unknown=include_unknown,
+                )
+                if not lineage_members.exists():
+                    payload = {
+                        'repositories_preview': [],
+                        'components_preview': [],
+                        'vulnerabilities_preview': [],
+                    }
+                else:
+                    payload = BaseLineageRootCausePreviewSerializer(
+                        _build_base_lineage_preview_payload(lineage_label, lineage_members)
+                    ).data
+
+            results.append({
+                'lineage_label': lineage_label,
+                'lineage_source': lineage_source or 'unknown',
+                **payload,
+            })
+
+        return Response({'results': results})
 
 class JobViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
@@ -3808,6 +4739,23 @@ class TestTaskViewSet(viewsets.ViewSet):
             result = recalculate_vulnerability_fix_availability.delay()
             return Response({
                 'message': 'Vulnerability fix availability recalculation started',
+                'task_id': result.id
+            })
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+    @action(detail=False, methods=['post'])
+    def collect_root_cause_analytics_snapshot(self, request):
+        """Collect persisted root-cause analytics snapshot rows for dashboard and comparison pages"""
+        from .tasks import collect_root_cause_analytics_snapshot
+
+        try:
+            result = collect_root_cause_analytics_snapshot.delay()
+            return Response({
+                'message': 'Root cause analytics snapshot collection started',
                 'task_id': result.id
             })
         except Exception as e:

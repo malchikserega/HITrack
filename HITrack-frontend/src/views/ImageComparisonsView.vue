@@ -9,14 +9,33 @@
             across different registries and repositories.
           </p>
         </div>
-        <v-btn
-          variant="text"
-          color="primary"
-          prepend-icon="mdi-arrow-left"
-          @click="goBackToImages"
-        >
-          Back to Images
-        </v-btn>
+        <div class="page-header__actions">
+          <v-tooltip location="left" max-width="360">
+            <template #activator="{ props }">
+              <v-btn
+                v-bind="props"
+                icon="mdi-help-circle-outline"
+                variant="text"
+                color="primary"
+                size="small"
+                aria-label="How to read image comparisons"
+              />
+            </template>
+            <div class="tooltip-copy">
+              <div><strong>Logical image</strong> is the name after the last slash, for example <code>worker:5.0.426-gec5ee144</code>.</div>
+              <div><strong>Variants</strong> are concrete image records found across registries and repositories for that logical name.</div>
+              <div><strong>Worst</strong> columns show the highest counts seen among those variants so you can spot the riskiest copy quickly.</div>
+            </div>
+          </v-tooltip>
+          <v-btn
+            variant="text"
+            color="primary"
+            prepend-icon="mdi-arrow-left"
+            @click="goBackToImages"
+          >
+            Back to Images
+          </v-btn>
+        </div>
       </div>
 
       <v-card elevation="2" class="comparison-card">
@@ -57,6 +76,105 @@
             class="comparison-table"
             @update:options="onTableOptionsUpdate"
           >
+            <template #header.logical_name>
+              <div class="header-with-help">
+                <span>Logical Image</span>
+                <v-tooltip location="top" max-width="300">
+                  <template #activator="{ props }">
+                    <v-icon v-bind="props" size="16" class="help-icon">mdi-help-circle-outline</v-icon>
+                  </template>
+                  <span>Normalized image name used for comparison, usually the part after the last slash.</span>
+                </v-tooltip>
+              </div>
+            </template>
+            <template #header.variant_count>
+              <div class="header-with-help">
+                <span>Variants</span>
+                <v-tooltip location="top" max-width="300">
+                  <template #activator="{ props }">
+                    <v-icon v-bind="props" size="16" class="help-icon">mdi-help-circle-outline</v-icon>
+                  </template>
+                  <span>How many concrete image entries share this logical name.</span>
+                </v-tooltip>
+              </div>
+            </template>
+            <template #header.registry_count>
+              <div class="header-with-help">
+                <span>Registries</span>
+                <v-tooltip location="top" max-width="300">
+                  <template #activator="{ props }">
+                    <v-icon v-bind="props" size="16" class="help-icon">mdi-help-circle-outline</v-icon>
+                  </template>
+                  <span>Number of distinct registry hosts carrying variants of this logical image.</span>
+                </v-tooltip>
+              </div>
+            </template>
+            <template #header.distinct_digests>
+              <div class="header-with-help">
+                <span>Digests</span>
+                <v-tooltip location="top" max-width="320">
+                  <template #activator="{ props }">
+                    <v-icon v-bind="props" size="16" class="help-icon">mdi-help-circle-outline</v-icon>
+                  </template>
+                  <span>How many different digests exist for this logical image. More than one usually means the variants are not identical.</span>
+                </v-tooltip>
+              </div>
+            </template>
+            <template #header.max_findings>
+              <div class="header-with-help">
+                <span>Worst Findings</span>
+                <v-tooltip location="top" max-width="320">
+                  <template #activator="{ props }">
+                    <v-icon v-bind="props" size="16" class="help-icon">mdi-help-circle-outline</v-icon>
+                  </template>
+                  <span>Highest total vulnerability findings count among the variants in this group.</span>
+                </v-tooltip>
+              </div>
+            </template>
+            <template #header.max_unique_findings>
+              <div class="header-with-help">
+                <span>Worst Unique</span>
+                <v-tooltip location="top" max-width="320">
+                  <template #activator="{ props }">
+                    <v-icon v-bind="props" size="16" class="help-icon">mdi-help-circle-outline</v-icon>
+                  </template>
+                  <span>Highest unique vulnerability count among variants, ignoring duplicates of the same vulnerability.</span>
+                </v-tooltip>
+              </div>
+            </template>
+            <template #header.max_components_count>
+              <div class="header-with-help">
+                <span>Max Components</span>
+                <v-tooltip location="top" max-width="320">
+                  <template #activator="{ props }">
+                    <v-icon v-bind="props" size="16" class="help-icon">mdi-help-circle-outline</v-icon>
+                  </template>
+                  <span>Largest component inventory seen in any variant of this logical image.</span>
+                </v-tooltip>
+              </div>
+            </template>
+            <template #header.statuses>
+              <div class="header-with-help">
+                <span>Statuses</span>
+                <v-tooltip location="top" max-width="300">
+                  <template #activator="{ props }">
+                    <v-icon v-bind="props" size="16" class="help-icon">mdi-help-circle-outline</v-icon>
+                  </template>
+                  <span>Current scan-state breakdown across variants in the group.</span>
+                </v-tooltip>
+              </div>
+            </template>
+            <template #header.latest_updated_at>
+              <div class="header-with-help">
+                <span>Latest Updated</span>
+                <v-tooltip location="top" max-width="300">
+                  <template #activator="{ props }">
+                    <v-icon v-bind="props" size="16" class="help-icon">mdi-help-circle-outline</v-icon>
+                  </template>
+                  <span>Most recent update time across all variants in this comparison group.</span>
+                </v-tooltip>
+              </div>
+            </template>
             <template #item="{ item }">
               <template v-if="item">
                 <tr class="comparison-row">
@@ -147,16 +265,16 @@
                         <v-table density="compact">
                           <thead>
                             <tr>
-                              <th>Image</th>
-                              <th>Registry</th>
-                              <th>Digest</th>
-                              <th>Status</th>
-                              <th>Findings</th>
-                              <th>Unique</th>
-                              <th>Components</th>
-                              <th>Repository Tags</th>
-                              <th>Updated</th>
-                              <th>Open</th>
+                              <th><div class="header-with-help"><span>Image</span><v-tooltip location="top"><template #activator="{ props }"><v-icon v-bind="props" size="14" class="help-icon">mdi-help-circle-outline</v-icon></template><span>Concrete image record stored in HITrack.</span></v-tooltip></div></th>
+                              <th><div class="header-with-help"><span>Registry</span><v-tooltip location="top"><template #activator="{ props }"><v-icon v-bind="props" size="14" class="help-icon">mdi-help-circle-outline</v-icon></template><span>Registry host where this variant lives.</span></v-tooltip></div></th>
+                              <th><div class="header-with-help"><span>Digest</span><v-tooltip location="top" max-width="280"><template #activator="{ props }"><v-icon v-bind="props" size="14" class="help-icon">mdi-help-circle-outline</v-icon></template><span>Content digest for the variant. Different digests mean the images are not byte-identical.</span></v-tooltip></div></th>
+                              <th><div class="header-with-help"><span>Status</span><v-tooltip location="top"><template #activator="{ props }"><v-icon v-bind="props" size="14" class="help-icon">mdi-help-circle-outline</v-icon></template><span>Current scan status for this exact variant.</span></v-tooltip></div></th>
+                              <th><div class="header-with-help"><span>Findings</span><v-tooltip location="top"><template #activator="{ props }"><v-icon v-bind="props" size="14" class="help-icon">mdi-help-circle-outline</v-icon></template><span>Total vulnerability findings for this variant.</span></v-tooltip></div></th>
+                              <th><div class="header-with-help"><span>Unique</span><v-tooltip location="top"><template #activator="{ props }"><v-icon v-bind="props" size="14" class="help-icon">mdi-help-circle-outline</v-icon></template><span>Unique vulnerabilities for this variant, without duplicate occurrences.</span></v-tooltip></div></th>
+                              <th><div class="header-with-help"><span>Components</span><v-tooltip location="top"><template #activator="{ props }"><v-icon v-bind="props" size="14" class="help-icon">mdi-help-circle-outline</v-icon></template><span>Detected components or packages in this variant.</span></v-tooltip></div></th>
+                              <th><div class="header-with-help"><span>Repository Tags</span><v-tooltip location="top" max-width="280"><template #activator="{ props }"><v-icon v-bind="props" size="14" class="help-icon">mdi-help-circle-outline</v-icon></template><span>Repository tags in HITrack that currently point to this variant.</span></v-tooltip></div></th>
+                              <th><div class="header-with-help"><span>Updated</span><v-tooltip location="top"><template #activator="{ props }"><v-icon v-bind="props" size="14" class="help-icon">mdi-help-circle-outline</v-icon></template><span>Last time this image record changed in HITrack.</span></v-tooltip></div></th>
+                              <th><div class="header-with-help"><span>Open</span><v-tooltip location="top"><template #activator="{ props }"><v-icon v-bind="props" size="14" class="help-icon">mdi-help-circle-outline</v-icon></template><span>Open the image detail page.</span></v-tooltip></div></th>
                             </tr>
                           </thead>
                           <tbody>
@@ -423,6 +541,28 @@ onMounted(() => {
   justify-content: space-between;
   gap: 16px;
   margin-bottom: 24px;
+}
+
+.page-header__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.header-with-help {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.help-icon {
+  color: rgba(0, 0, 0, 0.45);
+}
+
+.tooltip-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .comparison-card {

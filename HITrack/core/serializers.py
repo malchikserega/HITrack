@@ -828,6 +828,90 @@ class ImageComparisonGroupSerializer(serializers.Serializer):
     variants = ImageComparisonVariantSerializer(many=True)
 
 
+class RootCauseRepositoryPreviewSerializer(serializers.Serializer):
+    repository_uuid = serializers.CharField()
+    repository_name = serializers.CharField()
+    affected_images_count = serializers.IntegerField()
+    affected_tags_count = serializers.IntegerField()
+
+
+class RootCauseVulnerabilityPreviewSerializer(serializers.Serializer):
+    uuid = serializers.CharField()
+    vulnerability_id = serializers.CharField()
+    severity = serializers.CharField()
+    epss = serializers.FloatField()
+    cisa_kev = serializers.BooleanField()
+    exploit_available = serializers.BooleanField()
+    fix_status = serializers.CharField(allow_null=True, required=False)
+
+
+class SharedRootCauseSerializer(serializers.Serializer):
+    uuid = serializers.CharField()
+    component_uuid = serializers.CharField()
+    component_name = serializers.CharField()
+    version = serializers.CharField()
+    component_type = serializers.CharField()
+    purl = serializers.CharField(allow_null=True, required=False)
+    latest_version = serializers.CharField(allow_null=True, required=False)
+    affected_repositories_count = serializers.IntegerField()
+    affected_tags_count = serializers.IntegerField()
+    affected_releases_count = serializers.IntegerField()
+    affected_images_count = serializers.IntegerField()
+    vulnerabilities_count = serializers.IntegerField()
+    critical_vulnerabilities_count = serializers.IntegerField()
+    high_vulnerabilities_count = serializers.IntegerField()
+    kev_vulnerabilities_count = serializers.IntegerField()
+    exploit_vulnerabilities_count = serializers.IntegerField()
+    weighted_risk_score = serializers.FloatField()
+    fixability_category = serializers.CharField()
+    fixability_breakdown = serializers.DictField()
+    latest_seen_at = serializers.DateTimeField(allow_null=True)
+    repositories_preview = RootCauseRepositoryPreviewSerializer(many=True)
+    vulnerabilities_preview = RootCauseVulnerabilityPreviewSerializer(many=True)
+
+
+class SharedRootCausePreviewSerializer(serializers.Serializer):
+    repositories_preview = RootCauseRepositoryPreviewSerializer(many=True)
+    vulnerabilities_preview = RootCauseVulnerabilityPreviewSerializer(many=True)
+
+
+class BaseLineageComponentPreviewSerializer(serializers.Serializer):
+    component_uuid = serializers.CharField()
+    component_name = serializers.CharField()
+    version = serializers.CharField()
+    component_type = serializers.CharField()
+    affected_images_count = serializers.IntegerField()
+    vulnerabilities_count = serializers.IntegerField()
+
+
+class BaseLineageRootCauseSerializer(serializers.Serializer):
+    key = serializers.CharField()
+    lineage_label = serializers.CharField()
+    lineage_source = serializers.CharField()
+    affected_repositories_count = serializers.IntegerField()
+    affected_tags_count = serializers.IntegerField()
+    affected_releases_count = serializers.IntegerField()
+    affected_images_count = serializers.IntegerField()
+    vulnerabilities_count = serializers.IntegerField()
+    critical_vulnerabilities_count = serializers.IntegerField()
+    high_vulnerabilities_count = serializers.IntegerField()
+    kev_vulnerabilities_count = serializers.IntegerField()
+    exploit_vulnerabilities_count = serializers.IntegerField()
+    weighted_risk_score = serializers.FloatField()
+    fixability_category = serializers.CharField()
+    fixability_breakdown = serializers.DictField()
+    latest_seen_at = serializers.DateTimeField(allow_null=True)
+    repositories_preview = RootCauseRepositoryPreviewSerializer(many=True)
+    components_preview = BaseLineageComponentPreviewSerializer(many=True)
+    vulnerabilities_preview = RootCauseVulnerabilityPreviewSerializer(many=True)
+
+
+class BaseLineageRootCausePreviewSerializer(serializers.Serializer):
+    repositories_preview = RootCauseRepositoryPreviewSerializer(many=True)
+    components_preview = BaseLineageComponentPreviewSerializer(many=True)
+    vulnerabilities_preview = RootCauseVulnerabilityPreviewSerializer(many=True)
+
+
 class VulnerabilityImageRepositoryTagSerializer(serializers.Serializer):
     repository_name = serializers.CharField()
     repository_uuid = serializers.UUIDField()

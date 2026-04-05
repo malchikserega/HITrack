@@ -36,6 +36,18 @@ const router = createRouter({
       meta: { requiresAuth: true }
     },
     {
+      path: '/root-causes',
+      name: 'shared-root-causes',
+      component: () => import('../views/SharedRootCausesView.vue'),
+      meta: { requiresAuth: true }
+    },
+    {
+      path: '/base-lineage-root-causes',
+      name: 'base-lineage-root-causes',
+      component: () => import('../views/BaseLineageRootCausesView.vue'),
+      meta: { requiresAuth: true }
+    },
+    {
       path: '/images/:uuid',
       name: 'image-detail',
       component: () => import('../views/ImageDetailView.vue'),

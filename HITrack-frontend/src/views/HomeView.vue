@@ -524,6 +524,103 @@
         </v-col>
       </v-row>
 
+      <v-row>
+        <v-col cols="12">
+          <v-alert
+            v-if="blockErrors.rootCauses && !blockHasLoadedData('rootCauses')"
+            type="warning"
+            variant="tonal"
+            class="mb-4"
+          >
+            {{ blockErrors.rootCauses }}
+          </v-alert>
+          <v-skeleton-loader
+            v-else-if="isBlockInitialLoading('rootCauses')"
+            type="card"
+            class="dashboard-skeleton-card dashboard-skeleton-card--table"
+          />
+          <v-card v-else class="chart-card" elevation="2">
+            <v-card-title class="text-h6 font-weight-bold pa-4 pb-2 d-flex align-center justify-space-between">
+              <div class="d-flex align-center ga-3 flex-wrap">
+                <span>Root Causes</span>
+                <div class="d-flex ga-2">
+                  <v-btn
+                    size="small"
+                    :color="rootCauseTab === 'components' ? 'primary' : 'default'"
+                    :variant="rootCauseTab === 'components' ? 'tonal' : 'outlined'"
+                    @click="rootCauseTab = 'components'"
+                  >
+                    Components
+                  </v-btn>
+                  <v-btn
+                    size="small"
+                    :color="rootCauseTab === 'lineage' ? 'primary' : 'default'"
+                    :variant="rootCauseTab === 'lineage' ? 'tonal' : 'outlined'"
+                    @click="rootCauseTab = 'lineage'"
+                  >
+                    Base Images / Distros
+                  </v-btn>
+                </div>
+              </div>
+              <v-btn
+                variant="text"
+                color="primary"
+                append-icon="mdi-arrow-right"
+                @click="viewAllRootCauses"
+              >
+                View All
+              </v-btn>
+            </v-card-title>
+            <v-card-text class="pa-0">
+              <div v-if="!activeRootCauseItems.length" class="text-center pa-8">
+                <v-icon size="48" color="grey">mdi-source-branch</v-icon>
+                <p class="text-body-2 text-medium-emphasis mt-2">No root-cause signals available yet</p>
+              </div>
+              <v-list v-else class="risk-ranking-list">
+                <v-list-item
+                  v-for="item in activeRootCauseItems"
+                  :key="rootCauseItemKey(item)"
+                  class="risk-ranking-item clickable"
+                  @click="openRootCauseItem(item)"
+                >
+                  <v-list-item-title class="font-weight-medium">
+                    {{ rootCauseItemTitle(item) }}
+                  </v-list-item-title>
+                  <v-list-item-subtitle>
+                    {{ rootCauseItemSubtitle(item) }} · {{ item.affected_repositories_count }} repos ·
+                    {{ item.affected_images_count }} images · {{ item.vulnerabilities_count }} vulns
+                  </v-list-item-subtitle>
+
+                  <template #append>
+                    <div class="d-flex align-center ga-2 flex-wrap justify-end">
+                      <v-chip size="small" color="primary" variant="tonal">
+                        Risk {{ formatRiskScore(item.weighted_risk_score) }}
+                      </v-chip>
+                      <v-chip
+                        v-if="item.critical_vulnerabilities_count"
+                        size="small"
+                        color="error"
+                        variant="tonal"
+                      >
+                        {{ item.critical_vulnerabilities_count }} critical
+                      </v-chip>
+                      <v-chip
+                        v-if="item.kev_vulnerabilities_count"
+                        size="small"
+                        color="warning"
+                        variant="tonal"
+                      >
+                        {{ item.kev_vulnerabilities_count }} KEV
+                      </v-chip>
+                    </div>
+                  </template>
+                </v-list-item>
+              </v-list>
+            </v-card-text>
+          </v-card>
+        </v-col>
+      </v-row>
+
       <!-- Activity and Quick Actions -->
       <v-row>
         <v-col cols="12" md="6">
@@ -633,6 +730,7 @@ type DashboardBlockKey =
   | 'activity'
   | 'threatIntel'
   | 'analytics'
+  | 'rootCauses'
 
 type DashboardPayload = Record<string, any>
 
@@ -661,6 +759,10 @@ const dashboardBlockConfig: Record<DashboardBlockKey, { endpoint: string; keys: 
     endpoint: 'stats/dashboard-analytics/',
     keys: ['risk_rankings', 'fixability_analytics', 'recent_scan_deltas'],
   },
+  rootCauses: {
+    endpoint: 'stats/dashboard-root-causes/',
+    keys: ['shared_root_causes', 'base_lineage_root_causes'],
+  },
 }
 
 // Data
@@ -672,6 +774,7 @@ const blockLoading = ref<Record<DashboardBlockKey, boolean>>({
   activity: false,
   threatIntel: false,
   analytics: false,
+  rootCauses: false,
 })
 const blockErrors = ref<Record<DashboardBlockKey, string | null>>({
   overview: null,
@@ -680,10 +783,12 @@ const blockErrors = ref<Record<DashboardBlockKey, string | null>>({
   activity: null,
   threatIntel: null,
   analytics: null,
+  rootCauses: null,
 })
 const loading = computed(() => Object.values(blockLoading.value).some(Boolean))
 const scanning = ref(false)
 const riskRankingTab = ref<'vulnerabilities' | 'repositories' | 'tags' | 'images' | 'releases'>('vulnerabilities')
+const rootCauseTab = ref<'components' | 'lineage'>('components')
 const riskRankingOptions = [
   { label: 'Vulnerabilities', value: 'vulnerabilities' },
   { label: 'Repositories', value: 'repositories' },
@@ -756,6 +861,10 @@ const viewAllThreatIntel = () => {
   router.push('/threat-intel')
 }
 
+const viewAllRootCauses = () => {
+  router.push(rootCauseTab.value === 'components' ? '/root-causes' : '/base-lineage-root-causes')
+}
+
 const scanAllRepositories = async () => {
   scanning.value = true
   try {
@@ -812,6 +921,12 @@ const activeRiskRankingItems = computed(() => (
   dashboardData.value?.risk_rankings?.[riskRankingTab.value] || []
 ))
 
+const activeRootCauseItems = computed(() => (
+  rootCauseTab.value === 'components'
+    ? (dashboardData.value?.shared_root_causes || [])
+    : (dashboardData.value?.base_lineage_root_causes || [])
+))
+
 const getRiskItemSubtitle = (item: any) => {
   if (item.asset_type === 'vulnerability') {
     return `${item.severity || 'UNKNOWN'} · ${item.currently_present ? 'currently present' : 'historical only'}`
@@ -844,6 +959,38 @@ const navigateToRiskAsset = (item: any) => {
     default:
       break
   }
+}
+
+const rootCauseItemKey = (item: any) => item.uuid || item.key
+
+const rootCauseItemTitle = (item: any) => {
+  if (rootCauseTab.value === 'components') {
+    return `${item.component_name}@${item.version}`
+  }
+  return item.lineage_label
+}
+
+const rootCauseItemSubtitle = (item: any) => {
+  if (rootCauseTab.value === 'components') {
+    return item.component_type || 'unknown'
+  }
+  if (item.lineage_source === 'sbom_distro') {
+    return 'from SBOM distro'
+  }
+  if (item.lineage_source === 'package_distro') {
+    return 'from OS package distro'
+  }
+  return 'unknown lineage'
+}
+
+const openRootCauseItem = (item: any) => {
+  if (rootCauseTab.value === 'components') {
+    if (item?.uuid) {
+      router.push(`/component-versions/${item.uuid}`)
+    }
+    return
+  }
+  router.push('/base-lineage-root-causes')
 }
 
 const openScanDelta = (item: any) => {

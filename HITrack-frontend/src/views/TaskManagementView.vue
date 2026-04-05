@@ -124,6 +124,22 @@
                 </v-btn>
               </v-col>
             </v-row>
+
+            <v-row class="mt-4">
+              <v-col cols="12" md="3">
+                <v-btn
+                  block
+                  color="teal"
+                  prepend-icon="mdi-chart-box-outline"
+                  @click="collectRootCauseAnalyticsSnapshot"
+                  :loading="collectRootCauseAnalyticsLoading"
+                  size="large"
+                  class="action-btn"
+                >
+                  Refresh Root Cause Snapshots
+                </v-btn>
+              </v-col>
+            </v-row>
           </v-card-text>
         </v-card>
       </v-col>
@@ -479,6 +495,7 @@ export default defineComponent({
     const updateComponentsLoading = ref(false)
     const updateDebComponentsLoading = ref(false)
     const recalculateFixAvailabilityLoading = ref(false)
+    const collectRootCauseAnalyticsLoading = ref(false)
     const stoppingTasks = ref<string[]>([])
     const tasks = ref<TaskResult[]>([])
     const periodicTasks = ref<PeriodicTask[]>([])
@@ -767,6 +784,22 @@ export default defineComponent({
       }
     }
 
+    const collectRootCauseAnalyticsSnapshot = async () => {
+      collectRootCauseAnalyticsLoading.value = true
+      try {
+        const response = await api.post('/test-tasks/collect_root_cause_analytics_snapshot/')
+        if (response.data?.task_id) {
+          upsertPendingTask(response.data.task_id, 'Collect Root Cause Analytics Snapshot')
+        }
+        notificationService.started('Root cause analytics snapshot task started.')
+      } catch (error) {
+        console.error('Error collecting root cause analytics snapshot:', error)
+        notificationService.error(`Failed to start root cause snapshot task: ${error}`)
+      } finally {
+        collectRootCauseAnalyticsLoading.value = false
+      }
+    }
+
     const viewTaskDetails = (task: TaskResult) => {
       selectedTask.value = task
       taskDetailsDialog.value = true
@@ -949,6 +982,7 @@ export default defineComponent({
           updateComponentsLoading,
           updateDebComponentsLoading,
           recalculateFixAvailabilityLoading,
+          collectRootCauseAnalyticsLoading,
           stoppingTasks,
           tasks,
           periodicTasks,
@@ -983,6 +1017,7 @@ export default defineComponent({
           updateAllComponentsLatestVersions,
           updateDebComponentsLatestVersions,
           recalculateVulnerabilityFixAvailability,
+          collectRootCauseAnalyticsSnapshot,
           viewTaskDetails,
           retryTask,
           stopTask,

@@ -4929,3 +4929,97 @@ def collect_weekly_threat_intel_snapshot(retention_days: int = 90, limit: int | 
         "processing_time": processing_time,
         "timestamp": timezone.now().isoformat(),
     }
+
+
+@celery_app.task(name="Cleanup Root Cause Analytics Snapshots")
+def cleanup_root_cause_analytics_snapshots(retention_days: int = 30):
+    from .utils.analytics import cleanup_old_root_cause_analytics_snapshots
+
+    cleanup_result = cleanup_old_root_cause_analytics_snapshots(retention_days=retention_days)
+    return {
+        "status": "success",
+        "task_name": "Cleanup Root Cause Analytics Snapshots",
+        "summary": {
+            "retention_days": retention_days,
+            **cleanup_result,
+        },
+        "timestamp": timezone.now().isoformat(),
+    }
+
+
+@celery_app.task(
+    name="Collect Shared Root Cause Analytics Snapshot",
+    soft_time_limit=3600,
+    time_limit=4200,
+)
+def collect_shared_root_cause_analytics_snapshot(retention_days: int = 30, batch_size: int = 500):
+    from .utils.analytics import save_shared_root_cause_analytics_snapshot
+
+    start_time = time.time()
+    snapshot = save_shared_root_cause_analytics_snapshot(batch_size=batch_size)
+    processing_time = time.time() - start_time
+
+    return {
+        "status": "success",
+        "task_name": "Collect Shared Root Cause Analytics Snapshot",
+        "summary": {
+            "snapshot_date": snapshot.snapshot_date.isoformat(),
+            "retention_days": retention_days,
+            "shared_root_causes_count": snapshot.total_items,
+            "batch_size": batch_size,
+        },
+        "processing_time": processing_time,
+        "timestamp": timezone.now().isoformat(),
+    }
+
+
+@celery_app.task(
+    name="Collect Base Lineage Root Cause Analytics Snapshot",
+    soft_time_limit=3600,
+    time_limit=4200,
+)
+def collect_base_lineage_root_cause_analytics_snapshot(retention_days: int = 30, batch_size: int = 500):
+    from .utils.analytics import save_base_lineage_root_cause_analytics_snapshot
+
+    start_time = time.time()
+    snapshot = save_base_lineage_root_cause_analytics_snapshot(batch_size=batch_size)
+    processing_time = time.time() - start_time
+
+    return {
+        "status": "success",
+        "task_name": "Collect Base Lineage Root Cause Analytics Snapshot",
+        "summary": {
+            "snapshot_date": snapshot.snapshot_date.isoformat(),
+            "retention_days": retention_days,
+            "base_lineage_root_causes_count": snapshot.total_items,
+            "batch_size": batch_size,
+        },
+        "processing_time": processing_time,
+        "timestamp": timezone.now().isoformat(),
+    }
+
+
+@celery_app.task(name="Collect Root Cause Analytics Snapshot")
+def collect_root_cause_analytics_snapshot(retention_days: int = 30, batch_size: int = 500):
+    shared_result = collect_shared_root_cause_analytics_snapshot.delay(
+        retention_days=retention_days,
+        batch_size=batch_size,
+    )
+    base_lineage_result = collect_base_lineage_root_cause_analytics_snapshot.delay(
+        retention_days=retention_days,
+        batch_size=batch_size,
+    )
+    cleanup_result = cleanup_root_cause_analytics_snapshots.delay(retention_days=retention_days)
+
+    return {
+        "status": "queued",
+        "task_name": "Collect Root Cause Analytics Snapshot",
+        "summary": {
+            "retention_days": retention_days,
+            "batch_size": batch_size,
+            "shared_task_id": shared_result.id,
+            "base_lineage_task_id": base_lineage_result.id,
+            "cleanup_task_id": cleanup_result.id,
+        },
+        "timestamp": timezone.now().isoformat(),
+    }
