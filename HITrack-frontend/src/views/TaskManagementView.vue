@@ -129,6 +129,19 @@
               <v-col cols="12" md="3">
                 <v-btn
                   block
+                  color="cyan-darken-1"
+                  prepend-icon="mdi-family-tree"
+                  @click="backfillImageLineageFields"
+                  :loading="backfillImageLineageLoading"
+                  size="large"
+                  class="action-btn"
+                >
+                  Backfill Image Lineage
+                </v-btn>
+              </v-col>
+              <v-col cols="12" md="3">
+                <v-btn
+                  block
                   color="teal"
                   prepend-icon="mdi-chart-box-outline"
                   @click="collectRootCauseAnalyticsSnapshot"
@@ -494,6 +507,7 @@ export default defineComponent({
     const testEndpointLoading = ref(false)
     const updateComponentsLoading = ref(false)
     const updateDebComponentsLoading = ref(false)
+    const backfillImageLineageLoading = ref(false)
     const recalculateFixAvailabilityLoading = ref(false)
     const collectRootCauseAnalyticsLoading = ref(false)
     const stoppingTasks = ref<string[]>([])
@@ -784,6 +798,22 @@ export default defineComponent({
       }
     }
 
+    const backfillImageLineageFields = async () => {
+      backfillImageLineageLoading.value = true
+      try {
+        const response = await api.post('/test-tasks/backfill_image_lineage_fields/')
+        if (response.data?.task_id) {
+          upsertPendingTask(response.data.task_id, 'Backfill Image Lineage Fields')
+        }
+        notificationService.started('Image lineage backfill task started.')
+      } catch (error) {
+        console.error('Error backfilling image lineage fields:', error)
+        notificationService.error(`Failed to start image lineage backfill: ${error}`)
+      } finally {
+        backfillImageLineageLoading.value = false
+      }
+    }
+
     const collectRootCauseAnalyticsSnapshot = async () => {
       collectRootCauseAnalyticsLoading.value = true
       try {
@@ -981,6 +1011,7 @@ export default defineComponent({
           testEndpointLoading,
           updateComponentsLoading,
           updateDebComponentsLoading,
+          backfillImageLineageLoading,
           recalculateFixAvailabilityLoading,
           collectRootCauseAnalyticsLoading,
           stoppingTasks,
@@ -1016,6 +1047,7 @@ export default defineComponent({
           testDirectAPI,
           updateAllComponentsLatestVersions,
           updateDebComponentsLatestVersions,
+          backfillImageLineageFields,
           recalculateVulnerabilityFixAvailability,
           collectRootCauseAnalyticsSnapshot,
           viewTaskDetails,

@@ -158,6 +158,10 @@ export interface Image extends BaseEntity {
   name: string
   digest: string
   scan_status: string
+  lineage_label?: string
+  lineage_source?: string
+  os_distro_name?: string | null
+  os_distro_version?: string | null
   has_sbom: boolean
   has_grype: boolean
   findings: number

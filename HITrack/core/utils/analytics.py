@@ -233,28 +233,10 @@ def build_shared_root_cause_queryset(base_queryset=None):
 
 
 def build_base_lineage_image_queryset(base_queryset=None, include_risk_score: bool = True):
-    from ..models import ComponentVersion, ComponentVersionVulnerability, Image
+    from ..models import ComponentVersionVulnerability, Image
 
     if base_queryset is None:
         base_queryset = Image.objects.all()
-
-    os_distro_hint_subquery = ComponentVersion.objects.filter(
-        images=OuterRef('pk'),
-        component__type__in=['deb', 'rpm', 'apk'],
-        purl__icontains='distro=',
-    ).annotate(
-        distro_hint=Lower(
-            Func(
-                F('purl'),
-                Value(r'.*[?&]distro=([^&]+).*'),
-                Value(r'\1'),
-                function='regexp_replace',
-                output_field=models.CharField(),
-            )
-        ),
-    ).exclude(
-        distro_hint='',
-    ).values('distro_hint')[:1]
 
     image_risk_subquery = ComponentVersionVulnerability.objects.filter(
         component_version__images=OuterRef('pk'),
@@ -266,74 +248,21 @@ def build_base_lineage_image_queryset(base_queryset=None, include_risk_score: bo
         total_risk=Sum('risk_value'),
     ).values('total_risk')[:1]
 
-    annotations = {
-        'sbom_distro_name': Lower(
-            Func(
-                F('sbom_data'),
-                Value('distro'),
-                Value('name'),
-                function='jsonb_extract_path_text',
-                output_field=models.CharField(),
-            )
-        ),
-        'sbom_distro_version': Func(
-            F('sbom_data'),
-            Value('distro'),
-            Value('version'),
-            function='jsonb_extract_path_text',
-            output_field=models.CharField(),
-        ),
-        'package_distro_hint': Subquery(os_distro_hint_subquery, output_field=models.CharField()),
-    }
+    queryset = base_queryset.filter(
+        scan_status='success',
+        repository_tags__isnull=False,
+    )
+
     if include_risk_score:
-        annotations['image_risk_score'] = Coalesce(
+        queryset = queryset.annotate(
+            image_risk_score=Coalesce(
             Subquery(image_risk_subquery, output_field=FloatField()),
             Value(0.0),
             output_field=FloatField(),
         )
+        )
 
-    queryset = base_queryset.filter(
-        scan_status='success',
-        repository_tags__isnull=False,
-    ).annotate(**annotations)
-
-    has_sbom_distro = (
-        Q(sbom_distro_name__isnull=False)
-        & ~Q(sbom_distro_name='')
-    )
-    has_sbom_version = (
-        Q(sbom_distro_version__isnull=False)
-        & ~Q(sbom_distro_version='')
-    )
-    has_package_distro = (
-        Q(package_distro_hint__isnull=False)
-        & ~Q(package_distro_hint='')
-    )
-
-    return queryset.annotate(
-        lineage_label=Case(
-            When(
-                has_sbom_distro & has_sbom_version,
-                then=Concat(F('sbom_distro_name'), Value('-'), F('sbom_distro_version')),
-            ),
-            When(
-                has_sbom_distro,
-                then=F('sbom_distro_name'),
-            ),
-            When(
-                has_package_distro,
-                then=F('package_distro_hint'),
-            ),
-            default=Value('unknown'),
-            output_field=models.CharField(),
-        ),
-        lineage_source=Case(
-            When(has_sbom_distro, then=Value('sbom_distro')),
-            When(has_package_distro, then=Value('package_distro')),
-            default=Value('unknown'),
-            output_field=models.CharField(),
-        ),
-    )
+    return queryset.distinct()
 
 
 def build_base_lineage_snapshot_image_queryset(base_queryset=None):

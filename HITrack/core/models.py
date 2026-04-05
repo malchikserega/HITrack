@@ -166,12 +166,25 @@ class Image(models.Model):
         ],
         default='none'
     )
+    lineage_label = models.CharField(max_length=255, default='unknown')
+    lineage_source = models.CharField(max_length=64, default='unknown')
+    os_distro_name = models.CharField(max_length=255, null=True, blank=True)
+    os_distro_version = models.CharField(max_length=255, null=True, blank=True)
+    lineage_updated_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         indexes = [
             models.Index(fields=['scan_status']),
+            models.Index(
+                fields=['scan_status', 'lineage_label', 'lineage_source'],
+                name='core_image_scan_lineage_idx',
+            ),
+            models.Index(
+                fields=['lineage_label', 'lineage_source'],
+                name='core_image_lineage_idx',
+            ),
         ]
 
     def __str__(self):

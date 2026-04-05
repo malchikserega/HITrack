@@ -46,7 +46,35 @@
                 </v-chip>
               </div>
               <div class="mb-1"><b>Digest:</b> <span class="digest-text">{{ image.digest }}</span></div>
+              <div class="mb-3">
+                <b>OS / Distro:</b>
+                <template v-if="hasLineage(image)">
+                  <v-chip
+                    size="small"
+                    color="teal"
+                    variant="tonal"
+                    class="ml-2 mr-2"
+                  >
+                    {{ image.lineage_label }}
+                  </v-chip>
+                  <v-tooltip location="top">
+                    <template #activator="{ props }">
+                      <v-chip
+                        v-bind="props"
+                        size="x-small"
+                        color="grey-darken-1"
+                        variant="outlined"
+                      >
+                        {{ lineageSourceLabel(image.lineage_source) }}
+                      </v-chip>
+                    </template>
+                    <span>{{ lineageSourceTooltip(image.lineage_source) }}</span>
+                  </v-tooltip>
+                </template>
+                <span v-else class="text-medium-emphasis ml-2">Unknown</span>
+              </div>
               <div class="mb-1"><b>Updated:</b> {{ $formatDate(image.updated_at) }}</div>
+              <div class="mb-1"><b>Created:</b> {{ $formatDate(image.created_at) }}</div>
             </v-card>
 
             <!-- Two circles below card -->
@@ -689,6 +717,31 @@ const breadcrumbItems = computed((): BreadcrumbItem[] => {
   
   return items
 })
+
+const hasLineage = (item: Image | null) =>
+  Boolean(item?.lineage_label && item.lineage_label !== 'unknown')
+
+const lineageSourceLabel = (source?: string) => {
+  switch (source) {
+    case 'sbom_distro':
+      return 'SBOM distro'
+    case 'package_distro':
+      return 'Pkg distro'
+    default:
+      return 'Unknown'
+  }
+}
+
+const lineageSourceTooltip = (source?: string) => {
+  switch (source) {
+    case 'sbom_distro':
+      return 'Detected directly from SBOM distro metadata.'
+    case 'package_distro':
+      return 'Inferred from OS package metadata when SBOM distro was unavailable.'
+    default:
+      return 'OS lineage could not be determined.'
+  }
+}
 
 function onLegendClick(i: number) {
   legendVisible.value[i] = !legendVisible.value[i]

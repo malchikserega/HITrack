@@ -115,16 +115,47 @@
               <template #item="{ item }">
                 <tr class="clickable-row" @click="navigateToImageDetail(item)">
                   <td>
-                    <span>{{ item.name }}</span>
-                    <v-chip
-                      size="x-small"
-                      :color="statusColor(item.scan_status)"
-                      class="ml-2"
-                      variant="tonal"
-                      style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;"
-                    >
-                      {{ statusLabel(item.scan_status) }}
-                    </v-chip>
+                    <div class="image-name-cell">
+                      <div class="image-name-cell__title">
+                        <span>{{ item.name }}</span>
+                        <v-chip
+                          size="x-small"
+                          :color="statusColor(item.scan_status)"
+                          class="ml-2"
+                          variant="tonal"
+                          style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;"
+                        >
+                          {{ statusLabel(item.scan_status) }}
+                        </v-chip>
+                      </div>
+                    </div>
+                  </td>
+                  <td>
+                    <div v-if="hasLineage(item)" class="lineage-cell">
+                      <v-chip
+                        size="small"
+                        color="teal"
+                        variant="tonal"
+                        class="lineage-cell__label"
+                      >
+                        {{ item.lineage_label }}
+                      </v-chip>
+                      <v-tooltip location="top">
+                        <template #activator="{ props }">
+                          <v-chip
+                            v-bind="props"
+                            size="x-small"
+                            color="grey-darken-1"
+                            variant="outlined"
+                            class="mt-1"
+                          >
+                            {{ lineageSourceLabel(item.lineage_source) }}
+                          </v-chip>
+                        </template>
+                        <span>{{ lineageSourceTooltip(item.lineage_source) }}</span>
+                      </v-tooltip>
+                    </div>
+                    <span v-else class="text-medium-emphasis text-caption">Unknown</span>
                   </td>
                   <td>
                     <v-tooltip location="top">
@@ -262,6 +293,7 @@ const loadingReleases = ref(false)
 
 const headers: any[] = [
   { title: 'Name', key: 'name', sortable: true },
+  { title: 'OS / Distro', key: 'lineage_label', sortable: true, width: '220px' },
   { title: 'Digest', key: 'digest', sortable: true },
   { title: 'SBOM', key: 'has_sbom', sortable: false },
   { title: 'Findings', key: 'findings', sortable: true },
@@ -365,6 +397,31 @@ const getFindingsColor = (findings: number) => {
   if (findings === 0) return 'success'
   if (findings <= 5) return 'warning'
   return 'error'
+}
+
+const hasLineage = (image: Image) =>
+  Boolean(image.lineage_label && image.lineage_label !== 'unknown')
+
+const lineageSourceLabel = (source?: string) => {
+  switch (source) {
+    case 'sbom_distro':
+      return 'SBOM distro'
+    case 'package_distro':
+      return 'Pkg distro'
+    default:
+      return 'Unknown'
+  }
+}
+
+const lineageSourceTooltip = (source?: string) => {
+  switch (source) {
+    case 'sbom_distro':
+      return 'Detected directly from SBOM distro metadata.'
+    case 'package_distro':
+      return 'Inferred from OS package metadata when SBOM distro was unavailable.'
+    default:
+      return 'OS lineage could not be determined.'
+  }
 }
 const formatDigest = (digest: string) => {
   if (!digest) return ''
@@ -516,6 +573,28 @@ onMounted(async () => {
   margin-top: -8px !important;
   padding-top: 0 !important;
 }
+
+.image-name-cell {
+  min-width: 240px;
+}
+
+.image-name-cell__title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.lineage-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.lineage-cell__label {
+  max-width: 100%;
+}
+
 .digest-shortcut {
   font-family: monospace;
   cursor: pointer;

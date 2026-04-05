@@ -66,16 +66,47 @@
               <template #item="{ item }">
                 <tr class="clickable-row">
                   <td @click="onRowClick(item)">
-                    <span>{{ item.name }}</span>
-                    <v-chip
-                      size="x-small"
-                      :color="statusColor(item.scan_status)"
-                      class="ml-2"
-                      variant="tonal"
-                      style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;"
-                    >
-                      {{ statusLabel(item.scan_status) }}
-                    </v-chip>
+                    <div class="image-name-cell">
+                      <div class="image-name-cell__title">
+                        <span>{{ item.name }}</span>
+                        <v-chip
+                          size="x-small"
+                          :color="statusColor(item.scan_status)"
+                          class="ml-2"
+                          variant="tonal"
+                          style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;"
+                        >
+                          {{ statusLabel(item.scan_status) }}
+                        </v-chip>
+                      </div>
+                    </div>
+                  </td>
+                  <td @click="onRowClick(item)">
+                    <div v-if="hasLineage(item)" class="lineage-cell">
+                      <v-chip
+                        size="small"
+                        color="teal"
+                        variant="tonal"
+                        class="lineage-cell__label"
+                      >
+                        {{ item.lineage_label }}
+                      </v-chip>
+                      <v-tooltip location="top">
+                        <template #activator="{ props }">
+                          <v-chip
+                            v-bind="props"
+                            size="x-small"
+                            color="grey-darken-1"
+                            variant="outlined"
+                            class="mt-1"
+                          >
+                            {{ lineageSourceLabel(item.lineage_source) }}
+                          </v-chip>
+                        </template>
+                        <span>{{ lineageSourceTooltip(item.lineage_source) }}</span>
+                      </v-tooltip>
+                    </div>
+                    <span v-else class="text-medium-emphasis text-caption">Unknown</span>
                   </td>
                   <td @click="onRowClick(item)">
                     <v-tooltip location="top">
@@ -286,6 +317,10 @@ const editedItem = ref<Image>({
   name: '',
   digest: '',
   scan_status: '',
+  lineage_label: '',
+  lineage_source: '',
+  os_distro_name: '',
+  os_distro_version: '',
   has_sbom: false,
   has_grype: false,
   findings: 0,
@@ -325,6 +360,10 @@ const defaultItem = {
   name: '',
   digest: '',
   scan_status: '',
+  lineage_label: '',
+  lineage_source: '',
+  os_distro_name: '',
+  os_distro_version: '',
   has_sbom: false,
   has_grype: false,
   findings: 0,
@@ -343,6 +382,7 @@ const defaultItem = {
 
 const headers: any[] = [
   { title: 'Name', key: 'name', sortable: true },
+  { title: 'OS / Distro', key: 'lineage_label', sortable: true, width: '220px' },
   { title: 'Digest', key: 'digest', sortable: true },
   { title: 'SBOM', key: 'has_sbom', sortable: false },
   { title: 'Findings', key: 'findings', sortable: true },
@@ -440,6 +480,10 @@ const openDialog = (title: string, item?: Image) => {
       name: item.name,
       digest: item.digest,
       scan_status: item.scan_status,
+      lineage_label: item.lineage_label,
+      lineage_source: item.lineage_source,
+      os_distro_name: item.os_distro_name,
+      os_distro_version: item.os_distro_version,
       has_sbom: item.has_sbom,
       has_grype: item.has_grype,
       findings: item.findings,
@@ -658,6 +702,31 @@ const getFindingsColor = (findings: number) => {
   return 'error'
 }
 
+const hasLineage = (image: Image) =>
+  Boolean(image.lineage_label && image.lineage_label !== 'unknown')
+
+const lineageSourceLabel = (source?: string) => {
+  switch (source) {
+    case 'sbom_distro':
+      return 'SBOM distro'
+    case 'package_distro':
+      return 'Pkg distro'
+    default:
+      return 'Unknown'
+  }
+}
+
+const lineageSourceTooltip = (source?: string) => {
+  switch (source) {
+    case 'sbom_distro':
+      return 'Detected directly from SBOM distro metadata.'
+    case 'package_distro':
+      return 'Inferred from OS package metadata when SBOM distro was unavailable.'
+    default:
+      return 'OS lineage could not be determined.'
+  }
+}
+
 const onRowClick = (item: Image) => {
   if (item.uuid) {
     router.push({ name: 'image-detail', params: { uuid: item.uuid } })
@@ -771,6 +840,27 @@ onUnmounted(() => {
 
 .date-meta-cell {
   line-height: 1.2;
+}
+
+.image-name-cell {
+  min-width: 260px;
+}
+
+.image-name-cell__title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.lineage-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.lineage-cell__label {
+  max-width: 100%;
 }
 
 .date-meta-cell__primary {

@@ -36,9 +36,75 @@ logger = logging.getLogger(__name__)
 DEBUG_LOGGING = os.getenv('DEBUG_LOGGING', 'False').lower() == 'true'
 
 DOCKER_IMAGE_REGEX = re.compile(r'^[a-zA-Z0-9._/-]+(:[a-zA-Z0-9._-]+)?$')
+_LINEAGE_SOURCE_PRIORITY = {
+    'unknown': 0,
+    'package_distro': 1,
+    'sbom_distro': 2,
+}
 
 def is_safe_image_ref(image_ref: str) -> bool:
     return bool(DOCKER_IMAGE_REGEX.match(image_ref)) and len(image_ref) < 200
+
+
+def _apply_image_lineage_fields(image, component_version_purls=None):
+    from .utils.lineage import derive_image_lineage, image_lineage_to_update_fields
+
+    if component_version_purls is None:
+        component_version_purls = image.component_versions.filter(
+            component__type__in=['deb', 'rpm', 'apk']
+        ).values_list('purl', flat=True)
+
+    lineage = derive_image_lineage(
+        sbom_data=image.sbom_data,
+        component_version_purls=component_version_purls,
+    )
+    desired_fields = image_lineage_to_update_fields(lineage)
+    update_fields = []
+
+    for field_name, desired_value in desired_fields.items():
+        if getattr(image, field_name) != desired_value:
+            setattr(image, field_name, desired_value)
+            update_fields.append(field_name)
+
+    if update_fields or image.lineage_updated_at is None:
+        image.lineage_updated_at = timezone.now()
+        update_fields.append('lineage_updated_at')
+
+    return update_fields
+
+
+def _copy_image_lineage_fields(source_image, target_image):
+    source_priority = _LINEAGE_SOURCE_PRIORITY.get(source_image.lineage_source or 'unknown', 0)
+    target_priority = _LINEAGE_SOURCE_PRIORITY.get(target_image.lineage_source or 'unknown', 0)
+
+    if source_priority == 0:
+        return []
+
+    should_replace = (
+        target_priority == 0
+        or source_priority > target_priority
+        or (
+            source_priority == target_priority
+            and (target_image.lineage_updated_at is None or (
+                source_image.lineage_updated_at and source_image.lineage_updated_at > target_image.lineage_updated_at
+            ))
+        )
+    )
+    if not should_replace:
+        return []
+
+    update_fields = []
+    for field_name in ('lineage_label', 'lineage_source', 'os_distro_name', 'os_distro_version'):
+        source_value = getattr(source_image, field_name)
+        if getattr(target_image, field_name) != source_value:
+            setattr(target_image, field_name, source_value)
+            update_fields.append(field_name)
+
+    if update_fields:
+        target_image.lineage_updated_at = source_image.lineage_updated_at or timezone.now()
+        update_fields.append('lineage_updated_at')
+
+    return update_fields
 
 
 _PKG_VERSION_CACHE_TTL = 3600  # 1 hour
@@ -1071,8 +1137,9 @@ def _propagate_image_completion_to_equivalent_images(image):
         if duplicate.scan_status != 'success':
             duplicate.scan_status = 'success'
             update_fields.append('scan_status')
+        update_fields.extend(_copy_image_lineage_fields(image, duplicate))
         if update_fields:
-            duplicate.save(update_fields=update_fields + ['updated_at'])
+            duplicate.save(update_fields=sorted(set(update_fields)) + ['updated_at'])
 
     return list(related_tag_ids)
 
@@ -1180,7 +1247,9 @@ def _merge_duplicate_image_group(images, normalized_digest):
         if status_rank.get(duplicate.scan_status, 99) < status_rank.get(primary.scan_status, 99):
             primary.scan_status = duplicate.scan_status
             update_fields.append('scan_status')
+        update_fields.extend(_copy_image_lineage_fields(duplicate, primary))
 
+    update_fields.extend(_apply_image_lineage_fields(primary))
     if update_fields:
         primary.save(update_fields=sorted(set(update_fields)) + ['updated_at'])
 
@@ -1443,7 +1512,8 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
             # Reset stale Grype data so the follow-up vulnerability scan is always rerun.
             image.grype_data = None
             image.scan_status = 'in_process'
-            image.save()
+            lineage_update_fields = _apply_image_lineage_fields(image)
+            image.save(update_fields=['sbom_data', 'grype_data', 'scan_status', *lineage_update_fields, 'updated_at'])
             
             logger.info(f"Successfully generated SBOM for image {image_uuid}")
 
@@ -2163,6 +2233,17 @@ def parse_sbom_and_create_components(image_uuid: str):
                             version_obj.images.add(image)
                             image_version_pks.add(version_obj.pk)
                             links_created += 1
+
+                lineage_update_fields = _apply_image_lineage_fields(
+                    image,
+                    component_version_purls=[
+                        version_data.get('purl')
+                        for data in component_data.values()
+                        for version_data in data['versions'].values()
+                    ],
+                )
+                if lineage_update_fields:
+                    image.save(update_fields=lineage_update_fields + ['updated_at'])
 
             batch_time = time.time() - batch_start_time
             logger.info(f"Completed batch {current_batch}/{total_batches} in {batch_time:.2f} seconds")
@@ -3608,6 +3689,99 @@ def deduplicate_images_by_identity():
         "message": (
             f"Image deduplication completed: {summary['duplicate_images_deleted']} duplicate "
             f"images removed across {summary['duplicate_groups_merged']} identity groups"
+        ),
+        "timestamp": timezone.now().isoformat(),
+    }
+
+
+@celery_app.task(name="Backfill Image Lineage Fields")
+def backfill_image_lineage_fields(batch_size: int = 200):
+    from django.db.models import Prefetch
+    from .models import ComponentVersion, Image
+
+    component_versions_prefetch = Prefetch(
+        'component_versions',
+        queryset=ComponentVersion.objects.filter(
+            component__type__in=['deb', 'rpm', 'apk']
+        ).select_related('component'),
+    )
+
+    summary = {
+        'total_images_seen': 0,
+        'images_updated': 0,
+        'sbom_distro_images': 0,
+        'package_distro_images': 0,
+        'unknown_images': 0,
+    }
+
+    buffered_ids = []
+
+    def process_batch(image_ids):
+        if not image_ids:
+            return
+
+        nonlocal summary
+        images = list(
+            Image.objects.filter(pk__in=image_ids)
+            .prefetch_related(component_versions_prefetch)
+            .order_by('created_at', 'uuid')
+        )
+        images_to_update = []
+        now = timezone.now()
+
+        for image in images:
+            summary['total_images_seen'] += 1
+            purls = [component_version.purl for component_version in image.component_versions.all()]
+            update_fields = _apply_image_lineage_fields(image, component_version_purls=purls)
+
+            if image.lineage_source == 'sbom_distro':
+                summary['sbom_distro_images'] += 1
+            elif image.lineage_source == 'package_distro':
+                summary['package_distro_images'] += 1
+            else:
+                summary['unknown_images'] += 1
+
+            if update_fields:
+                image.updated_at = now
+                images_to_update.append(image)
+
+        if images_to_update:
+            Image.objects.bulk_update(
+                images_to_update,
+                [
+                    'lineage_label',
+                    'lineage_source',
+                    'os_distro_name',
+                    'os_distro_version',
+                    'lineage_updated_at',
+                    'updated_at',
+                ],
+                batch_size=batch_size,
+            )
+            summary['images_updated'] += len(images_to_update)
+
+    image_id_iterator = (
+        Image.objects.order_by('created_at', 'uuid')
+        .values_list('pk', flat=True)
+        .iterator(chunk_size=batch_size)
+    )
+
+    for image_id in image_id_iterator:
+        buffered_ids.append(image_id)
+        if len(buffered_ids) >= batch_size:
+            process_batch(buffered_ids)
+            buffered_ids = []
+
+    if buffered_ids:
+        process_batch(buffered_ids)
+
+    return {
+        "status": "success",
+        "task_name": "Backfill Image Lineage Fields",
+        "summary": summary,
+        "message": (
+            f"Image lineage backfill completed: {summary['images_updated']} images updated "
+            f"out of {summary['total_images_seen']} processed"
         ),
         "timestamp": timezone.now().isoformat(),
     }

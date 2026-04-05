@@ -449,6 +449,7 @@ class ImageSerializer(serializers.ModelSerializer):
         model = Image
         fields = [
             'uuid', 'name', 'digest', 'scan_status',
+            'lineage_label', 'lineage_source', 'os_distro_name', 'os_distro_version',
             'findings', 'unique_findings', 'severity_counts', 'components_count',
             'fully_fixable_components_count',
             'fixable_findings', 'fixable_unique_findings', 'fixable_severity_counts',
@@ -628,7 +629,12 @@ class ImageListSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Image
-        fields = ['uuid', 'name', 'digest', 'scan_status', 'has_sbom', 'has_grype', 'findings', 'unique_findings', 'components_count', 'repository_info', 'created_at', 'updated_at']
+        fields = [
+            'uuid', 'name', 'digest', 'scan_status',
+            'lineage_label', 'lineage_source', 'os_distro_name', 'os_distro_version',
+            'has_sbom', 'has_grype', 'findings', 'unique_findings', 'components_count',
+            'repository_info', 'created_at', 'updated_at'
+        ]
         read_only_fields = ['uuid', 'created_at', 'updated_at']
 
     @extend_schema_field(serializers.BooleanField())

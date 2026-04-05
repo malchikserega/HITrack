@@ -83,6 +83,8 @@ REPOSITORY_TAG_ORDERING_MAP = {
 IMAGE_LIST_ORDERING_MAP = {
     'name': 'name',
     '-name': '-name',
+    'lineage_label': 'lineage_label',
+    '-lineage_label': '-lineage_label',
     'digest': 'digest',
     '-digest': '-digest',
     'created_at': 'created_at',
@@ -1191,48 +1193,24 @@ def _build_base_lineage_section_payload(lineage_members, section, offset=0, limi
 
 
 def _build_targeted_base_lineage_members_queryset(lineage_label, lineage_source=None, include_unknown=False):
-    base_queryset = Image.objects.filter(
-        scan_status='success',
-        repository_tags__isnull=False,
-    ).distinct()
+    base_queryset = build_base_lineage_image_queryset(
+        base_queryset=Image.objects.filter(
+            scan_status='success',
+            repository_tags__isnull=False,
+        ),
+        include_risk_score=False,
+    )
 
     if lineage_label == 'unknown':
         if not include_unknown:
             return base_queryset.none()
-        return build_base_lineage_image_queryset(
-            base_queryset=base_queryset,
-            include_risk_score=False,
-        ).filter(lineage_label='unknown')
+        return base_queryset.filter(lineage_label='unknown')
 
-    if lineage_source == 'sbom_distro':
-        distro_name = lineage_label
-        distro_version = None
-        if '-' in lineage_label:
-            distro_name, distro_version = lineage_label.rsplit('-', 1)
+    filters = Q(lineage_label=lineage_label)
+    if lineage_source:
+        filters &= Q(lineage_source=lineage_source)
 
-        filters = Q(sbom_data__distro__name__iexact=distro_name)
-        if distro_version:
-            filters &= Q(sbom_data__distro__version=distro_version)
-
-        return build_base_lineage_image_queryset(
-            base_queryset=base_queryset.filter(filters),
-            include_risk_score=False,
-        ).filter(lineage_label=lineage_label)
-
-    if lineage_source == 'package_distro':
-        narrowed = base_queryset.filter(
-            component_versions__component__type__in=['deb', 'rpm', 'apk'],
-            component_versions__purl__icontains='distro=',
-        ).distinct()
-        return build_base_lineage_image_queryset(
-            base_queryset=narrowed,
-            include_risk_score=False,
-        ).filter(lineage_label=lineage_label)
-
-    return build_base_lineage_image_queryset(
-        base_queryset=base_queryset,
-        include_risk_score=False,
-    ).filter(lineage_label=lineage_label)
+    return base_queryset.filter(filters)
 
 
 def _build_optimized_image_list_queryset(queryset):
@@ -2242,8 +2220,8 @@ class RepositoryTagViewSet(BaseViewSet):
 class ImageViewSet(BaseViewSet):
     queryset = Image.objects.all()
     filterset_fields = ['repository_tags', 'component_versions']
-    search_fields = ['name']
-    ordering_fields = ['name', 'digest', 'created_at', 'updated_at', 'findings_count', 'unique_findings_count', 'components_count']
+    search_fields = ['name', 'lineage_label', 'os_distro_name', 'os_distro_version']
+    ordering_fields = ['name', 'lineage_label', 'digest', 'created_at', 'updated_at', 'findings_count', 'unique_findings_count', 'components_count']
     pagination_class = CustomPageNumberPagination
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
 
@@ -3921,8 +3899,8 @@ class StatsViewSet(viewsets.ViewSet):
             if search:
                 lineage_members = lineage_members.filter(
                     Q(lineage_label__icontains=search)
-                    | Q(package_distro_hint__icontains=search)
-                    | Q(sbom_distro_name__icontains=search)
+                    | Q(os_distro_name__icontains=search)
+                    | Q(os_distro_version__icontains=search)
                 )
 
             grouped_queryset = build_base_lineage_grouped_queryset(lineage_members)
@@ -4926,6 +4904,23 @@ class TestTaskViewSet(viewsets.ViewSet):
             result = update_deb_components_latest_versions.delay()
             return Response({
                 'message': 'Deb components latest versions update started',
+                'task_id': result.id
+            })
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+    @action(detail=False, methods=['post'])
+    def backfill_image_lineage_fields(self, request):
+        """Backfill persisted image OS lineage fields from SBOM and package metadata"""
+        from .tasks import backfill_image_lineage_fields
+
+        try:
+            result = backfill_image_lineage_fields.delay()
+            return Response({
+                'message': 'Image lineage backfill started',
                 'task_id': result.id
             })
         except Exception as e:
