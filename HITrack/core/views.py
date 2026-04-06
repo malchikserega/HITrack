@@ -95,10 +95,47 @@ IMAGE_LIST_ORDERING_MAP = {
     '-updated_at': '-updated_at',
     'findings': 'findings_count',
     '-findings': '-findings_count',
+    'findings_count': 'findings_count',
+    '-findings_count': '-findings_count',
     'components_count': 'components_count',
     '-components_count': '-components_count',
     'unique_findings': 'unique_findings_count',
     '-unique_findings': '-unique_findings_count',
+    'unique_findings_count': 'unique_findings_count',
+    '-unique_findings_count': '-unique_findings_count',
+}
+
+IMAGE_LIST_METRIC_ORDERING_FIELDS = {
+    'findings',
+    'findings_count',
+    'unique_findings',
+    'unique_findings_count',
+    'components_count',
+}
+
+IMAGE_COMPONENT_VERSION_ORDERING_MAP = {
+    'version': 'version',
+    '-version': '-version',
+    'name': 'component__name',
+    '-name': '-component__name',
+    'type': 'component__type',
+    '-type': '-component__type',
+    'vulnerabilities_count': 'vulnerabilities_count',
+    '-vulnerabilities_count': '-vulnerabilities_count',
+    'used_count': 'images_count',
+    '-used_count': '-images_count',
+    'images_count': 'images_count',
+    '-images_count': '-images_count',
+    'created_at': 'created_at',
+    '-created_at': '-created_at',
+    'updated_at': 'updated_at',
+    '-updated_at': '-updated_at',
+}
+
+IMAGE_COMPONENT_VERSION_METRIC_ORDERING_FIELDS = {
+    'vulnerabilities_count',
+    'used_count',
+    'images_count',
 }
 
 VULNERABILITY_IMAGE_ORDERING_MAP = {
@@ -1245,6 +1282,228 @@ def _build_optimized_image_list_queryset(queryset):
     ).defer('sbom_data', 'grype_data')
 
 
+def _image_list_needs_metric_ordering(ordering):
+    for field in (ordering or '').split(','):
+        field = field.strip().lstrip('-')
+        if field in IMAGE_LIST_METRIC_ORDERING_FIELDS:
+            return True
+    return False
+
+
+def _build_lightweight_image_list_queryset(queryset):
+    """Image list base queryset without global component/vulnerability joins."""
+    return queryset.only(
+        'uuid',
+        'name',
+        'digest',
+        'scan_status',
+        'lineage_label',
+        'lineage_source',
+        'os_distro_name',
+        'os_distro_version',
+        'os_eol_status',
+        'os_eol_source',
+        'os_eol_message',
+        'os_eol_checked_at',
+        'created_at',
+        'updated_at',
+    ).annotate(
+        has_sbom=Case(
+            When(sbom_data__isnull=False, then=True),
+            default=False,
+            output_field=BooleanField()
+        ),
+        has_grype=Case(
+            When(grype_data__isnull=False, then=True),
+            default=False,
+            output_field=BooleanField()
+        )
+    ).defer('sbom_data', 'grype_data')
+
+
+def _hydrate_image_list_page_metrics(images):
+    """Attach image list counts and first tag info after pagination."""
+    image_ids = [image.pk for image in images]
+    if not image_ids:
+        return
+
+    through_model = ComponentVersion.images.through
+    component_count_map = {
+        row['image_id']: row['total']
+        for row in through_model.objects.filter(image_id__in=image_ids)
+        .values('image_id')
+        .annotate(total=Count('componentversion_id', distinct=True))
+    }
+
+    vulnerability_count_rows = (
+        ComponentVersionVulnerability.objects
+        .filter(component_version__images__pk__in=image_ids)
+        .values('component_version__images__pk')
+        .annotate(
+            findings_count=Count('pk'),
+            unique_findings_count=Count('vulnerability', distinct=True),
+        )
+    )
+    findings_map = {
+        row['component_version__images__pk']: row
+        for row in vulnerability_count_rows
+    }
+
+    for image in images:
+        image.components_count = component_count_map.get(image.pk, 0)
+        counts = findings_map.get(image.pk, {})
+        image.findings_count = counts.get('findings_count', 0)
+        image.unique_findings_count = counts.get('unique_findings_count', 0)
+
+    prefetch_related_objects(
+        images,
+        Prefetch(
+            'repository_tags',
+            queryset=RepositoryTag.objects.select_related('repository').only(
+                'uuid',
+                'tag',
+                'repository__uuid',
+                'repository__name',
+                'repository__repository_type',
+            ).order_by('repository__name', 'tag'),
+        ),
+    )
+
+
+def _build_image_dropdown_queryset(queryset):
+    return queryset.only('uuid', 'name').annotate(
+        has_sbom=Case(
+            When(sbom_data__isnull=False, then=True),
+            default=False,
+            output_field=BooleanField()
+        )
+    ).defer('sbom_data', 'grype_data')
+
+
+def _component_version_list_needs_metric_ordering(ordering):
+    for field in (ordering or '').split(','):
+        field = field.strip().lstrip('-')
+        if field in IMAGE_COMPONENT_VERSION_METRIC_ORDERING_FIELDS:
+            return True
+    return False
+
+
+def _apply_image_component_version_ordering(queryset, ordering, default='component__name,version,created_at'):
+    requested = []
+    for field in (ordering or default).split(','):
+        field = field.strip()
+        if not field:
+            continue
+        resolved = IMAGE_COMPONENT_VERSION_ORDERING_MAP.get(field)
+        if resolved:
+            requested.append(resolved)
+    if not requested:
+        requested = [
+            IMAGE_COMPONENT_VERSION_ORDERING_MAP[field]
+            for field in default.split(',')
+            if field in IMAGE_COMPONENT_VERSION_ORDERING_MAP
+        ]
+    return queryset.order_by(*requested)
+
+
+def _build_lightweight_image_component_versions_queryset(image_uuid):
+    return (
+        ComponentVersion.objects
+        .filter(images__uuid=image_uuid)
+        .select_related('component')
+        .only(
+            'uuid',
+            'version',
+            'created_at',
+            'updated_at',
+            'component__uuid',
+            'component__name',
+            'component__type',
+        )
+        .distinct()
+    )
+
+
+def _build_metric_sorted_image_component_versions_queryset(image_uuid):
+    through_model = ComponentVersion.images.through
+    used_count_subquery = (
+        through_model.objects
+        .filter(componentversion_id=OuterRef('pk'))
+        .values('componentversion_id')
+        .annotate(total=Count('image_id', distinct=True))
+        .values('total')[:1]
+    )
+    vulnerability_count_subquery = (
+        ComponentVersionVulnerability.objects
+        .filter(component_version_id=OuterRef('pk'))
+        .values('component_version_id')
+        .annotate(total=Count('vulnerability_id', distinct=True))
+        .values('total')[:1]
+    )
+    return _build_lightweight_image_component_versions_queryset(image_uuid).annotate(
+        vulnerabilities_count=Coalesce(
+            Subquery(vulnerability_count_subquery, output_field=IntegerField()),
+            Value(0),
+        ),
+        images_count=Coalesce(
+            Subquery(used_count_subquery, output_field=IntegerField()),
+            Value(0),
+        ),
+    )
+
+
+def _hydrate_image_component_versions_page(component_versions, image_uuid):
+    component_version_ids = [component_version.pk for component_version in component_versions]
+    if not component_version_ids:
+        return
+
+    through_model = ComponentVersion.images.through
+    used_count_map = {
+        row['componentversion_id']: row['total']
+        for row in through_model.objects.filter(componentversion_id__in=component_version_ids)
+        .values('componentversion_id')
+        .annotate(total=Count('image_id', distinct=True))
+    }
+    vulnerability_count_map = {
+        row['component_version_id']: row['total']
+        for row in ComponentVersionVulnerability.objects.filter(component_version_id__in=component_version_ids)
+        .values('component_version_id')
+        .annotate(total=Count('vulnerability_id', distinct=True))
+    }
+    context_map = {
+        context.component_version_id: context
+        for context in ImageComponentVersionContext.objects.filter(
+            image_id=image_uuid,
+            component_version_id__in=component_version_ids,
+        )
+    }
+
+    context_fields = (
+        'dependency_scope',
+        'dependency_depth',
+        'immediate_parent_name',
+        'immediate_parent_version',
+        'direct_introducer_name',
+        'direct_introducer_version',
+        'package_scope',
+        'package_arch',
+        'package_distro',
+        'package_repo',
+        'package_channel',
+        'source_package',
+        'source_package_version',
+        'cataloger',
+        'metadata_type',
+    )
+
+    for component_version in component_versions:
+        component_version.vulnerabilities_count = vulnerability_count_map.get(component_version.pk, 0)
+        component_version.images_count = used_count_map.get(component_version.pk, 0)
+        context = context_map.get(component_version.pk)
+        for field in context_fields:
+            setattr(component_version, field, getattr(context, field, None) if context else None)
+
+
 def _build_image_comparison_base_queryset(queryset):
     return _annotate_image_comparison_fields(
         queryset.only(
@@ -2240,7 +2499,12 @@ class ImageViewSet(BaseViewSet):
         
         # Optimize for list action - prevent N+1 queries and memory issues
         if self.action == 'list':
-            queryset = _build_optimized_image_list_queryset(queryset)
+            if self.request and self.request.query_params.get('dropdown') == '1':
+                queryset = _build_image_dropdown_queryset(queryset)
+            elif self.request and _image_list_needs_metric_ordering(self.request.query_params.get('ordering')):
+                queryset = _build_optimized_image_list_queryset(queryset)
+            else:
+                queryset = _build_lightweight_image_list_queryset(queryset)
         elif self.action == 'retrieve':
             queryset = queryset.annotate(
                 components_count=Count('component_versions', distinct=True),
@@ -2259,6 +2523,27 @@ class ImageViewSet(BaseViewSet):
             ).defer('sbom_data', 'grype_data')
         
         return queryset
+
+    def list(self, request, *args, **kwargs):
+        if request.query_params.get('dropdown') == '1':
+            return super().list(request, *args, **kwargs)
+
+        metric_ordering = _image_list_needs_metric_ordering(request.query_params.get('ordering'))
+        queryset = self.filter_queryset(self.get_queryset())
+
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            items = list(page)
+            if not metric_ordering:
+                _hydrate_image_list_page_metrics(items)
+            serializer = self.get_serializer(items, many=True)
+            return self.get_paginated_response(serializer.data)
+
+        items = list(queryset)
+        if not metric_ordering:
+            _hydrate_image_list_page_metrics(items)
+        serializer = self.get_serializer(items, many=True)
+        return Response(serializer.data)
 
     @action(detail=False, methods=['get'], url_path='comparisons')
     def comparisons(self, request):
@@ -2806,7 +3091,7 @@ class ComponentVersionViewSet(BaseViewSet):
     serializer_class = ComponentVersionSerializer
     filterset_fields = ['component', 'images', 'vulnerabilities']
     search_fields = ['version', 'component__name']
-    ordering_fields = ['version', 'created_at', 'updated_at', 'vulnerabilities_count']
+    ordering_fields = ['version', 'created_at', 'updated_at', 'vulnerabilities_count', 'used_count', 'images_count']
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -2857,6 +3142,47 @@ class ComponentVersionViewSet(BaseViewSet):
         elif self.action == 'retrieve':
             return ComponentVersionUltraOptimizedSerializer
         return ComponentVersionSerializer
+
+    def list(self, request, *args, **kwargs):
+        image_uuid = request.query_params.get('images')
+        if not image_uuid:
+            return super().list(request, *args, **kwargs)
+
+        ordering = request.query_params.get('ordering')
+        metric_ordering = _component_version_list_needs_metric_ordering(ordering)
+        queryset = (
+            _build_metric_sorted_image_component_versions_queryset(image_uuid)
+            if metric_ordering
+            else _build_lightweight_image_component_versions_queryset(image_uuid)
+        )
+
+        component_filter = request.query_params.get('component')
+        if component_filter:
+            queryset = queryset.filter(component_id=component_filter)
+
+        vulnerability_filter = request.query_params.get('vulnerabilities')
+        if vulnerability_filter:
+            queryset = queryset.filter(vulnerabilities__uuid=vulnerability_filter)
+
+        search = (request.query_params.get('search') or '').strip()
+        if search:
+            queryset = queryset.filter(
+                Q(version__icontains=search)
+                | Q(component__name__icontains=search)
+                | Q(component__type__icontains=search)
+            )
+
+        queryset = _apply_image_component_version_ordering(queryset, ordering)
+
+        paginator = CustomPageNumberPagination()
+        page = paginator.paginate_queryset(queryset, request)
+        items = list(page) if page is not None else list(queryset[:paginator.page_size])
+        _hydrate_image_component_versions_page(items, image_uuid)
+
+        serializer = ComponentVersionListSerializer(items, many=True)
+        if page is not None:
+            return paginator.get_paginated_response(serializer.data)
+        return Response(serializer.data)
 
     @action(detail=True, methods=['get'])
     def images(self, request, uuid=None):

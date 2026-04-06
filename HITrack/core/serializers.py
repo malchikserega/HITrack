@@ -1555,6 +1555,10 @@ class ImageDropdownSerializer(serializers.ModelSerializer):
         fields = ['uuid', 'name', 'has_sbom']
 
     def get_has_sbom(self, obj):
+        if hasattr(obj, 'has_sbom'):
+            return obj.has_sbom
+        if 'sbom_data' not in obj.__dict__:
+            return Image.objects.filter(pk=obj.pk, sbom_data__isnull=False).exists()
         return bool(obj.sbom_data)
 
 
