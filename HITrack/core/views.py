@@ -4,7 +4,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.generics import ListAPIView, GenericAPIView
 from django_filters.rest_framework import DjangoFilterBackend
-from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ContainerRegistry, ComponentVersionVulnerability, Release, RepositoryTagRelease, VulnerabilityDetails, ComponentLocation
+from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ContainerRegistry, ComponentVersionVulnerability, Release, RepositoryTagRelease, VulnerabilityDetails, ComponentLocation, ImageComponentVersionContext
 from .serializers import (
     RepositorySerializer, RepositoryDetailSerializer, RepositoryTagSerializer, ImageSerializer, ImageListSerializer,
     ComponentSerializer, ComponentVersionSerializer, VulnerabilitySerializer, VulnerabilityShortSerializer, ComponentListSerializer,
@@ -85,6 +85,8 @@ IMAGE_LIST_ORDERING_MAP = {
     '-name': '-name',
     'lineage_label': 'lineage_label',
     '-lineage_label': '-lineage_label',
+    'os_eol_status': 'os_eol_status',
+    '-os_eol_status': '-os_eol_status',
     'digest': 'digest',
     '-digest': '-digest',
     'created_at': 'created_at',
@@ -2220,8 +2222,8 @@ class RepositoryTagViewSet(BaseViewSet):
 class ImageViewSet(BaseViewSet):
     queryset = Image.objects.all()
     filterset_fields = ['repository_tags', 'component_versions']
-    search_fields = ['name', 'lineage_label', 'os_distro_name', 'os_distro_version']
-    ordering_fields = ['name', 'lineage_label', 'digest', 'created_at', 'updated_at', 'findings_count', 'unique_findings_count', 'components_count']
+    search_fields = ['name', 'lineage_label', 'os_distro_name', 'os_distro_version', 'os_eol_status']
+    ordering_fields = ['name', 'lineage_label', 'os_eol_status', 'digest', 'created_at', 'updated_at', 'findings_count', 'unique_findings_count', 'components_count']
     pagination_class = CustomPageNumberPagination
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
 
@@ -2808,6 +2810,7 @@ class ComponentVersionViewSet(BaseViewSet):
 
     def get_queryset(self):
         qs = super().get_queryset()
+        image_filter = self.request.query_params.get('images')
         if self.action == 'retrieve':
             qs = qs.select_related('component').annotate(
                 vulnerabilities_count=Count('vulnerabilities', distinct=True),
@@ -2819,6 +2822,27 @@ class ComponentVersionViewSet(BaseViewSet):
                 vulnerabilities_count=Count('vulnerabilities', distinct=True),
                 images_count=Count('images', distinct=True)
             )
+            if image_filter:
+                context_queryset = ImageComponentVersionContext.objects.filter(
+                    image_id=image_filter,
+                    component_version=OuterRef('pk'),
+                )
+                qs = qs.annotate(
+                    dependency_scope=Subquery(context_queryset.values('dependency_scope')[:1]),
+                    dependency_depth=Subquery(
+                        context_queryset.values('dependency_depth')[:1],
+                        output_field=IntegerField(),
+                    ),
+                    package_scope=Subquery(context_queryset.values('package_scope')[:1]),
+                    package_arch=Subquery(context_queryset.values('package_arch')[:1]),
+                    package_distro=Subquery(context_queryset.values('package_distro')[:1]),
+                    package_repo=Subquery(context_queryset.values('package_repo')[:1]),
+                    package_channel=Subquery(context_queryset.values('package_channel')[:1]),
+                    source_package=Subquery(context_queryset.values('source_package')[:1]),
+                    source_package_version=Subquery(context_queryset.values('source_package_version')[:1]),
+                    cataloger=Subquery(context_queryset.values('cataloger')[:1]),
+                    metadata_type=Subquery(context_queryset.values('metadata_type')[:1]),
+                )
         else:
             qs = qs.annotate(vulnerabilities_count=Count('vulnerabilities', distinct=True))
         return qs.order_by('component__name', 'version', 'created_at')
@@ -4921,6 +4945,23 @@ class TestTaskViewSet(viewsets.ViewSet):
             result = backfill_image_lineage_fields.delay()
             return Response({
                 'message': 'Image lineage backfill started',
+                'task_id': result.id
+            })
+        except Exception as e:
+            return Response(
+                {'error': str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+    @action(detail=False, methods=['post'])
+    def backfill_image_sbom_security_metadata(self, request):
+        """Backfill image OS lifecycle and per-image component metadata from existing SBOM/Grype data"""
+        from .tasks import backfill_image_sbom_security_metadata
+
+        try:
+            result = backfill_image_sbom_security_metadata.delay()
+            return Response({
+                'message': 'Image SBOM security metadata backfill started',
                 'task_id': result.id
             })
         except Exception as e:

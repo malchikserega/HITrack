@@ -142,6 +142,19 @@
               <v-col cols="12" md="3">
                 <v-btn
                   block
+                  color="cyan-darken-4"
+                  prepend-icon="mdi-shield-search"
+                  @click="backfillImageSbomSecurityMetadata"
+                  :loading="backfillImageSbomSecurityLoading"
+                  size="large"
+                  class="action-btn"
+                >
+                  Backfill SBOM Security Metadata
+                </v-btn>
+              </v-col>
+              <v-col cols="12" md="3">
+                <v-btn
+                  block
                   color="teal"
                   prepend-icon="mdi-chart-box-outline"
                   @click="collectRootCauseAnalyticsSnapshot"
@@ -508,6 +521,7 @@ export default defineComponent({
     const updateComponentsLoading = ref(false)
     const updateDebComponentsLoading = ref(false)
     const backfillImageLineageLoading = ref(false)
+    const backfillImageSbomSecurityLoading = ref(false)
     const recalculateFixAvailabilityLoading = ref(false)
     const collectRootCauseAnalyticsLoading = ref(false)
     const stoppingTasks = ref<string[]>([])
@@ -814,6 +828,22 @@ export default defineComponent({
       }
     }
 
+    const backfillImageSbomSecurityMetadata = async () => {
+      backfillImageSbomSecurityLoading.value = true
+      try {
+        const response = await api.post('/test-tasks/backfill_image_sbom_security_metadata/')
+        if (response.data?.task_id) {
+          upsertPendingTask(response.data.task_id, 'Backfill Image SBOM Security Metadata')
+        }
+        notificationService.started('Image SBOM security metadata backfill task started.')
+      } catch (error) {
+        console.error('Error backfilling image SBOM security metadata:', error)
+        notificationService.error(`Failed to start SBOM security metadata backfill: ${error}`)
+      } finally {
+        backfillImageSbomSecurityLoading.value = false
+      }
+    }
+
     const collectRootCauseAnalyticsSnapshot = async () => {
       collectRootCauseAnalyticsLoading.value = true
       try {
@@ -1012,6 +1042,7 @@ export default defineComponent({
           updateComponentsLoading,
           updateDebComponentsLoading,
           backfillImageLineageLoading,
+          backfillImageSbomSecurityLoading,
           recalculateFixAvailabilityLoading,
           collectRootCauseAnalyticsLoading,
           stoppingTasks,
@@ -1048,6 +1079,7 @@ export default defineComponent({
           updateAllComponentsLatestVersions,
           updateDebComponentsLatestVersions,
           backfillImageLineageFields,
+          backfillImageSbomSecurityMetadata,
           recalculateVulnerabilityFixAvailability,
           collectRootCauseAnalyticsSnapshot,
           viewTaskDetails,

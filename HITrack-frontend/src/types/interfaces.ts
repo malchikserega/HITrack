@@ -162,6 +162,10 @@ export interface Image extends BaseEntity {
   lineage_source?: string
   os_distro_name?: string | null
   os_distro_version?: string | null
+  os_eol_status?: string
+  os_eol_source?: string
+  os_eol_message?: string | null
+  os_eol_checked_at?: string | null
   has_sbom: boolean
   has_grype: boolean
   findings: number
@@ -394,6 +398,17 @@ export interface ComponentVersion extends BaseEntity {
   vulnerabilities: Vulnerability[]
   vulnerabilities_count: number
   used_count: number
+  dependency_scope?: string | null
+  dependency_depth?: number | null
+  package_scope?: string | null
+  package_arch?: string | null
+  package_distro?: string | null
+  package_repo?: string | null
+  package_channel?: string | null
+  source_package?: string | null
+  source_package_version?: string | null
+  cataloger?: string | null
+  metadata_type?: string | null
   created_at: string
   updated_at: string
 }

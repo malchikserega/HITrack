@@ -105,6 +105,20 @@
                         </template>
                         <span>{{ lineageSourceTooltip(item.lineage_source) }}</span>
                       </v-tooltip>
+                      <v-tooltip v-if="item.os_eol_status && item.os_eol_status !== 'unknown'" location="top">
+                        <template #activator="{ props }">
+                          <v-chip
+                            v-bind="props"
+                            size="x-small"
+                            :color="osEolStatusColor(item.os_eol_status)"
+                            variant="tonal"
+                            class="mt-1"
+                          >
+                            {{ osEolStatusLabel(item.os_eol_status) }}
+                          </v-chip>
+                        </template>
+                        <span>{{ osEolStatusTooltip(item) }}</span>
+                      </v-tooltip>
                     </div>
                     <span v-else class="text-medium-emphasis text-caption">Unknown</span>
                   </td>
@@ -321,6 +335,10 @@ const editedItem = ref<Image>({
   lineage_source: '',
   os_distro_name: '',
   os_distro_version: '',
+  os_eol_status: 'unknown',
+  os_eol_source: 'unknown',
+  os_eol_message: '',
+  os_eol_checked_at: null,
   has_sbom: false,
   has_grype: false,
   findings: 0,
@@ -364,6 +382,10 @@ const defaultItem = {
   lineage_source: '',
   os_distro_name: '',
   os_distro_version: '',
+  os_eol_status: 'unknown',
+  os_eol_source: 'unknown',
+  os_eol_message: '',
+  os_eol_checked_at: null,
   has_sbom: false,
   has_grype: false,
   findings: 0,
@@ -484,6 +506,10 @@ const openDialog = (title: string, item?: Image) => {
       lineage_source: item.lineage_source,
       os_distro_name: item.os_distro_name,
       os_distro_version: item.os_distro_version,
+      os_eol_status: item.os_eol_status,
+      os_eol_source: item.os_eol_source,
+      os_eol_message: item.os_eol_message,
+      os_eol_checked_at: item.os_eol_checked_at,
       has_sbom: item.has_sbom,
       has_grype: item.has_grype,
       findings: item.findings,
@@ -725,6 +751,38 @@ const lineageSourceTooltip = (source?: string) => {
     default:
       return 'OS lineage could not be determined.'
   }
+}
+
+const osEolStatusLabel = (status?: string) => {
+  switch (status) {
+    case 'eol':
+      return 'EOL distro'
+    case 'supported':
+      return 'Supported'
+    default:
+      return 'Unknown'
+  }
+}
+
+const osEolStatusColor = (status?: string) => {
+  switch (status) {
+    case 'eol':
+      return 'error'
+    case 'supported':
+      return 'success'
+    default:
+      return 'grey'
+  }
+}
+
+const osEolStatusTooltip = (image: Image) => {
+  if (image.os_eol_status === 'eol') {
+    return image.os_eol_message || 'Grype detected packages from an end-of-life distro. Vulnerability coverage may be incomplete.'
+  }
+  if (image.os_eol_status === 'supported') {
+    return 'No distro EOL warning was present in Grype for this tracked OS lineage.'
+  }
+  return 'OS lifecycle status is currently unknown.'
 }
 
 const onRowClick = (item: Image) => {

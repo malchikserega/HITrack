@@ -171,12 +171,17 @@ class Image(models.Model):
     os_distro_name = models.CharField(max_length=255, null=True, blank=True)
     os_distro_version = models.CharField(max_length=255, null=True, blank=True)
     lineage_updated_at = models.DateTimeField(null=True, blank=True)
+    os_eol_status = models.CharField(max_length=32, default='unknown')
+    os_eol_source = models.CharField(max_length=32, default='unknown')
+    os_eol_message = models.CharField(max_length=255, null=True, blank=True)
+    os_eol_checked_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         indexes = [
             models.Index(fields=['scan_status']),
+            models.Index(fields=['os_eol_status']),
             models.Index(
                 fields=['scan_status', 'lineage_label', 'lineage_source'],
                 name='core_image_scan_lineage_idx',
@@ -226,6 +231,64 @@ class ComponentVersion(models.Model):
 
     def __str__(self):
         return f"{self.component.name} {self.version}"
+
+
+class ImageComponentVersionContext(models.Model):
+    DEPENDENCY_SCOPE_CHOICES = [
+        ('direct', 'Direct'),
+        ('transitive', 'Transitive'),
+        ('unknown', 'Unknown'),
+    ]
+    PACKAGE_SCOPE_CHOICES = [
+        ('runtime', 'Runtime'),
+        ('development', 'Development'),
+        ('build', 'Build'),
+        ('test', 'Test'),
+        ('optional', 'Optional'),
+        ('unknown', 'Unknown'),
+    ]
+
+    uuid = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    image = models.ForeignKey(Image, on_delete=models.CASCADE, related_name='component_contexts')
+    component_version = models.ForeignKey(
+        ComponentVersion,
+        on_delete=models.CASCADE,
+        related_name='image_contexts',
+    )
+    cataloger = models.CharField(max_length=128, blank=True, default='')
+    metadata_type = models.CharField(max_length=128, blank=True, default='')
+    dependency_scope = models.CharField(
+        max_length=16,
+        choices=DEPENDENCY_SCOPE_CHOICES,
+        default='unknown',
+    )
+    dependency_depth = models.PositiveIntegerField(null=True, blank=True)
+    package_scope = models.CharField(
+        max_length=16,
+        choices=PACKAGE_SCOPE_CHOICES,
+        default='unknown',
+    )
+    package_arch = models.CharField(max_length=64, null=True, blank=True)
+    package_distro = models.CharField(max_length=255, null=True, blank=True)
+    package_repo = models.CharField(max_length=255, null=True, blank=True)
+    package_channel = models.CharField(max_length=255, null=True, blank=True)
+    source_package = models.CharField(max_length=255, null=True, blank=True)
+    source_package_version = models.CharField(max_length=255, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = [('image', 'component_version')]
+        indexes = [
+            models.Index(fields=['image', 'dependency_scope']),
+            models.Index(fields=['component_version']),
+            models.Index(fields=['package_arch']),
+            models.Index(fields=['source_package']),
+            models.Index(fields=['package_scope']),
+        ]
+
+    def __str__(self):
+        return f"{self.component_version} in {self.image.name}"
 
 
 class Vulnerability(models.Model):

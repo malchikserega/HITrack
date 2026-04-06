@@ -279,6 +279,7 @@ CELERY_TASK_ROUTES = {
     'Update All Components Latest Versions': {'queue': 'light', 'routing_key': 'light'},
     'Update Deb Components Latest Versions': {'queue': 'light', 'routing_key': 'light'},
     'Backfill Image Lineage Fields': {'queue': 'enrichment', 'routing_key': 'enrichment'},
+    'Backfill Image SBOM Security Metadata': {'queue': 'enrichment', 'routing_key': 'enrichment'},
     'Recalculate Vulnerability Fix Availability': {'queue': 'light', 'routing_key': 'light'},
     'Deduplicate Images by Identity': {'queue': 'light', 'routing_key': 'light'},
     'Delete Old Repository Tags': {'queue': 'light', 'routing_key': 'light'},

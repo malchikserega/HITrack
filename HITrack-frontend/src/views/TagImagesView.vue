@@ -154,6 +154,20 @@
                         </template>
                         <span>{{ lineageSourceTooltip(item.lineage_source) }}</span>
                       </v-tooltip>
+                      <v-tooltip v-if="item.os_eol_status && item.os_eol_status !== 'unknown'" location="top">
+                        <template #activator="{ props }">
+                          <v-chip
+                            v-bind="props"
+                            size="x-small"
+                            :color="osEolStatusColor(item.os_eol_status)"
+                            variant="tonal"
+                            class="mt-1"
+                          >
+                            {{ osEolStatusLabel(item.os_eol_status) }}
+                          </v-chip>
+                        </template>
+                        <span>{{ osEolStatusTooltip(item) }}</span>
+                      </v-tooltip>
                     </div>
                     <span v-else class="text-medium-emphasis text-caption">Unknown</span>
                   </td>
@@ -422,6 +436,38 @@ const lineageSourceTooltip = (source?: string) => {
     default:
       return 'OS lineage could not be determined.'
   }
+}
+
+const osEolStatusLabel = (status?: string) => {
+  switch (status) {
+    case 'eol':
+      return 'EOL distro'
+    case 'supported':
+      return 'Supported'
+    default:
+      return 'Unknown'
+  }
+}
+
+const osEolStatusColor = (status?: string) => {
+  switch (status) {
+    case 'eol':
+      return 'error'
+    case 'supported':
+      return 'success'
+    default:
+      return 'grey'
+  }
+}
+
+const osEolStatusTooltip = (image: Image) => {
+  if (image.os_eol_status === 'eol') {
+    return image.os_eol_message || 'Grype detected packages from an end-of-life distro. Vulnerability coverage may be incomplete.'
+  }
+  if (image.os_eol_status === 'supported') {
+    return 'No distro EOL warning was present in Grype for this tracked OS lineage.'
+  }
+  return 'OS lifecycle status is currently unknown.'
 }
 const formatDigest = (digest: string) => {
   if (!digest) return ''

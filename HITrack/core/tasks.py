@@ -41,6 +41,11 @@ _LINEAGE_SOURCE_PRIORITY = {
     'package_distro': 1,
     'sbom_distro': 2,
 }
+_OS_EOL_STATUS_PRIORITY = {
+    'unknown': 0,
+    'supported': 1,
+    'eol': 2,
+}
 
 def is_safe_image_ref(image_ref: str) -> bool:
     return bool(DOCKER_IMAGE_REGEX.match(image_ref)) and len(image_ref) < 200
@@ -105,6 +110,159 @@ def _copy_image_lineage_fields(source_image, target_image):
         update_fields.append('lineage_updated_at')
 
     return update_fields
+
+
+def _apply_image_os_eol_fields(image, grype_data=None):
+    from .utils.os_eol import derive_image_os_eol_status, image_os_eol_to_update_fields
+
+    image_os_eol = derive_image_os_eol_status(
+        grype_data=grype_data if grype_data is not None else image.grype_data,
+        os_distro_name=image.os_distro_name,
+        lineage_label=image.lineage_label,
+    )
+    desired_fields = image_os_eol_to_update_fields(image_os_eol)
+    update_fields = []
+
+    for field_name, desired_value in desired_fields.items():
+        if getattr(image, field_name) != desired_value:
+            setattr(image, field_name, desired_value)
+            update_fields.append(field_name)
+
+    if update_fields or image.os_eol_checked_at is None:
+        image.os_eol_checked_at = timezone.now()
+        update_fields.append('os_eol_checked_at')
+
+    return update_fields
+
+
+def _copy_image_os_eol_fields(source_image, target_image):
+    source_priority = _OS_EOL_STATUS_PRIORITY.get(source_image.os_eol_status or 'unknown', 0)
+    target_priority = _OS_EOL_STATUS_PRIORITY.get(target_image.os_eol_status or 'unknown', 0)
+
+    if source_priority == 0:
+        return []
+
+    should_replace = (
+        target_priority == 0
+        or source_priority > target_priority
+        or (
+            source_priority == target_priority
+            and (target_image.os_eol_checked_at is None or (
+                source_image.os_eol_checked_at and source_image.os_eol_checked_at > target_image.os_eol_checked_at
+            ))
+        )
+    )
+    if not should_replace:
+        return []
+
+    update_fields = []
+    for field_name in ('os_eol_status', 'os_eol_source', 'os_eol_message'):
+        source_value = getattr(source_image, field_name)
+        if getattr(target_image, field_name) != source_value:
+            setattr(target_image, field_name, source_value)
+            update_fields.append(field_name)
+
+    if update_fields:
+        target_image.os_eol_checked_at = source_image.os_eol_checked_at or timezone.now()
+        update_fields.append('os_eol_checked_at')
+
+    return update_fields
+
+
+def _upsert_image_component_version_contexts(image, sbom_data=None):
+    from .models import ComponentVersion, ImageComponentVersionContext
+    from .utils.sbom_context import build_image_component_context_map
+
+    current_sbom_data = sbom_data if sbom_data is not None else image.sbom_data
+    if not current_sbom_data:
+        return {
+            'contexts_created': 0,
+            'contexts_updated': 0,
+            'contexts_deleted': 0,
+        }
+
+    context_map = build_image_component_context_map(current_sbom_data)
+    component_versions = list(
+        ComponentVersion.objects.filter(images=image).select_related('component')
+    )
+    component_version_by_key = {
+        (component_version.component.name, component_version.version): component_version
+        for component_version in component_versions
+    }
+    existing_contexts = {
+        context.component_version_id: context
+        for context in ImageComponentVersionContext.objects.filter(image=image)
+    }
+
+    to_create = []
+    to_update = []
+    matched_component_version_ids = set()
+    now = timezone.now()
+
+    field_names = [
+        'cataloger',
+        'metadata_type',
+        'dependency_scope',
+        'dependency_depth',
+        'package_scope',
+        'package_arch',
+        'package_distro',
+        'package_repo',
+        'package_channel',
+        'source_package',
+        'source_package_version',
+    ]
+
+    for key, context_data in context_map.items():
+        component_version = component_version_by_key.get(key)
+        if component_version is None:
+            continue
+        matched_component_version_ids.add(component_version.pk)
+        existing_context = existing_contexts.get(component_version.pk)
+
+        if existing_context is None:
+            to_create.append(
+                ImageComponentVersionContext(
+                    image=image,
+                    component_version=component_version,
+                    **{field_name: context_data.get(field_name) for field_name in field_names},
+                )
+            )
+            continue
+
+        updated = False
+        for field_name in field_names:
+            desired_value = context_data.get(field_name)
+            if getattr(existing_context, field_name) != desired_value:
+                setattr(existing_context, field_name, desired_value)
+                updated = True
+        if updated:
+            existing_context.updated_at = now
+            to_update.append(existing_context)
+
+    stale_context_ids = [
+        context.uuid
+        for component_version_id, context in existing_contexts.items()
+        if component_version_id not in matched_component_version_ids
+    ]
+    contexts_deleted = 0
+    if stale_context_ids:
+        contexts_deleted = ImageComponentVersionContext.objects.filter(uuid__in=stale_context_ids).delete()[0]
+
+    if to_create:
+        ImageComponentVersionContext.objects.bulk_create(to_create, batch_size=500)
+    if to_update:
+        ImageComponentVersionContext.objects.bulk_update(
+            to_update,
+            field_names + ['updated_at'],
+            batch_size=500,
+        )
+
+    return {
+        'contexts_created': len(to_create),
+        'contexts_updated': len(to_update),
+        'contexts_deleted': contexts_deleted,
+    }
 
 
 _PKG_VERSION_CACHE_TTL = 3600  # 1 hour
@@ -1090,12 +1248,12 @@ def _get_or_create_canonical_image(name, digest=None, artifact_reference=None):
 
 
 def _propagate_image_completion_to_equivalent_images(image):
-    from .models import ComponentLocation
+    from .models import ComponentLocation, ImageComponentVersionContext
 
     duplicate_images = list(
         _equivalent_images_queryset(image.name, image.digest)
         .exclude(pk=image.pk)
-        .prefetch_related('repository_tags', 'component_versions', 'component_locations')
+        .prefetch_related('repository_tags', 'component_versions', 'component_locations', 'component_contexts')
     )
     if not duplicate_images:
         return list(image.repository_tags.values_list('pk', flat=True))
@@ -1103,6 +1261,9 @@ def _propagate_image_completion_to_equivalent_images(image):
     source_component_versions = list(image.component_versions.values_list('pk', flat=True))
     source_locations = list(
         image.component_locations.select_related('component_version').all()
+    )
+    source_contexts = list(
+        image.component_contexts.select_related('component_version').all()
     )
     related_tag_ids = set(image.repository_tags.values_list('pk', flat=True))
 
@@ -1123,6 +1284,24 @@ def _propagate_image_completion_to_equivalent_images(image):
                     'annotations': location.annotations,
                 },
             )
+        for context in source_contexts:
+            ImageComponentVersionContext.objects.get_or_create(
+                component_version=context.component_version,
+                image=duplicate,
+                defaults={
+                    'cataloger': context.cataloger,
+                    'metadata_type': context.metadata_type,
+                    'dependency_scope': context.dependency_scope,
+                    'dependency_depth': context.dependency_depth,
+                    'package_scope': context.package_scope,
+                    'package_arch': context.package_arch,
+                    'package_distro': context.package_distro,
+                    'package_repo': context.package_repo,
+                    'package_channel': context.package_channel,
+                    'source_package': context.source_package,
+                    'source_package_version': context.source_package_version,
+                },
+            )
 
         update_fields = []
         if duplicate.digest != image.digest:
@@ -1138,6 +1317,7 @@ def _propagate_image_completion_to_equivalent_images(image):
             duplicate.scan_status = 'success'
             update_fields.append('scan_status')
         update_fields.extend(_copy_image_lineage_fields(image, duplicate))
+        update_fields.extend(_copy_image_os_eol_fields(image, duplicate))
         if update_fields:
             duplicate.save(update_fields=sorted(set(update_fields)) + ['updated_at'])
 
@@ -1174,6 +1354,74 @@ def _merge_component_location_into_image(source_location, target_image):
     return False
 
 
+def _merge_component_context_into_image(source_context, target_image):
+    from .models import ImageComponentVersionContext
+
+    target_context, created = ImageComponentVersionContext.objects.get_or_create(
+        component_version=source_context.component_version,
+        image=target_image,
+        defaults={
+            'cataloger': source_context.cataloger,
+            'metadata_type': source_context.metadata_type,
+            'dependency_scope': source_context.dependency_scope,
+            'dependency_depth': source_context.dependency_depth,
+            'package_scope': source_context.package_scope,
+            'package_arch': source_context.package_arch,
+            'package_distro': source_context.package_distro,
+            'package_repo': source_context.package_repo,
+            'package_channel': source_context.package_channel,
+            'source_package': source_context.source_package,
+            'source_package_version': source_context.source_package_version,
+        },
+    )
+    if created:
+        return True
+
+    updated_fields = []
+    for field_name in (
+        'cataloger',
+        'metadata_type',
+        'package_arch',
+        'package_distro',
+        'package_repo',
+        'package_channel',
+        'source_package',
+        'source_package_version',
+    ):
+        current_value = getattr(target_context, field_name)
+        incoming_value = getattr(source_context, field_name)
+        if not current_value and incoming_value:
+            setattr(target_context, field_name, incoming_value)
+            updated_fields.append(field_name)
+
+    current_depth = target_context.dependency_depth
+    incoming_depth = source_context.dependency_depth
+    if current_depth is None or (incoming_depth is not None and incoming_depth < current_depth):
+        target_context.dependency_depth = incoming_depth
+        target_context.dependency_scope = source_context.dependency_scope
+        updated_fields.extend(['dependency_depth', 'dependency_scope'])
+    elif target_context.dependency_scope == 'unknown' and source_context.dependency_scope != 'unknown':
+        target_context.dependency_scope = source_context.dependency_scope
+        updated_fields.append('dependency_scope')
+
+    scope_priority = {
+        'unknown': 0,
+        'optional': 1,
+        'test': 2,
+        'build': 3,
+        'development': 4,
+        'runtime': 5,
+    }
+    if scope_priority.get(source_context.package_scope or 'unknown', 0) > scope_priority.get(target_context.package_scope or 'unknown', 0):
+        target_context.package_scope = source_context.package_scope
+        updated_fields.append('package_scope')
+
+    if updated_fields:
+        target_context.save(update_fields=sorted(set(updated_fields)) + ['updated_at'])
+
+    return False
+
+
 def _merge_duplicate_image_group(images, normalized_digest):
     if len(images) <= 1:
         return None
@@ -1198,6 +1446,7 @@ def _merge_duplicate_image_group(images, normalized_digest):
     merged_tag_links = 0
     merged_component_links = 0
     merged_locations = 0
+    merged_contexts = 0
     normalized_images = 0
     deleted_images = 0
 
@@ -1230,6 +1479,9 @@ def _merge_duplicate_image_group(images, normalized_digest):
         for location in duplicate.component_locations.select_related('component_version').all():
             if _merge_component_location_into_image(location, primary):
                 merged_locations += 1
+        for context in duplicate.component_contexts.select_related('component_version').all():
+            if _merge_component_context_into_image(context, primary):
+                merged_contexts += 1
 
         if not primary.artifact_reference and duplicate.artifact_reference:
             primary.artifact_reference = duplicate.artifact_reference
@@ -1248,8 +1500,10 @@ def _merge_duplicate_image_group(images, normalized_digest):
             primary.scan_status = duplicate.scan_status
             update_fields.append('scan_status')
         update_fields.extend(_copy_image_lineage_fields(duplicate, primary))
+        update_fields.extend(_copy_image_os_eol_fields(duplicate, primary))
 
     update_fields.extend(_apply_image_lineage_fields(primary))
+    update_fields.extend(_apply_image_os_eol_fields(primary))
     if update_fields:
         primary.save(update_fields=sorted(set(update_fields)) + ['updated_at'])
 
@@ -1267,6 +1521,7 @@ def _merge_duplicate_image_group(images, normalized_digest):
         'repository_tag_links_merged': merged_tag_links,
         'component_version_links_merged': merged_component_links,
         'component_locations_merged': merged_locations,
+        'component_contexts_merged': merged_contexts,
         'images_normalized': normalized_images,
     }
 
@@ -1513,7 +1768,17 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
             image.grype_data = None
             image.scan_status = 'in_process'
             lineage_update_fields = _apply_image_lineage_fields(image)
-            image.save(update_fields=['sbom_data', 'grype_data', 'scan_status', *lineage_update_fields, 'updated_at'])
+            eol_update_fields = _apply_image_os_eol_fields(image, grype_data=None)
+            image.save(
+                update_fields=[
+                    'sbom_data',
+                    'grype_data',
+                    'scan_status',
+                    *lineage_update_fields,
+                    *eol_update_fields,
+                    'updated_at',
+                ]
+            )
             
             logger.info(f"Successfully generated SBOM for image {image_uuid}")
 
@@ -2248,6 +2513,15 @@ def parse_sbom_and_create_components(image_uuid: str):
             batch_time = time.time() - batch_start_time
             logger.info(f"Completed batch {current_batch}/{total_batches} in {batch_time:.2f} seconds")
 
+        context_summary = _upsert_image_component_version_contexts(image)
+        logger.info(
+            "Updated image component contexts for %s: created=%s updated=%s deleted=%s",
+            image_uuid,
+            context_summary['contexts_created'],
+            context_summary['contexts_updated'],
+            context_summary['contexts_deleted'],
+        )
+
         total_time = time.time() - start_time
         logger.info(f"SBOM parsing completed in {total_time:.2f} seconds")
         logger.info(f"Summary:")
@@ -2432,6 +2706,7 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
     try:
         image = Image.objects.get(uuid=image_uuid)
         matches = scan_results.get('matches', [])
+        eol_update_fields = _apply_image_os_eol_fields(image, grype_data=scan_results)
 
         # Collect unique names/versions/ids
         component_names = set()
@@ -2626,7 +2901,8 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
 
         # Set status to success only after all matches are processed
         image.scan_status = 'success'
-        image.save(update_fields=['scan_status', 'updated_at'])
+        image.grype_data = scan_results
+        image.save(update_fields=['scan_status', 'grype_data', *eol_update_fields, 'updated_at'])
         related_tag_ids = _propagate_image_completion_to_equivalent_images(image)
         _sync_repository_tag_processing_statuses(related_tag_ids)
         logger.info(f"Successfully processed Grype scan results for image {image_uuid}")
@@ -3615,6 +3891,7 @@ def deduplicate_images_by_identity():
         'repository_tag_links_merged': 0,
         'component_version_links_merged': 0,
         'component_locations_merged': 0,
+        'component_contexts_merged': 0,
         'images_normalized': 0,
     }
     affected_primary_images = []
@@ -3675,6 +3952,7 @@ def deduplicate_images_by_identity():
                     'repository_tag_links_merged',
                     'component_version_links_merged',
                     'component_locations_merged',
+                    'component_contexts_merged',
                     'images_normalized',
                 ):
                     summary[key] += merge_result[key]
@@ -3782,6 +4060,114 @@ def backfill_image_lineage_fields(batch_size: int = 200):
         "message": (
             f"Image lineage backfill completed: {summary['images_updated']} images updated "
             f"out of {summary['total_images_seen']} processed"
+        ),
+        "timestamp": timezone.now().isoformat(),
+    }
+
+
+@celery_app.task(name="Backfill Image SBOM Security Metadata")
+def backfill_image_sbom_security_metadata(batch_size: int = 100):
+    from django.db.models import Prefetch
+    from .models import ComponentVersion, Image
+
+    component_versions_prefetch = Prefetch(
+        'component_versions',
+        queryset=ComponentVersion.objects.select_related('component'),
+    )
+
+    summary = {
+        'total_images_seen': 0,
+        'images_updated': 0,
+        'contexts_created': 0,
+        'contexts_updated': 0,
+        'contexts_deleted': 0,
+        'eol_images': 0,
+        'supported_images': 0,
+        'unknown_eol_images': 0,
+    }
+
+    buffered_ids = []
+
+    def process_batch(image_ids):
+        if not image_ids:
+            return
+
+        nonlocal summary
+        images = list(
+            Image.objects.filter(pk__in=image_ids)
+            .prefetch_related(component_versions_prefetch)
+            .order_by('created_at', 'uuid')
+        )
+        images_to_update = []
+        now = timezone.now()
+
+        for image in images:
+            summary['total_images_seen'] += 1
+
+            update_fields = []
+            update_fields.extend(_apply_image_lineage_fields(
+                image,
+                component_version_purls=[component_version.purl for component_version in image.component_versions.all()],
+            ))
+            update_fields.extend(_apply_image_os_eol_fields(image))
+
+            if image.os_eol_status == 'eol':
+                summary['eol_images'] += 1
+            elif image.os_eol_status == 'supported':
+                summary['supported_images'] += 1
+            else:
+                summary['unknown_eol_images'] += 1
+
+            if update_fields:
+                image.updated_at = now
+                images_to_update.append(image)
+
+            context_summary = _upsert_image_component_version_contexts(image)
+            summary['contexts_created'] += context_summary['contexts_created']
+            summary['contexts_updated'] += context_summary['contexts_updated']
+            summary['contexts_deleted'] += context_summary['contexts_deleted']
+
+        if images_to_update:
+            Image.objects.bulk_update(
+                images_to_update,
+                [
+                    'lineage_label',
+                    'lineage_source',
+                    'os_distro_name',
+                    'os_distro_version',
+                    'lineage_updated_at',
+                    'os_eol_status',
+                    'os_eol_source',
+                    'os_eol_message',
+                    'os_eol_checked_at',
+                    'updated_at',
+                ],
+                batch_size=batch_size,
+            )
+            summary['images_updated'] += len(images_to_update)
+
+    image_id_iterator = (
+        Image.objects.order_by('created_at', 'uuid')
+        .values_list('pk', flat=True)
+        .iterator(chunk_size=batch_size)
+    )
+
+    for image_id in image_id_iterator:
+        buffered_ids.append(image_id)
+        if len(buffered_ids) >= batch_size:
+            process_batch(buffered_ids)
+            buffered_ids = []
+
+    if buffered_ids:
+        process_batch(buffered_ids)
+
+    return {
+        "status": "success",
+        "task_name": "Backfill Image SBOM Security Metadata",
+        "summary": summary,
+        "message": (
+            "Image SBOM security metadata backfill completed: "
+            f"{summary['images_updated']} images updated out of {summary['total_images_seen']} processed"
         ),
         "timestamp": timezone.now().isoformat(),
     }

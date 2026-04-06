@@ -2,7 +2,7 @@ from rest_framework import serializers
 from rest_framework.validators import UniqueValidator
 from drf_spectacular.utils import extend_schema_field
 from django.db.models import Count, Q
-from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ComponentVersionVulnerability, Release, RepositoryTagRelease, VulnerabilityDetails, ComponentLocation
+from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ComponentVersionVulnerability, Release, RepositoryTagRelease, VulnerabilityDetails, ComponentLocation, ImageComponentVersionContext
 from collections import Counter, defaultdict
 from .utils.status import (
     resolve_repository_scan_status,
@@ -87,6 +87,14 @@ def _get_repository_scan_status(obj):
         active_tag_count,
         active_image_count,
     )
+
+
+class SafeAnnotatedValueField(serializers.ReadOnlyField):
+    """Return None instead of raising when an optional annotation is absent."""
+
+    def get_attribute(self, instance):
+        source = self.source or self.field_name
+        return getattr(instance, source, None)
 
 class ComponentLocationSerializer(serializers.ModelSerializer):
     """Serializer for component location information"""
@@ -450,6 +458,7 @@ class ImageSerializer(serializers.ModelSerializer):
         fields = [
             'uuid', 'name', 'digest', 'scan_status',
             'lineage_label', 'lineage_source', 'os_distro_name', 'os_distro_version',
+            'os_eol_status', 'os_eol_source', 'os_eol_message', 'os_eol_checked_at',
             'findings', 'unique_findings', 'severity_counts', 'components_count',
             'fully_fixable_components_count',
             'fixable_findings', 'fixable_unique_findings', 'fixable_severity_counts',
@@ -632,6 +641,7 @@ class ImageListSerializer(serializers.ModelSerializer):
         fields = [
             'uuid', 'name', 'digest', 'scan_status',
             'lineage_label', 'lineage_source', 'os_distro_name', 'os_distro_version',
+            'os_eol_status', 'os_eol_source', 'os_eol_message', 'os_eol_checked_at',
             'has_sbom', 'has_grype', 'findings', 'unique_findings', 'components_count',
             'repository_info', 'created_at', 'updated_at'
         ]
@@ -1357,10 +1367,27 @@ class ComponentVersionListSerializer(serializers.ModelSerializer):
     component = ComponentShortSerializer(read_only=True)
     vulnerabilities_count = serializers.IntegerField(read_only=True)
     used_count = serializers.SerializerMethodField()
+    dependency_scope = SafeAnnotatedValueField(read_only=True)
+    dependency_depth = SafeAnnotatedValueField(read_only=True)
+    package_scope = SafeAnnotatedValueField(read_only=True)
+    package_arch = SafeAnnotatedValueField(read_only=True)
+    package_distro = SafeAnnotatedValueField(read_only=True)
+    package_repo = SafeAnnotatedValueField(read_only=True)
+    package_channel = SafeAnnotatedValueField(read_only=True)
+    source_package = SafeAnnotatedValueField(read_only=True)
+    source_package_version = SafeAnnotatedValueField(read_only=True)
+    cataloger = SafeAnnotatedValueField(read_only=True)
+    metadata_type = SafeAnnotatedValueField(read_only=True)
 
     class Meta:
         model = ComponentVersion
-        fields = ['uuid', 'version', 'component', 'created_at', 'updated_at', 'vulnerabilities_count', 'used_count']
+        fields = [
+            'uuid', 'version', 'component', 'created_at', 'updated_at',
+            'vulnerabilities_count', 'used_count',
+            'dependency_scope', 'dependency_depth', 'package_scope',
+            'package_arch', 'package_distro', 'package_repo', 'package_channel',
+            'source_package', 'source_package_version', 'cataloger', 'metadata_type',
+        ]
         read_only_fields = ['uuid', 'created_at', 'updated_at']
 
     def get_used_count(self, obj):

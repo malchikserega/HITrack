@@ -70,6 +70,20 @@
                     </template>
                     <span>{{ lineageSourceTooltip(image.lineage_source) }}</span>
                   </v-tooltip>
+                  <v-tooltip v-if="image.os_eol_status && image.os_eol_status !== 'unknown'" location="top">
+                    <template #activator="{ props }">
+                      <v-chip
+                        v-bind="props"
+                        size="x-small"
+                        :color="osEolStatusColor(image.os_eol_status)"
+                        variant="tonal"
+                        class="mr-2"
+                      >
+                        {{ osEolStatusLabel(image.os_eol_status) }}
+                      </v-chip>
+                    </template>
+                    <span>{{ osEolStatusTooltip(image) }}</span>
+                  </v-tooltip>
                 </template>
                 <span v-else class="text-medium-emphasis ml-2">Unknown</span>
               </div>
@@ -335,6 +349,65 @@
                         <v-chip size="small" :color="getComponentTypeColor(item.component.type)" variant="tonal">
                           {{ item.component.type }}
                         </v-chip>
+                      </template>
+                      <template v-slot:item.dependency_scope="{ item }">
+                        <v-tooltip location="top">
+                          <template #activator="{ props }">
+                            <v-chip
+                              v-bind="props"
+                              size="small"
+                              :color="dependencyScopeColor(item.dependency_scope)"
+                              variant="tonal"
+                            >
+                              {{ dependencyScopeLabel(item.dependency_scope, item.dependency_depth) }}
+                            </v-chip>
+                          </template>
+                          <span>{{ dependencyScopeTooltip(item) }}</span>
+                        </v-tooltip>
+                      </template>
+                      <template v-slot:item.package_context="{ item }">
+                        <div class="d-flex flex-wrap ga-1">
+                          <v-chip
+                            v-if="item.package_scope && item.package_scope !== 'unknown'"
+                            size="x-small"
+                            color="indigo"
+                            variant="tonal"
+                          >
+                            {{ packageScopeLabel(item.package_scope) }}
+                          </v-chip>
+                          <v-chip
+                            v-if="item.package_arch"
+                            size="x-small"
+                            color="blue-grey"
+                            variant="outlined"
+                          >
+                            {{ item.package_arch }}
+                          </v-chip>
+                          <v-chip
+                            v-if="item.source_package"
+                            size="x-small"
+                            color="deep-purple"
+                            variant="outlined"
+                          >
+                            src: {{ item.source_package }}<template v-if="item.source_package_version">@{{ item.source_package_version }}</template>
+                          </v-chip>
+                          <v-chip
+                            v-if="item.package_repo"
+                            size="x-small"
+                            color="brown"
+                            variant="outlined"
+                          >
+                            repo: {{ item.package_repo }}
+                          </v-chip>
+                          <v-chip
+                            v-if="item.package_channel"
+                            size="x-small"
+                            color="brown"
+                            variant="tonal"
+                          >
+                            {{ item.package_channel }}
+                          </v-chip>
+                        </div>
                       </template>
                       <template v-slot:item.vulnerabilities_count="{ item }: { item: ComponentVersion }">
                         <v-chip
@@ -743,6 +816,90 @@ const lineageSourceTooltip = (source?: string) => {
   }
 }
 
+const osEolStatusLabel = (status?: string) => {
+  switch (status) {
+    case 'eol':
+      return 'EOL distro'
+    case 'supported':
+      return 'Supported'
+    default:
+      return 'Unknown'
+  }
+}
+
+const osEolStatusColor = (status?: string) => {
+  switch (status) {
+    case 'eol':
+      return 'error'
+    case 'supported':
+      return 'success'
+    default:
+      return 'grey'
+  }
+}
+
+const osEolStatusTooltip = (item: Image | null) => {
+  if (!item) return 'OS lifecycle status is currently unknown.'
+  if (item.os_eol_status === 'eol') {
+    return item.os_eol_message || 'Grype detected packages from an end-of-life distro. Vulnerability coverage may be incomplete.'
+  }
+  if (item.os_eol_status === 'supported') {
+    return 'No distro EOL warning was present in Grype for this tracked OS lineage.'
+  }
+  return 'OS lifecycle status is currently unknown.'
+}
+
+const dependencyScopeColor = (scope?: string | null) => {
+  switch (scope) {
+    case 'direct':
+      return 'primary'
+    case 'transitive':
+      return 'deep-orange'
+    default:
+      return 'grey'
+  }
+}
+
+const dependencyScopeLabel = (scope?: string | null, depth?: number | null) => {
+  switch (scope) {
+    case 'direct':
+      return 'Direct'
+    case 'transitive':
+      return depth != null ? `Transitive (${depth})` : 'Transitive'
+    default:
+      return 'Unknown'
+  }
+}
+
+const dependencyScopeTooltip = (component: ComponentVersion) => {
+  if (component.dependency_scope === 'direct') {
+    return 'Derived from Syft dependency relationships: this package appears at the root level for the image.'
+  }
+  if (component.dependency_scope === 'transitive') {
+    return component.dependency_depth != null
+      ? `Derived from Syft dependency relationships: transitive dependency depth ${component.dependency_depth}.`
+      : 'Derived from Syft dependency relationships: transitive dependency.'
+  }
+  return 'Dependency scope could not be derived reliably from the SBOM relationships.'
+}
+
+const packageScopeLabel = (scope?: string | null) => {
+  switch (scope) {
+    case 'runtime':
+      return 'runtime'
+    case 'development':
+      return 'dev'
+    case 'build':
+      return 'build'
+    case 'test':
+      return 'test'
+    case 'optional':
+      return 'optional'
+    default:
+      return 'unknown'
+  }
+}
+
 function onLegendClick(i: number) {
   legendVisible.value[i] = !legendVisible.value[i]
 }
@@ -917,6 +1074,8 @@ const componentHeaders = [
   { title: 'Component', key: 'name', sortable: true },
   { title: 'Version', key: 'version', sortable: true },
   { title: 'Type', key: 'type', sortable: true },
+  { title: 'Dependency', key: 'dependency_scope', sortable: false },
+  { title: 'Context', key: 'package_context', sortable: false },
   { title: 'Vulnerabilities', key: 'vulnerabilities_count', sortable: true },
   { title: 'Used in:', key: 'used_count', sortable: true }
 ] as const
