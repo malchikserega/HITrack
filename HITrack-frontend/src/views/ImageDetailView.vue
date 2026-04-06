@@ -367,6 +367,38 @@
                       </template>
                       <template v-slot:item.package_context="{ item }">
                         <div class="d-flex flex-wrap ga-1">
+                          <v-tooltip
+                            v-if="item.direct_introducer_name"
+                            location="top"
+                          >
+                            <template #activator="{ props }">
+                              <v-chip
+                                v-bind="props"
+                                size="x-small"
+                                color="deep-orange"
+                                variant="outlined"
+                              >
+                                via {{ item.direct_introducer_name }}<template v-if="item.direct_introducer_version">@{{ item.direct_introducer_version }}</template>
+                              </v-chip>
+                            </template>
+                            <span>{{ dependencyIntroducerTooltip(item) }}</span>
+                          </v-tooltip>
+                          <v-tooltip
+                            v-if="item.immediate_parent_name && item.immediate_parent_name !== item.direct_introducer_name"
+                            location="top"
+                          >
+                            <template #activator="{ props }">
+                              <v-chip
+                                v-bind="props"
+                                size="x-small"
+                                color="orange-darken-2"
+                                variant="tonal"
+                              >
+                                parent {{ item.immediate_parent_name }}<template v-if="item.immediate_parent_version">@{{ item.immediate_parent_version }}</template>
+                              </v-chip>
+                            </template>
+                            <span>{{ dependencyParentTooltip(item) }}</span>
+                          </v-tooltip>
                           <v-chip
                             v-if="item.package_scope && item.package_scope !== 'unknown'"
                             size="x-small"
@@ -876,11 +908,44 @@ const dependencyScopeTooltip = (component: ComponentVersion) => {
     return 'Derived from Syft dependency relationships: this package appears at the root level for the image.'
   }
   if (component.dependency_scope === 'transitive') {
+    const viaRef = formatComponentReference(
+      component.direct_introducer_name,
+      component.direct_introducer_version,
+    )
     return component.dependency_depth != null
-      ? `Derived from Syft dependency relationships: transitive dependency depth ${component.dependency_depth}.`
-      : 'Derived from Syft dependency relationships: transitive dependency.'
+      ? `Derived from Syft dependency relationships: transitive dependency depth ${component.dependency_depth}.${viaRef ? ` Introduced through ${viaRef}.` : ''}`
+      : `Derived from Syft dependency relationships: transitive dependency.${viaRef ? ` Introduced through ${viaRef}.` : ''}`
   }
   return 'Dependency scope could not be derived reliably from the SBOM relationships.'
+}
+
+const formatComponentReference = (name?: string | null, version?: string | null) => {
+  if (!name) {
+    return ''
+  }
+  return version ? `${name}@${version}` : name
+}
+
+const dependencyIntroducerTooltip = (component: ComponentVersion) => {
+  const viaRef = formatComponentReference(
+    component.direct_introducer_name,
+    component.direct_introducer_version,
+  )
+  if (!viaRef) {
+    return 'Nearest direct dependency could not be derived reliably from the SBOM relationships.'
+  }
+  return `Nearest direct dependency that brings this package into the image: ${viaRef}.`
+}
+
+const dependencyParentTooltip = (component: ComponentVersion) => {
+  const parentRef = formatComponentReference(
+    component.immediate_parent_name,
+    component.immediate_parent_version,
+  )
+  if (!parentRef) {
+    return 'Immediate parent dependency could not be derived reliably from the SBOM relationships.'
+  }
+  return `Immediate parent in the shortest known SBOM dependency path: ${parentRef}.`
 }
 
 const packageScopeLabel = (scope?: string | null) => {

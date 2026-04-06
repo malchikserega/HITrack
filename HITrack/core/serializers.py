@@ -1369,6 +1369,10 @@ class ComponentVersionListSerializer(serializers.ModelSerializer):
     used_count = serializers.SerializerMethodField()
     dependency_scope = SafeAnnotatedValueField(read_only=True)
     dependency_depth = SafeAnnotatedValueField(read_only=True)
+    immediate_parent_name = SafeAnnotatedValueField(read_only=True)
+    immediate_parent_version = SafeAnnotatedValueField(read_only=True)
+    direct_introducer_name = SafeAnnotatedValueField(read_only=True)
+    direct_introducer_version = SafeAnnotatedValueField(read_only=True)
     package_scope = SafeAnnotatedValueField(read_only=True)
     package_arch = SafeAnnotatedValueField(read_only=True)
     package_distro = SafeAnnotatedValueField(read_only=True)
@@ -1384,7 +1388,10 @@ class ComponentVersionListSerializer(serializers.ModelSerializer):
         fields = [
             'uuid', 'version', 'component', 'created_at', 'updated_at',
             'vulnerabilities_count', 'used_count',
-            'dependency_scope', 'dependency_depth', 'package_scope',
+            'dependency_scope', 'dependency_depth',
+            'immediate_parent_name', 'immediate_parent_version',
+            'direct_introducer_name', 'direct_introducer_version',
+            'package_scope',
             'package_arch', 'package_distro', 'package_repo', 'package_channel',
             'source_package', 'source_package_version', 'cataloger', 'metadata_type',
         ]

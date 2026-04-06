@@ -263,6 +263,10 @@ class ImageComponentVersionContext(models.Model):
         default='unknown',
     )
     dependency_depth = models.PositiveIntegerField(null=True, blank=True)
+    immediate_parent_name = models.CharField(max_length=255, null=True, blank=True)
+    immediate_parent_version = models.CharField(max_length=255, null=True, blank=True)
+    direct_introducer_name = models.CharField(max_length=255, null=True, blank=True)
+    direct_introducer_version = models.CharField(max_length=255, null=True, blank=True)
     package_scope = models.CharField(
         max_length=16,
         choices=PACKAGE_SCOPE_CHOICES,

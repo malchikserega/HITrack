@@ -204,6 +204,10 @@ def _upsert_image_component_version_contexts(image, sbom_data=None):
         'metadata_type',
         'dependency_scope',
         'dependency_depth',
+        'immediate_parent_name',
+        'immediate_parent_version',
+        'direct_introducer_name',
+        'direct_introducer_version',
         'package_scope',
         'package_arch',
         'package_distro',
@@ -1285,23 +1289,7 @@ def _propagate_image_completion_to_equivalent_images(image):
                 },
             )
         for context in source_contexts:
-            ImageComponentVersionContext.objects.get_or_create(
-                component_version=context.component_version,
-                image=duplicate,
-                defaults={
-                    'cataloger': context.cataloger,
-                    'metadata_type': context.metadata_type,
-                    'dependency_scope': context.dependency_scope,
-                    'dependency_depth': context.dependency_depth,
-                    'package_scope': context.package_scope,
-                    'package_arch': context.package_arch,
-                    'package_distro': context.package_distro,
-                    'package_repo': context.package_repo,
-                    'package_channel': context.package_channel,
-                    'source_package': context.source_package,
-                    'source_package_version': context.source_package_version,
-                },
-            )
+            _merge_component_context_into_image(context, duplicate)
 
         update_fields = []
         if duplicate.digest != image.digest:
@@ -1365,6 +1353,10 @@ def _merge_component_context_into_image(source_context, target_image):
             'metadata_type': source_context.metadata_type,
             'dependency_scope': source_context.dependency_scope,
             'dependency_depth': source_context.dependency_depth,
+            'immediate_parent_name': source_context.immediate_parent_name,
+            'immediate_parent_version': source_context.immediate_parent_version,
+            'direct_introducer_name': source_context.direct_introducer_name,
+            'direct_introducer_version': source_context.direct_introducer_version,
             'package_scope': source_context.package_scope,
             'package_arch': source_context.package_arch,
             'package_distro': source_context.package_distro,
@@ -1381,6 +1373,10 @@ def _merge_component_context_into_image(source_context, target_image):
     for field_name in (
         'cataloger',
         'metadata_type',
+        'immediate_parent_name',
+        'immediate_parent_version',
+        'direct_introducer_name',
+        'direct_introducer_version',
         'package_arch',
         'package_distro',
         'package_repo',
@@ -1399,7 +1395,18 @@ def _merge_component_context_into_image(source_context, target_image):
     if current_depth is None or (incoming_depth is not None and incoming_depth < current_depth):
         target_context.dependency_depth = incoming_depth
         target_context.dependency_scope = source_context.dependency_scope
-        updated_fields.extend(['dependency_depth', 'dependency_scope'])
+        target_context.immediate_parent_name = source_context.immediate_parent_name
+        target_context.immediate_parent_version = source_context.immediate_parent_version
+        target_context.direct_introducer_name = source_context.direct_introducer_name
+        target_context.direct_introducer_version = source_context.direct_introducer_version
+        updated_fields.extend([
+            'dependency_depth',
+            'dependency_scope',
+            'immediate_parent_name',
+            'immediate_parent_version',
+            'direct_introducer_name',
+            'direct_introducer_version',
+        ])
     elif target_context.dependency_scope == 'unknown' and source_context.dependency_scope != 'unknown':
         target_context.dependency_scope = source_context.dependency_scope
         updated_fields.append('dependency_scope')

@@ -400,6 +400,10 @@ export interface ComponentVersion extends BaseEntity {
   used_count: number
   dependency_scope?: string | null
   dependency_depth?: number | null
+  immediate_parent_name?: string | null
+  immediate_parent_version?: string | null
+  direct_introducer_name?: string | null
+  direct_introducer_version?: string | null
   package_scope?: string | null
   package_arch?: string | null
   package_distro?: string | null

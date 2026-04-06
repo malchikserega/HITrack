@@ -100,14 +100,16 @@ def _extract_string_from_metadata(metadata, *keys) -> str | None:
 
 
 def _extract_dependency_metadata(relationships, artifact_ids: Iterable[str]) -> dict[str, dict]:
-    artifact_id_set = {artifact_id for artifact_id in artifact_ids if artifact_id}
-    if not artifact_id_set:
+    ordered_artifact_ids = [artifact_id for artifact_id in artifact_ids if artifact_id]
+    artifact_id_set = set(ordered_artifact_ids)
+    if not ordered_artifact_ids:
         return {}
 
-    adjacency: dict[str, set[str]] = defaultdict(set)
+    adjacency: dict[str, list[str]] = defaultdict(list)
     indegree: dict[str, int] = defaultdict(int)
     package_scope_by_artifact: dict[str, str] = defaultdict(lambda: PACKAGE_SCOPE_UNKNOWN)
     graph_nodes: set[str] = set()
+    seen_edges: set[tuple[str, str]] = set()
 
     for relationship in relationships or []:
         if (relationship or {}).get('type') != 'dependency-of':
@@ -116,8 +118,10 @@ def _extract_dependency_metadata(relationships, artifact_ids: Iterable[str]) -> 
         child = relationship.get('child')
         if parent not in artifact_id_set or child not in artifact_id_set:
             continue
-        if child not in adjacency[parent]:
-            adjacency[parent].add(child)
+        edge = (parent, child)
+        if edge not in seen_edges:
+            seen_edges.add(edge)
+            adjacency[parent].append(child)
             indegree[child] += 1
         graph_nodes.add(parent)
         graph_nodes.add(child)
@@ -135,9 +139,11 @@ def _extract_dependency_metadata(relationships, artifact_ids: Iterable[str]) -> 
     if not graph_nodes:
         return {}
 
-    roots = [artifact_id for artifact_id in artifact_id_set if indegree.get(artifact_id, 0) == 0]
+    roots = [artifact_id for artifact_id in ordered_artifact_ids if indegree.get(artifact_id, 0) == 0]
     queue = deque((root, 0) for root in roots)
     depths: dict[str, int] = {}
+    immediate_parents: dict[str, str | None] = {root: None for root in roots}
+    direct_introducers: dict[str, str | None] = {root: None for root in roots}
 
     while queue:
         artifact_id, depth = queue.popleft()
@@ -146,14 +152,31 @@ def _extract_dependency_metadata(relationships, artifact_ids: Iterable[str]) -> 
             continue
         depths[artifact_id] = depth
         for child in adjacency.get(artifact_id, ()):
-            queue.append((child, depth + 1))
+            child_depth = depth + 1
+            child_current_depth = depths.get(child)
+            if child_current_depth is not None and child_current_depth <= child_depth:
+                continue
+            immediate_parents[child] = artifact_id
+            if depth == 0:
+                direct_introducers[child] = artifact_id
+            else:
+                direct_introducers[child] = direct_introducers.get(artifact_id) or artifact_id
+            queue.append((child, child_depth))
 
+    artifact_lookup = {artifact_id: artifact_id for artifact_id in ordered_artifact_ids}
     dependency_metadata = {}
-    for artifact_id in artifact_id_set:
+    for artifact_id in ordered_artifact_ids:
+        parent_id = immediate_parents.get(artifact_id)
+        introducer_id = direct_introducers.get(artifact_id)
+        immediate_parent = artifact_lookup.get(parent_id)
+        direct_introducer = artifact_lookup.get(introducer_id)
+
         if artifact_id not in graph_nodes:
             dependency_metadata[artifact_id] = {
                 'dependency_scope': DEPENDENCY_SCOPE_DIRECT,
                 'dependency_depth': 0,
+                'immediate_parent_id': None,
+                'direct_introducer_id': None,
                 'package_scope': package_scope_by_artifact[artifact_id],
             }
             continue
@@ -169,6 +192,8 @@ def _extract_dependency_metadata(relationships, artifact_ids: Iterable[str]) -> 
         dependency_metadata[artifact_id] = {
             'dependency_scope': dependency_scope,
             'dependency_depth': depth,
+            'immediate_parent_id': immediate_parent,
+            'direct_introducer_id': direct_introducer,
             'package_scope': package_scope_by_artifact[artifact_id],
         }
 
@@ -188,6 +213,8 @@ def _extract_artifact_context(artifact, dependency_metadata_by_id) -> dict | Non
     dependency_metadata = dependency_metadata_by_id.get(artifact_id) or {
         'dependency_scope': DEPENDENCY_SCOPE_UNKNOWN,
         'dependency_depth': None,
+        'immediate_parent_id': None,
+        'direct_introducer_id': None,
         'package_scope': PACKAGE_SCOPE_UNKNOWN,
     }
 
@@ -210,14 +237,19 @@ def _extract_artifact_context(artifact, dependency_metadata_by_id) -> dict | Non
         'sourcePackageVersion',
         'sourceRpmVersion',
     )
+    immediate_parent_id = dependency_metadata.get('immediate_parent_id')
+    direct_introducer_id = dependency_metadata.get('direct_introducer_id')
 
     return {
         'name': name,
         'version': version,
+        'artifact_id': artifact_id,
         'cataloger': _clean_string(artifact.get('foundBy')) or '',
         'metadata_type': _clean_string(artifact.get('metadataType')) or '',
         'dependency_scope': dependency_metadata['dependency_scope'],
         'dependency_depth': dependency_metadata['dependency_depth'],
+        'immediate_parent_id': immediate_parent_id,
+        'direct_introducer_id': direct_introducer_id,
         'package_scope': dependency_metadata['package_scope'],
         'package_arch': package_arch,
         'package_distro': package_distro,
@@ -239,8 +271,14 @@ def _merge_artifact_context(existing: dict | None, incoming: dict) -> dict:
     if existing_depth is None or (incoming_depth is not None and incoming_depth < existing_depth):
         merged['dependency_depth'] = incoming_depth
         merged['dependency_scope'] = incoming.get('dependency_scope', merged.get('dependency_scope'))
+        merged['immediate_parent_id'] = incoming.get('immediate_parent_id')
+        merged['direct_introducer_id'] = incoming.get('direct_introducer_id')
     elif merged.get('dependency_scope') == DEPENDENCY_SCOPE_UNKNOWN and incoming.get('dependency_scope') != DEPENDENCY_SCOPE_UNKNOWN:
         merged['dependency_scope'] = incoming['dependency_scope']
+        if incoming.get('immediate_parent_id'):
+            merged['immediate_parent_id'] = incoming.get('immediate_parent_id')
+        if incoming.get('direct_introducer_id'):
+            merged['direct_introducer_id'] = incoming.get('direct_introducer_id')
 
     merged['package_scope'] = _pick_preferred_scope(
         merged.get('package_scope', PACKAGE_SCOPE_UNKNOWN),
@@ -275,13 +313,27 @@ def build_image_component_context_map(sbom_data) -> dict[tuple[str, str], dict]:
     )
 
     context_map: dict[tuple[str, str], dict] = {}
+    artifact_identity_by_id: dict[str, tuple[str, str]] = {}
     for artifact in artifacts:
         if not isinstance(artifact, dict):
             continue
         extracted = _extract_artifact_context(artifact, dependency_metadata_by_id)
         if not extracted:
             continue
+        if extracted.get('artifact_id'):
+            artifact_identity_by_id[extracted['artifact_id']] = (extracted['name'], extracted['version'])
         key = (extracted['name'], extracted['version'])
         context_map[key] = _merge_artifact_context(context_map.get(key), extracted)
+
+    for context in context_map.values():
+        immediate_parent_key = artifact_identity_by_id.get(context.get('immediate_parent_id'))
+        direct_introducer_key = artifact_identity_by_id.get(context.get('direct_introducer_id'))
+        context['immediate_parent_name'] = immediate_parent_key[0] if immediate_parent_key else None
+        context['immediate_parent_version'] = immediate_parent_key[1] if immediate_parent_key else None
+        context['direct_introducer_name'] = direct_introducer_key[0] if direct_introducer_key else None
+        context['direct_introducer_version'] = direct_introducer_key[1] if direct_introducer_key else None
+        context.pop('artifact_id', None)
+        context.pop('immediate_parent_id', None)
+        context.pop('direct_introducer_id', None)
 
     return context_map
