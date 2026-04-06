@@ -20,6 +20,101 @@ from datetime import datetime
 import json
 
 
+def _get_first_repository_tag(obj):
+    prefetched_tags = getattr(obj, '_prefetched_objects_cache', {}).get('repository_tags')
+    if prefetched_tags is not None:
+        return prefetched_tags[0] if prefetched_tags else None
+    return obj.repository_tags.select_related('repository').first()
+
+
+def _load_task_result_payload(obj):
+    if hasattr(obj, '_task_result_payload_cache'):
+        return obj._task_result_payload_cache
+
+    payload = None
+    if obj.result:
+        try:
+            payload = json.loads(obj.result)
+        except (json.JSONDecodeError, TypeError):
+            payload = None
+
+    obj._task_result_payload_cache = payload
+    return payload
+
+
+def _derive_task_name_from_id(task_id):
+    if not task_id:
+        return 'Unknown Task'
+    if 'generate_sbom' in task_id or 'sbom' in task_id:
+        return "Generate SBOM and Create Components"
+    if 'scan' in task_id and 'grype' in task_id:
+        return "Scan Image with Grype"
+    if 'vulnerability' in task_id and 'update' in task_id:
+        return "Update Vulnerability Details"
+    if 'process' in task_id and 'tag' in task_id:
+        return "Process Single Tag"
+    if 'repository' in task_id and 'scan' in task_id:
+        return "Scan Repository"
+    if 'parse' in task_id and 'sbom' in task_id:
+        return "Parse SBOM and Create Components"
+    if 'update' in task_id and 'component' in task_id:
+        return "Update Components Latest Versions"
+    if 'process' in task_id and 'grype' in task_id:
+        return "Process Grype Scan Results"
+    if 'cleanup' in task_id:
+        return "Cleanup Old Vulnerability Data"
+    if 'cisa' in task_id or 'kev' in task_id:
+        return "Update CISA KEV Vulnerabilities"
+    if 'test' in task_id:
+        return "Test Task"
+    return f"Task-{task_id[:8]}"
+
+
+def _get_task_display_name(obj):
+    cached = getattr(obj, '_task_display_name_cache', None)
+    if cached:
+        return cached
+
+    if obj.task_name and obj.task_name != 'None' and obj.task_name.strip():
+        obj._task_display_name_cache = obj.task_name
+        return obj.task_name
+
+    payload = _load_task_result_payload(obj)
+    if isinstance(payload, dict):
+        payload_task_name = payload.get('task_name')
+        if payload_task_name:
+            obj._task_display_name_cache = payload_task_name
+            return payload_task_name
+
+    derived = _derive_task_name_from_id(obj.task_id)
+    obj._task_display_name_cache = derived
+    return derived
+
+
+def _get_task_result_summary(obj, truncate_at=200):
+    payload = _load_task_result_payload(obj)
+    if payload is None:
+        if not obj.result:
+            return None
+        raw = str(obj.result)
+        return raw[:truncate_at] + '...' if len(raw) > truncate_at else raw
+
+    if isinstance(payload, dict):
+        summary = {}
+        if 'status' in payload:
+            summary['status'] = payload['status']
+        if 'message' in payload:
+            summary['message'] = payload['message']
+        if 'processed_items' in payload:
+            summary['processed_items'] = payload['processed_items']
+        if 'errors' in payload:
+            summary['errors'] = payload['errors']
+        return summary
+
+    raw = str(payload)
+    return raw[:truncate_at] + '...' if len(raw) > truncate_at else raw
+
+
 def _get_repository_tag_processing_status(obj):
     count_attrs = (
         'total_images_count',
@@ -380,24 +475,26 @@ class ComponentVersionSerializer(serializers.ModelSerializer):
 
     @extend_schema_field(serializers.ListField(child=VulnerabilityShortSerializer()))
     def get_vulnerabilities(self, obj):
-        # Get vulnerabilities with their fix information through the through model
-        # Using optimized serializer that returns uuid, vulnerability_id, severity, and description
-        vulns = []
         prefetched_cvv = getattr(obj, '_prefetched_objects_cache', {}).get('componentversionvulnerability_set')
         if prefetched_cvv is not None:
             cvv_rows = prefetched_cvv
         else:
             cvv_rows = obj.componentversionvulnerability_set.select_related('vulnerability').all()
 
-        for cvv in cvv_rows:
-            vuln_data = VulnerabilityShortSerializer(cvv.vulnerability).data
-            vuln_data['fixable'] = cvv.fixable
-            vuln_data['fix'] = cvv.fix
-            vuln_data['fix_status'] = cvv.fix_status
-            vuln_data['fix_state'] = cvv.fix_state
-            vuln_data['fix_versions'] = cvv.fix_versions
-            vulns.append(vuln_data)
-        return vulns
+        return [
+            {
+                'uuid': str(cvv.vulnerability.uuid),
+                'vulnerability_id': cvv.vulnerability.vulnerability_id,
+                'severity': cvv.vulnerability.severity,
+                'description': cvv.vulnerability.description,
+                'fixable': cvv.fixable,
+                'fix': cvv.fix,
+                'fix_status': cvv.fix_status,
+                'fix_state': cvv.fix_state,
+                'fix_versions': cvv.fix_versions,
+            }
+            for cvv in cvv_rows
+        ]
 
     @extend_schema_field(serializers.IntegerField())
     def get_vulnerabilities_count(self, obj):
@@ -413,17 +510,34 @@ class ComponentVersionSerializer(serializers.ModelSerializer):
 
     @extend_schema_field(serializers.ListField(child=ImageShortSerializer()))
     def get_images(self, obj):
-        # Get images with full information for this component version
         prefetched_images = getattr(obj, '_prefetched_objects_cache', {}).get('images')
         images = prefetched_images if prefetched_images is not None else obj.images.all()
-        return ImageShortSerializer(images, many=True).data
+        return [
+            {
+                'uuid': str(image.uuid),
+                'name': image.name,
+                'digest': image.digest,
+            }
+            for image in images
+        ]
 
     @extend_schema_field(serializers.ListField(child=ComponentLocationSerializer()))
     def get_locations(self, obj):
-        # Get locations for this component version
         prefetched_locations = getattr(obj, '_prefetched_objects_cache', {}).get('locations')
         locations = prefetched_locations if prefetched_locations is not None else ComponentLocation.objects.filter(component_version=obj).select_related('image')
-        return ComponentLocationSerializer(locations, many=True).data
+        return [
+            {
+                'uuid': str(location.uuid),
+                'path': location.path,
+                'layer_id': location.layer_id,
+                'access_path': location.access_path,
+                'evidence_type': location.evidence_type,
+                'annotations': location.annotations,
+                'created_at': location.created_at,
+                'updated_at': location.updated_at,
+            }
+            for location in locations
+        ]
 
 
 class ComponentSerializer(serializers.ModelSerializer):
@@ -592,11 +706,7 @@ class ImageSerializer(serializers.ModelSerializer):
 
     @extend_schema_field(serializers.DictField())
     def get_repository_info(self, obj):
-        prefetched_tags = getattr(obj, '_prefetched_objects_cache', {}).get('repository_tags')
-        if prefetched_tags is not None:
-            tag = prefetched_tags[0] if prefetched_tags else None
-        else:
-            tag = obj.repository_tags.select_related('repository').first()
+        tag = _get_first_repository_tag(obj)
 
         if tag:
             return {
@@ -700,11 +810,7 @@ class ImageListSerializer(serializers.ModelSerializer):
 
     @extend_schema_field(serializers.DictField())
     def get_repository_info(self, obj):
-        prefetched_tags = getattr(obj, '_prefetched_objects_cache', {}).get('repository_tags')
-        if prefetched_tags is not None:
-            tag = prefetched_tags[0] if prefetched_tags else None
-        else:
-            tag = obj.repository_tags.select_related('repository').first()
+        tag = _get_first_repository_tag(obj)
 
         if tag:
             # Repository should be prefetched via select_related in views
@@ -983,7 +1089,7 @@ class VulnerabilityAffectedImageSerializer(serializers.ModelSerializer):
     @extend_schema_field(serializers.ListField(child=VulnerabilityImageRepositoryTagSerializer()))
     def get_repository_tags(self, obj):
         prefetched_tags = getattr(obj, '_prefetched_objects_cache', {}).get('repository_tags')
-        tags = prefetched_tags if prefetched_tags is not None else obj.repository_tags.select_related('repository').all()
+        tags = prefetched_tags if prefetched_tags is not None else obj.repository_tags.select_related('repository').order_by('repository__name', 'tag')
 
         serialized_tags = []
         seen_tag_ids = set()
@@ -998,8 +1104,6 @@ class VulnerabilityAffectedImageSerializer(serializers.ModelSerializer):
                 'tag': tag.tag,
                 'tag_uuid': tag.uuid,
             })
-
-        serialized_tags.sort(key=lambda item: (item['repository_name'], item['tag']))
         return serialized_tags
 
 
@@ -1473,6 +1577,11 @@ class ReleaseSerializer(serializers.ModelSerializer):
         }
     
     def get_repository_tags_count(self, obj):
+        if hasattr(obj, 'repository_tags_count'):
+            return obj.repository_tags_count
+        prefetched_repository_tags = getattr(obj, '_prefetched_objects_cache', {}).get('repository_tags')
+        if prefetched_repository_tags is not None:
+            return len(prefetched_repository_tags)
         return obj.repository_tags.count()
     
     def validate_name(self, value):
@@ -1513,60 +1622,7 @@ class TaskResultSerializer(serializers.ModelSerializer):
         ]
     
     def get_task_name(self, obj):
-        """Extract task name from task_id or result"""
-        # First check if task_name is set and not None/empty
-        if obj.task_name and obj.task_name != 'None' and obj.task_name.strip():
-            return obj.task_name
-        
-        # Try to extract from result if available
-        if obj.result:
-            try:
-                result_data = json.loads(obj.result)
-                if isinstance(result_data, dict) and 'task_name' in result_data:
-                    return result_data['task_name']
-            except (json.JSONDecodeError, TypeError):
-                pass
-        
-        # Try to extract from task_id or other fields
-        if hasattr(obj, 'task_id') and obj.task_id:
-            # Try to get task name from Celery registry
-            try:
-                from celery import current_app
-                task_func = current_app.tasks.get(obj.task_id)
-                if task_func:
-                    return task_func.name
-            except:
-                pass
-        
-        # Try to extract from task_id by looking for known patterns
-        if obj.task_id:
-            # Check if it's a known task pattern
-            if 'generate_sbom' in obj.task_id or 'sbom' in obj.task_id:
-                return "Generate SBOM and Create Components"
-            elif 'scan' in obj.task_id and 'grype' in obj.task_id:
-                return "Scan Image with Grype"
-            elif 'vulnerability' in obj.task_id and 'update' in obj.task_id:
-                return "Update Vulnerability Details"
-            elif 'process' in obj.task_id and 'tag' in obj.task_id:
-                return "Process Single Tag"
-            elif 'repository' in obj.task_id and 'scan' in obj.task_id:
-                return "Scan Repository"
-            elif 'parse' in obj.task_id and 'sbom' in obj.task_id:
-                return "Parse SBOM and Create Components"
-            elif 'update' in obj.task_id and 'component' in obj.task_id:
-                return "Update Components Latest Versions"
-            elif 'process' in obj.task_id and 'grype' in obj.task_id:
-                return "Process Grype Scan Results"
-            elif 'cleanup' in obj.task_id:
-                return "Cleanup Old Vulnerability Data"
-            elif 'cisa' in obj.task_id or 'kev' in obj.task_id:
-                return "Update CISA KEV Vulnerabilities"
-            elif 'test' in obj.task_id:
-                return "Test Task"
-            else:
-                return f"Task-{obj.task_id[:8]}"
-        
-        return 'Unknown Task'
+        return _get_task_display_name(obj)
     
     def get_status(self, obj):
         """Get task status"""
@@ -1582,28 +1638,7 @@ class TaskResultSerializer(serializers.ModelSerializer):
             return obj.status.lower()
     
     def get_result_summary(self, obj):
-        """Get a summary of the result"""
-        if not obj.result:
-            return None
-        
-        try:
-            result_data = json.loads(obj.result)
-            if isinstance(result_data, dict):
-                # Extract key information
-                summary = {}
-                if 'status' in result_data:
-                    summary['status'] = result_data['status']
-                if 'message' in result_data:
-                    summary['message'] = result_data['message']
-                if 'processed_items' in result_data:
-                    summary['processed_items'] = result_data['processed_items']
-                if 'errors' in result_data:
-                    summary['errors'] = result_data['errors']
-                return summary
-            else:
-                return str(result_data)[:200] + '...' if len(str(result_data)) > 200 else str(result_data)
-        except (json.JSONDecodeError, TypeError):
-            return str(obj.result)[:200] + '...' if len(str(obj.result)) > 200 else str(obj.result)
+        return _get_task_result_summary(obj, truncate_at=200)
     
     def get_duration(self, obj):
         """Calculate task duration"""
@@ -1625,59 +1660,7 @@ class TaskResultListSerializer(serializers.ModelSerializer):
         fields = ['task_id', 'task_name', 'status', 'result_summary', 'duration', 'created']
     
     def get_task_name(self, obj):
-        # First check if task_name is set and not None/empty
-        if obj.task_name and obj.task_name != 'None' and obj.task_name.strip():
-            return obj.task_name
-        
-        # Try to extract from result if available
-        if obj.result:
-            try:
-                result_data = json.loads(obj.result)
-                if isinstance(result_data, dict) and 'task_name' in result_data:
-                    return result_data['task_name']
-            except (json.JSONDecodeError, TypeError):
-                pass
-        
-        # Try to extract from task_id or other fields
-        if hasattr(obj, 'task_id') and obj.task_id:
-            # Try to get task name from Celery registry
-            try:
-                from celery import current_app
-                task_func = current_app.tasks.get(obj.task_id)
-                if task_func:
-                    return task_func.name
-            except:
-                pass
-        
-        # Try to extract from task_id by looking for known patterns
-        if obj.task_id:
-            # Check if it's a known task pattern
-            if 'generate_sbom' in obj.task_id or 'sbom' in obj.task_id:
-                return "Generate SBOM and Create Components"
-            elif 'scan' in obj.task_id and 'grype' in obj.task_id:
-                return "Scan Image with Grype"
-            elif 'vulnerability' in obj.task_id and 'update' in obj.task_id:
-                return "Update Vulnerability Details"
-            elif 'process' in obj.task_id and 'tag' in obj.task_id:
-                return "Process Single Tag"
-            elif 'repository' in obj.task_id and 'scan' in obj.task_id:
-                return "Scan Repository"
-            elif 'parse' in obj.task_id and 'sbom' in obj.task_id:
-                return "Parse SBOM and Create Components"
-            elif 'update' in obj.task_id and 'component' in obj.task_id:
-                return "Update Components Latest Versions"
-            elif 'process' in obj.task_id and 'grype' in obj.task_id:
-                return "Process Grype Scan Results"
-            elif 'cleanup' in obj.task_id:
-                return "Cleanup Old Vulnerability Data"
-            elif 'cisa' in obj.task_id or 'kev' in obj.task_id:
-                return "Update CISA KEV Vulnerabilities"
-            elif 'test' in obj.task_id:
-                return "Test Task"
-            else:
-                return f"Task-{obj.task_id[:8]}"
-        
-        return 'Unknown Task'
+        return _get_task_display_name(obj)
     
     def get_status(self, obj):
         if obj.status == 'SUCCESS':
@@ -1692,28 +1675,7 @@ class TaskResultListSerializer(serializers.ModelSerializer):
             return obj.status.lower()
     
     def get_result_summary(self, obj):
-        """Get a summary of the result"""
-        if not obj.result:
-            return None
-        
-        try:
-            result_data = json.loads(obj.result)
-            if isinstance(result_data, dict):
-                # Extract key information
-                summary = {}
-                if 'status' in result_data:
-                    summary['status'] = result_data['status']
-                if 'message' in result_data:
-                    summary['message'] = result_data['message']
-                if 'processed_items' in result_data:
-                    summary['processed_items'] = result_data['processed_items']
-                if 'errors' in result_data:
-                    summary['errors'] = result_data['errors']
-                return summary
-            else:
-                return str(result_data)[:100] + '...' if len(str(result_data)) > 100 else str(result_data)
-        except (json.JSONDecodeError, TypeError):
-            return str(obj.result)[:100] + '...' if len(str(obj.result)) > 100 else str(obj.result)
+        return _get_task_result_summary(obj, truncate_at=100)
     
     def get_duration(self, obj):
         if obj.date_created and obj.date_done:

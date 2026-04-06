@@ -2996,6 +2996,14 @@ class ReleaseViewSet(BaseViewSet):
         'high_vulnerabilities',
     ]
 
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        if self.action in {'list', 'retrieve'}:
+            queryset = queryset.annotate(
+                repository_tags_count=Count('repository_tags', distinct=True),
+            )
+        return queryset
+
     def _get_with_stats_queryset(self):
         return Release.objects.annotate(
             tag_count=Count('repository_tags', distinct=True),
