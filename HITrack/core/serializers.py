@@ -857,7 +857,10 @@ class ImageComparisonVariantSerializer(serializers.ModelSerializer):
     def _extract_logical_name(self, name: str | None) -> str:
         if not name:
             return ''
-        return name.rsplit('/', 1)[-1]
+        basename = name.rsplit('/', 1)[-1].split('@', 1)[0]
+        if ':' in basename:
+            return basename.rsplit(':', 1)[0]
+        return basename
 
     def _extract_registry_host(self, name: str | None) -> str:
         if not name or '/' not in name:

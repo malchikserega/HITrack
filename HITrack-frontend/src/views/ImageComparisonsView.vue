@@ -5,8 +5,8 @@
         <div>
           <h1 class="text-h4 font-weight-bold mb-2">Image Comparisons</h1>
           <p class="text-body-1 text-medium-emphasis">
-            Compare images that share the same logical name, such as <code>worker:5.0.426-gec5ee144</code>,
-            across different registries and repositories.
+            Compare images that share the same artifact name, such as <code>worker</code>,
+            across different registries, repositories and tags.
           </p>
         </div>
         <div class="page-header__actions">
@@ -22,8 +22,8 @@
               />
             </template>
             <div class="tooltip-copy">
-              <div><strong>Logical image</strong> is the name after the last slash, for example <code>worker:5.0.426-gec5ee144</code>.</div>
-              <div><strong>Variants</strong> are concrete image records found across registries and repositories for that logical name.</div>
+              <div><strong>Image name</strong> is the artifact name after the last slash with the tag stripped, for example <code>worker</code>.</div>
+              <div><strong>Variants</strong> are concrete image records found across registries, repositories and tags for that name.</div>
               <div><strong>Worst</strong> columns show the highest counts seen among those variants so you can spot the riskiest copy quickly.</div>
             </div>
           </v-tooltip>
@@ -43,8 +43,8 @@
           <div class="filters-bar">
             <v-text-field
               v-model="search"
-              label="Search logical image"
-              placeholder="worker:5.0.426-gec5ee144"
+              label="Search image name"
+              placeholder="worker"
               prepend-inner-icon="mdi-magnify"
               density="comfortable"
               variant="outlined"
@@ -59,7 +59,7 @@
               inset
               hide-details
               class="duplicates-switch"
-              label="Only show duplicate logical names"
+              label="Only show duplicate image names"
             />
           </div>
         </v-card-text>
@@ -78,12 +78,12 @@
           >
             <template #header.logical_name>
               <div class="header-with-help">
-                <span>Logical Image</span>
+                <span>Image Name</span>
                 <v-tooltip location="top" max-width="300">
                   <template #activator="{ props }">
                     <v-icon v-bind="props" size="16" class="help-icon">mdi-help-circle-outline</v-icon>
                   </template>
-                  <span>Normalized image name used for comparison, usually the part after the last slash.</span>
+                  <span>Normalized artifact name used for comparison. Registry, repository path and tag are ignored.</span>
                 </v-tooltip>
               </div>
             </template>
@@ -94,7 +94,7 @@
                   <template #activator="{ props }">
                     <v-icon v-bind="props" size="16" class="help-icon">mdi-help-circle-outline</v-icon>
                   </template>
-                  <span>How many concrete image entries share this logical name.</span>
+                  <span>How many concrete image entries share this image name.</span>
                 </v-tooltip>
               </div>
             </template>
@@ -105,7 +105,7 @@
                   <template #activator="{ props }">
                     <v-icon v-bind="props" size="16" class="help-icon">mdi-help-circle-outline</v-icon>
                   </template>
-                  <span>Number of distinct registry hosts carrying variants of this logical image.</span>
+                  <span>Number of distinct registry hosts carrying variants of this image name.</span>
                 </v-tooltip>
               </div>
             </template>
@@ -116,7 +116,7 @@
                   <template #activator="{ props }">
                     <v-icon v-bind="props" size="16" class="help-icon">mdi-help-circle-outline</v-icon>
                   </template>
-                  <span>How many different digests exist for this logical image. More than one usually means the variants are not identical.</span>
+                  <span>How many different digests exist for this image name. More than one usually means the variants are not identical.</span>
                 </v-tooltip>
               </div>
             </template>
@@ -149,7 +149,7 @@
                   <template #activator="{ props }">
                     <v-icon v-bind="props" size="16" class="help-icon">mdi-help-circle-outline</v-icon>
                   </template>
-                  <span>Largest component inventory seen in any variant of this logical image.</span>
+                  <span>Largest component inventory seen in any variant of this image name.</span>
                 </v-tooltip>
               </div>
             </template>
@@ -385,7 +385,7 @@ const expandedLogicalNames = ref<string[]>([])
 
 const headers: DataTableHeader[] = [
   { title: '', key: 'expand', sortable: false, width: 72 },
-  { title: 'Logical Image', key: 'logical_name', sortable: true, minWidth: 260 },
+  { title: 'Image Name', key: 'logical_name', sortable: true, minWidth: 260 },
   { title: 'Variants', key: 'variant_count', sortable: true, width: 110 },
   { title: 'Registries', key: 'registry_count', sortable: true, width: 120 },
   { title: 'Digests', key: 'distinct_digests', sortable: true, width: 120 },

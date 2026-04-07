@@ -677,10 +677,23 @@ def _build_dashboard_base_lineage_root_causes_payload():
 
 
 def _annotate_image_comparison_fields(queryset):
+    image_basename = Func(
+        F('name'),
+        Value(r'^.*/'),
+        Value(''),
+        function='regexp_replace',
+        output_field=CharField(),
+    )
     return queryset.annotate(
         logical_name=Func(
-            F('name'),
-            Value(r'^.*/'),
+            Func(
+                image_basename,
+                Value(r'@.*$'),
+                Value(''),
+                function='regexp_replace',
+                output_field=CharField(),
+            ),
+            Value(r':[^:]+$'),
             Value(''),
             function='regexp_replace',
             output_field=CharField(),
