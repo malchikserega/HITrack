@@ -35,6 +35,10 @@ logger = logging.getLogger(__name__)
 # Remove debug logging in production
 DEBUG_LOGGING = os.getenv('DEBUG_LOGGING', 'False').lower() == 'true'
 
+# SBOM task: docker pull + Syft/Grype often exceeds global CELERY_TASK_SOFT_TIME_LIMIT (420s)
+GENERATE_SBOM_SOFT_TIME_LIMIT = int(os.getenv("HITRACK_SBOM_SOFT_TIME_LIMIT", "3600"))
+GENERATE_SBOM_TIME_LIMIT = int(os.getenv("HITRACK_SBOM_TIME_LIMIT", "4200"))
+
 DOCKER_IMAGE_REGEX = re.compile(r'^[a-zA-Z0-9._/-]+(:[a-zA-Z0-9._-]+)?$')
 _LINEAGE_SOURCE_PRIORITY = {
     'unknown': 0,
@@ -984,6 +988,31 @@ def _resolve_helm_image_location(repository, repo_tag, registry, image_ref):
             None,
         )
 
+    if registry:
+        try:
+            original_digest = _normalize_image_digest(
+                get_image_digest(registry, image_ref)
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to resolve Helm child image digest for original ref %s: %s",
+                image_ref,
+                exc,
+            )
+            original_digest = None
+        if original_digest:
+            resolved_pull_ref = (
+                to_docker_pull_ref(image_ref)
+                if "/artifactory/" in image_ref
+                else image_ref
+            )
+            return (
+                resolved_pull_ref,
+                original_digest,
+                resolved_pull_ref,
+                None,
+            )
+
     candidate_refs = _derive_same_registry_image_candidates(repository, registry, image_ref)
 
     for candidate_ref in candidate_refs:
@@ -1618,7 +1647,13 @@ def _sync_repository_tag_processing_statuses(tag_ids):
 
     return resolved_statuses
 
-@celery_app.task(bind=True, max_retries=1, name="Generate SBOM and Create Components")
+@celery_app.task(
+    bind=True,
+    max_retries=1,
+    name="Generate SBOM and Create Components",
+    soft_time_limit=GENERATE_SBOM_SOFT_TIME_LIMIT,
+    time_limit=GENERATE_SBOM_TIME_LIMIT,
+)
 def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="docker"):
     """
     Generate SBOM data for an image using Syft.

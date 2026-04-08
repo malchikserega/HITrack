@@ -9,10 +9,12 @@ operations with Artifactory container repositories.
 
 # Standard library imports
 import base64
+import json
 import logging
 import re
 import subprocess
 from typing import Any, Dict, Generator, List, Optional, Tuple
+from urllib.parse import urlparse
 
 # Third-party imports
 import requests
@@ -433,11 +435,124 @@ def get_helm_images(api_url: str, token: str, repo: str, digest: str) -> List[st
     return extract_images_from_chart_blob(response.content, f"{repo}:{digest}")
 
 
+def _artifactory_registry_hostname(registry_url: str) -> Optional[str]:
+    raw = (registry_url or "").strip()
+    if not raw:
+        return None
+    if not raw.startswith(("http://", "https://")):
+        raw = "https://" + raw
+    host = urlparse(raw).hostname
+    return host.lower() if host else None
+
+
+def _parse_image_ref_host_name_tag(image_ref: str) -> Optional[Tuple[Optional[str], str, str]]:
+    """Split a container image ref into (registry_host_or_none, image_path, tag)."""
+    raw = str(image_ref or "").strip()
+    if not raw:
+        return None
+    path = raw
+    if "@" in path:
+        path = path.rsplit("@", 1)[0]
+    tag = "latest"
+    if ":" in path.split("/")[-1]:
+        path, tag = path.rsplit(":", 1)
+    segments = [s for s in path.split("/") if s]
+    if not segments:
+        return None
+    host: Optional[str] = None
+    if "." in segments[0] or segments[0] == "localhost" or segments[0].startswith("["):
+        host = segments[0]
+        name = "/".join(segments[1:]) if len(segments) > 1 else ""
+    else:
+        name = "/".join(segments)
+    if not name:
+        return None
+    return (host, name, tag)
+
+
+def _digest_from_docker_pull(pull_ref: str) -> Optional[str]:
+    """Pull and inspect locally; uses subdomain-style ref when path-style was given."""
+    try:
+        from .registry import to_docker_pull_ref
+
+        ref = to_docker_pull_ref(pull_ref)
+        subprocess.run(["docker", "pull", ref], capture_output=True, check=True)
+        result = subprocess.run(
+            ["docker", "inspect", ref],
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+        inspect_data = json.loads(result.stdout)
+        if inspect_data and len(inspect_data) > 0:
+            repo_digests = inspect_data[0].get("RepoDigests", [])
+            if repo_digests:
+                digest = repo_digests[0].split("@")[1]
+                logger.info("Got digest %s using Docker inspect for %s", digest, ref)
+                return digest
+        return None
+    except Exception as docker_error:
+        logger.error(
+            "Failed to get digest using Docker inspect for %s: %s",
+            pull_ref,
+            docker_error,
+        )
+        return None
+
+
+def _digest_via_artifactory_subdomain_api(
+    registry_url: str, token: str, image_ref: str, base_hostname: str
+) -> Optional[str]:
+    """Resolve digest when ref uses Docker subdomain form <repo-key>.<artifactory-host>/image:tag."""
+    parsed = _parse_image_ref_host_name_tag(image_ref)
+    if not parsed:
+        return None
+    image_host, image_name, tag = parsed
+    if not image_host:
+        return None
+    ih = image_host.lower()
+    bh = base_hostname.lower()
+    if ih == bh or not ih.endswith("." + bh):
+        return None
+    repo_key = ih[: -(len(bh) + 1)]
+    if not repo_key or "/" in repo_key:
+        return None
+    headers = {
+        **_auth_headers(token),
+        "Accept": "application/vnd.docker.distribution.manifest.v2+json",
+    }
+    docker_base = _docker_api_base(registry_url, repo_key)
+    if not docker_base.startswith("http"):
+        docker_base = "https://" + docker_base
+    url = f"{docker_base}/v2/{image_name}/manifests/{tag}"
+    try:
+        response = requests.get(url, headers=headers, timeout=60)
+        response.raise_for_status()
+        digest = response.headers.get("Docker-Content-Digest")
+        if digest:
+            logger.info(
+                "Resolved digest for %s via Artifactory subdomain API (repo_key=%s)",
+                image_ref,
+                repo_key,
+            )
+            return digest
+    except requests.RequestException as e:
+        logger.debug(
+            "Artifactory subdomain API miss for %s (repo_key=%s): %s",
+            image_ref,
+            repo_key,
+            e,
+        )
+    return None
+
+
 def get_artifactory_image_digest(registry_url: str, token: str, image_ref: str) -> Optional[str]:
     """
     Get image digest from Artifactory Docker registry.
     Artifactory Docker API is at /api/docker/<repo-key>/v2/<image>/manifests/<tag>.
-    Falls back to Docker inspect if API fails (e.g. for public pulls).
+    Supports path-style refs containing the Artifactory base path, subdomain-style refs
+    (<repo-key>.<host>/image:tag on the same Artifactory), and falls back to docker pull
+    for external registries (Docker Hub, GHCR, etc.).
 
     Args:
         registry_url: Artifactory registry base URL (e.g. https://repo.com.int.zone/artifactory)
@@ -447,60 +562,66 @@ def get_artifactory_image_digest(registry_url: str, token: str, image_ref: str) 
     Returns:
         str: Image digest or None if not found
     """
-    try:
-        registry = registry_url.split('://')[-1].rstrip('/') if '://' in registry_url else registry_url.rstrip('/')
-        if registry not in image_ref:
-            logger.warning(f"Registry {registry} not in image_ref {image_ref}")
-            return None
-        rest = image_ref.split(registry, 1)[-1].lstrip('/')
-        if ':' not in rest:
-            return None
-        path_part, tag = rest.rsplit(':', 1)
-        parts = path_part.split('/')
-        if not parts:
-            return None
-        # First segment is Docker repo key (e.g. a8n-docker-local), rest is image path (e.g. a8n-db)
-        repo_key = parts[0]
-        image_name = '/'.join(parts[1:]) if len(parts) > 1 else parts[0]
+    registry = (
+        registry_url.split("://", 1)[-1].rstrip("/")
+        if "://" in registry_url
+        else registry_url.rstrip("/")
+    )
+    base_hostname = _artifactory_registry_hostname(registry_url)
 
-        headers = {
-            **_auth_headers(token),
-            'Accept': 'application/vnd.docker.distribution.manifest.v2+json'
-        }
-        docker_base = _docker_api_base(registry_url, repo_key)
-        if not docker_base.startswith('http'):
-            docker_base = 'https://' + docker_base
-        url = f"{docker_base}/v2/{image_name}/manifests/{tag}"
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-
-        digest = response.headers.get('Docker-Content-Digest')
-        if digest:
-            return digest
-
-        logger.warning(f"Could not get digest for image {image_ref} from Artifactory API")
-        return None
-
-    except Exception as e:
-        logger.warning(f"Failed to get digest from Artifactory API for {image_ref}: {e}")
-        logger.info("Trying to get digest using Docker inspect...")
+    if registry in image_ref:
         try:
-            subprocess.run(["docker", "pull", image_ref], capture_output=True, check=True)
-            result = subprocess.run(
-                ["docker", "inspect", image_ref],
-                capture_output=True,
-                check=True,
-                text=True
+            rest = image_ref.split(registry, 1)[-1].lstrip("/")
+            if ":" not in rest:
+                return _digest_from_docker_pull(image_ref)
+            path_part, tag = rest.rsplit(":", 1)
+            parts = path_part.split("/")
+            if not parts:
+                return _digest_from_docker_pull(image_ref)
+            repo_key = parts[0]
+            image_name = "/".join(parts[1:]) if len(parts) > 1 else parts[0]
+
+            headers = {
+                **_auth_headers(token),
+                "Accept": "application/vnd.docker.distribution.manifest.v2+json",
+            }
+            docker_base = _docker_api_base(registry_url, repo_key)
+            if not docker_base.startswith("http"):
+                docker_base = "https://" + docker_base
+            url = f"{docker_base}/v2/{image_name}/manifests/{tag}"
+            response = requests.get(url, headers=headers, timeout=60)
+            response.raise_for_status()
+
+            digest = response.headers.get("Docker-Content-Digest")
+            if digest:
+                return digest
+
+            logger.warning(
+                "Could not get digest for image %s from Artifactory API",
+                image_ref,
             )
-            import json
-            inspect_data = json.loads(result.stdout)
-            if inspect_data and len(inspect_data) > 0:
-                repo_digests = inspect_data[0].get('RepoDigests', [])
-                if repo_digests:
-                    digest = repo_digests[0].split('@')[1]
-                    logger.info(f"Got digest {digest} using Docker inspect")
-                    return digest
-            return None
-        except Exception as docker_error:
-            logger.error(f"Failed to get digest using Docker inspect for {image_ref}: {docker_error}")
-            return None
+        except Exception as e:
+            logger.warning(
+                "Failed to get digest from Artifactory API for %s: %s",
+                image_ref,
+                e,
+            )
+
+        logger.info(
+            "Trying Docker pull after path-style Artifactory API miss for %s",
+            image_ref,
+        )
+        return _digest_from_docker_pull(image_ref)
+
+    if base_hostname:
+        sub = _digest_via_artifactory_subdomain_api(
+            registry_url, token, image_ref, base_hostname
+        )
+        if sub:
+            return sub
+
+    logger.info(
+        "No Artifactory path/subdomain match for %s; trying docker pull (external or other registry)",
+        image_ref,
+    )
+    return _digest_from_docker_pull(image_ref)
