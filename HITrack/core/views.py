@@ -3896,7 +3896,7 @@ class ListRegistriesView(GenericAPIView):
 
     def get(self, request):
         provider = request.query_params.get('provider', 'acr')
-        if provider not in ('acr', 'jfrog'):
+        if provider not in ('acr', 'jfrog', 'ecr'):
             return Response({'registries': []})
         registries = ContainerRegistry.objects.filter(provider=provider)
         data = [

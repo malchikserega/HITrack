@@ -483,7 +483,7 @@ export interface Stats {
 }
 
 /** Container registry provider (ACR or Artifactory) */
-export type RegistryProvider = 'acr' | 'jfrog'
+export type RegistryProvider = 'acr' | 'jfrog' | 'ecr'
 
 export interface RegistryFallbackEntry {
   url: string

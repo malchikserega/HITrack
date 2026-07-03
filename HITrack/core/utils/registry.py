@@ -1,7 +1,12 @@
 """
-Registry abstraction: dispatches to ACR or Artifactory based on provider.
-Allows the app to support both Azure Container Registry and JFrog Artifactory
+Registry abstraction: dispatches to ACR, Artifactory, or ECR based on provider.
+Allows the app to support multiple container registry backends
 as scanning sources with a single interface.
+
+Each provider module (acr, artifactory, ecr) exposes a PROVIDER_FUNCTIONS dict
+mapping standard function names to implementations. This module builds a
+dispatch table and routes calls based on registry.provider, eliminating the
+need for if/elif chains when adding new providers.
 """
 
 from typing import Generator, List, Optional, Tuple
@@ -11,31 +16,82 @@ from django.core.cache import cache
 # Re-use manifest helpers from ACR (same for OCI/Docker)
 from .acr import is_helm_chart, get_chart_digest
 
-_TOKEN_TTL = 270  # ACR tokens are valid ~300s; refresh 30s early
+# ---------------------------------------------------------------------------
+# Provider dispatch registry
+# ---------------------------------------------------------------------------
 
+def _load_providers() -> dict:
+    """Lazily load provider function tables to avoid circular imports."""
+    from .acr import PROVIDER_FUNCTIONS as acr_fns
+    from .artifactory import PROVIDER_FUNCTIONS as art_fns
+    from .ecr import PROVIDER_FUNCTIONS as ecr_fns
+    return {
+        'acr': acr_fns,
+        'jfrog': art_fns,
+        'ecr': ecr_fns,
+    }
+
+
+_providers_cache = None
+
+
+def _get_provider(provider_name: str) -> dict:
+    """Get the function table for a provider."""
+    global _providers_cache
+    if _providers_cache is None:
+        _providers_cache = _load_providers()
+    funcs = _providers_cache.get(provider_name)
+    if funcs is None:
+        raise ValueError(f"Unknown registry provider: {provider_name}")
+    return funcs
+
+
+# ---------------------------------------------------------------------------
+# Token caching configuration
+# ---------------------------------------------------------------------------
+
+# ACR tokens are valid ~300s; refresh 30s early
+_ACR_TOKEN_TTL = 270
+# ECR tokens are valid 12 hours; refresh 30 min early
+_ECR_TOKEN_TTL = 41400
+
+
+def _token_ttl(provider: str) -> Optional[int]:
+    """Return the Redis cache TTL for a provider's token, or None to skip caching."""
+    if provider == 'acr':
+        return _ACR_TOKEN_TTL
+    if provider == 'ecr':
+        return _ECR_TOKEN_TTL
+    # JFrog uses Basic auth (static base64); no caching needed
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Standard dispatch functions
+# ---------------------------------------------------------------------------
 
 def get_bearer_token(registry) -> str:
-    """Get auth token for the given registry (ACR Bearer or Artifactory Basic).
-    ACR tokens are cached in Redis to avoid repeated HTTP token requests."""
-    if registry.provider == 'jfrog':
-        from .artifactory import get_bearer_token as art_get_token
-        return art_get_token(registry.api_url, registry.login, registry.password)
-
-    cache_key = f'acr_token:{registry.pk}'
-    token = cache.get(cache_key)
-    if token:
+    """Get auth token for the given registry.
+    ACR and ECR tokens are cached in Redis to avoid repeated HTTP token requests.
+    JFrog returns a static Basic auth token (no caching needed)."""
+    provider = _get_provider(registry.provider)
+    ttl = _token_ttl(registry.provider)
+    if ttl is not None:
+        cache_key = f'registry_token:{registry.provider}:{registry.pk}'
+        token = cache.get(cache_key)
+        if token:
+            return token
+        token = provider['get_bearer_token'](registry.api_url, registry.login, registry.password)
+        cache.set(cache_key, token, ttl)
         return token
-    from .acr import get_bearer_token as acr_get_token
-    token = acr_get_token(registry.api_url, registry.login, registry.password)
-    cache.set(cache_key, token, _TOKEN_TTL)
-    return token
+    return provider['get_bearer_token'](registry.api_url, registry.login, registry.password)
 
 
 def get_repositories(registry, page_size: int = 100, last_repo: str = None) -> Tuple[list, str]:
     """
     List repositories with pagination.
     For jfrog: returns both Docker and Helm repo keys; each item is (name, url, package_type).
-    For acr: returns (name, url) per repo.
+    For acr/ecr: returns (name, url) per repo.
     """
     token = get_bearer_token(registry)
     if registry.provider == 'jfrog':
@@ -46,8 +102,8 @@ def get_repositories(registry, page_size: int = 100, last_repo: str = None) -> T
         combined = [(r[0], r[1], 'docker') for r in docker_repos]
         combined.extend([(r[0], r[1], 'helm') for r in helm_repos])
         return (combined, None)
-    from .acr import get_repositories as acr_get_repos
-    return acr_get_repos(registry.api_url, token, page_size=page_size, last_repo=last_repo)
+    provider = _get_provider(registry.provider)
+    return provider['get_repositories'](registry.api_url, token, page_size=page_size, last_repo=last_repo)
 
 
 def get_tags(registry, repo: str, limit: int = None, image_name: str = None) -> Generator[str, None, None]:
@@ -62,8 +118,8 @@ def get_tags(registry, repo: str, limit: int = None, image_name: str = None) -> 
             docker_base = _docker_api_base(registry.api_url, repo)
             return art_get_tags(docker_base, token, image_name, limit=limit)
         return art_get_tags(registry.api_url, token, repo, limit=limit)
-    from .acr import get_tags as acr_get_tags
-    return acr_get_tags(registry.api_url, token, repo, limit=limit)
+    provider = _get_provider(registry.provider)
+    return provider['get_tags'](registry.api_url, token, repo, limit=limit)
 
 
 def get_catalog(registry, repo_key: str, page_size: int = 500, last: str = None) -> Tuple[list, Optional[str]]:
@@ -84,8 +140,8 @@ def get_manifest(registry, repo: str, tag: str, image_name: str = None) -> Tuple
             docker_base = _docker_api_base(registry.api_url, repo)
             return art_get_manifest(docker_base, token, image_name, tag)
         return art_get_manifest(registry.api_url, token, repo, tag)
-    from .acr import get_manifest as acr_get_manifest
-    return acr_get_manifest(registry.api_url, token, repo, tag)
+    provider = _get_provider(registry.provider)
+    return provider['get_manifest'](registry.api_url, token, repo, tag)
 
 
 def image_ref_repo_key(registry_base_url: str, image_ref: str) -> Optional[str]:
@@ -110,14 +166,11 @@ def image_ref_repo_key(registry_base_url: str, image_ref: str) -> Optional[str]:
 
 
 def get_image_digest(registry, image_ref: str) -> Optional[str]:
-    """Get image digest from the registry (ACR or Artifactory)."""
+    """Get image digest from the registry."""
     if not registry:
         return None
-    if registry.provider == 'jfrog':
-        from .artifactory import get_artifactory_image_digest
-        return get_artifactory_image_digest(registry.api_url, get_bearer_token(registry), image_ref)
-    from .acr import get_acr_image_digest
-    return get_acr_image_digest(registry.api_url, get_bearer_token(registry), image_ref)
+    provider = _get_provider(registry.provider)
+    return provider['get_image_digest'](registry.api_url, get_bearer_token(registry), image_ref)
 
 
 def build_fallback_image_ref(fallback_repository, image_ref: str) -> Optional[str]:
@@ -215,12 +268,8 @@ def get_repo_images(registry, repo_key: str, package_type: str = 'docker') -> li
 def get_helm_images(registry, repo: str, digest: str) -> List[str]:
     """Extract image references from a Helm chart blob."""
     token = get_bearer_token(registry)
-    api_url = registry.api_url if registry else None
-    if registry and registry.provider == 'jfrog':
-        from .artifactory import get_helm_images as art_get_helm_images
-        return art_get_helm_images(api_url, token, repo, digest)
-    from .acr import get_helm_images as acr_get_helm_images
-    return acr_get_helm_images(api_url, token, repo, digest)
+    provider = _get_provider(registry.provider)
+    return provider['get_helm_images'](registry.api_url if registry else None, token, repo, digest)
 
 
 def get_helm_chart_versions(registry, repo_key: str) -> list:

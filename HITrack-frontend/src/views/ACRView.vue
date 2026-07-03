@@ -464,6 +464,7 @@ interface RepoItem {
 
 const providerOptions: { title: string; value: RegistryProvider }[] = [
   { title: 'Azure Container Registry', value: 'acr' },
+  { title: 'Amazon Elastic Container Registry', value: 'ecr' },
   { title: 'JFrog Artifactory', value: 'jfrog' }
 ]
 
@@ -546,20 +547,20 @@ const canAdvance = computed(() => {
 })
 
 const registrySelectLabel = computed(() =>
-  isJfrog.value ? 'Select Artifactory Registry' : 'Select ACR Registry'
+  isJfrog.value ? 'Select Artifactory Registry' : (provider.value === 'ecr' ? 'Select ECR Registry' : 'Select ACR Registry')
 )
 const addFromButtonLabel = computed(() =>
-  isJfrog.value ? 'Add from Artifactory' : 'Add from ACR'
+  isJfrog.value ? 'Add from Artifactory' : (provider.value === 'ecr' ? 'Add from ECR' : 'Add from ACR')
 )
 const noRegistryMessage = computed(() =>
   isJfrog.value
     ? 'No JFrog Artifactory registry found in database'
-    : 'No Azure Container Registry found in database'
+    : (provider.value === 'ecr' ? 'No Amazon Elastic Container Registry found in database' : 'No Azure Container Registry found in database')
 )
 const dialogTitle = computed(() =>
   isJfrog.value
     ? 'Add Repositories (Artifactory)'
-    : 'Add Repositories (ACR)'
+    : (provider.value === 'ecr' ? 'Add Repositories (ECR)' : 'Add Repositories (ACR)')
 )
 
 const filteredRepositories = computed(() => {
@@ -769,7 +770,7 @@ const registryNameByUuid = (uuid: string) => {
 const loadAllRegistries = async () => {
   try {
     const results: { uuid: string; name: string; provider: string }[] = []
-    for (const prov of ['acr', 'jfrog'] as const) {
+    for (const prov of ['acr', 'jfrog', 'ecr'] as const) {
       const resp = await api.get('registries/', { params: { provider: prov } })
       for (const r of resp.data.registries ?? []) {
         results.push({ uuid: r.uuid, name: r.name, provider: prov })

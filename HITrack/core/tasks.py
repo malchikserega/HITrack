@@ -1943,8 +1943,10 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
                 # Try with registry authentication
                 registry_host = image_ref.split('/')[0]
                 logger.info(f"First pull failed, trying with registry authentication for {registry_host}")
-                # Artifactory uses username/password; ACR uses token with special username
-                if getattr(registry, 'provider', None) == 'jfrog':
+                # Artifactory uses username/password; ECR uses 'AWS' username with token;
+                # ACR uses token with special username
+                provider = getattr(registry, 'provider', None)
+                if provider == 'jfrog':
                     login_process = subprocess.Popen(
                         ["docker", "login", registry_host, "-u", registry.login, "--password-stdin"],
                         stdin=subprocess.PIPE,
@@ -1953,6 +1955,21 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
                         text=True
                     )
                     _, stderr = login_process.communicate(input=registry.password)
+                elif provider == 'ecr':
+                    # ECR auth token is base64('AWS:<password>'); decode to get the password
+                    import base64
+                    try:
+                        ecr_password = base64.b64decode(token).decode().split(':', 1)[1]
+                    except Exception:
+                        ecr_password = token
+                    login_process = subprocess.Popen(
+                        ["docker", "login", registry_host, "-u", "AWS", "--password-stdin"],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True
+                    )
+                    _, stderr = login_process.communicate(input=ecr_password)
                 else:
                     login_process = subprocess.Popen(
                         ["docker", "login", registry_host, "-u", "00000000-0000-0000-0000-000000000000", "--password-stdin"],
@@ -2238,8 +2255,12 @@ def scan_repository(repository_name: str, repository_url: str, scan_option: str)
                 registry = ContainerRegistry.objects.get(provider='acr')
                 logger.warning(f"No ContainerRegistry found for {registry_name}, using default ACR")
             except ContainerRegistry.DoesNotExist:
-                registry = ContainerRegistry.objects.get(provider='jfrog')
-                logger.warning(f"No ContainerRegistry found for {registry_name}, using default Artifactory")
+                try:
+                    registry = ContainerRegistry.objects.get(provider='jfrog')
+                    logger.warning(f"No ContainerRegistry found for {registry_name}, using default Artifactory")
+                except ContainerRegistry.DoesNotExist:
+                    registry = ContainerRegistry.objects.get(provider='ecr')
+                    logger.warning(f"No ContainerRegistry found for {registry_name}, using default ECR")
 
         # Get or create repository
         repository, created = Repository.objects.get_or_create(

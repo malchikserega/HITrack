@@ -6,6 +6,7 @@ class ContainerRegistry(models.Model):
         ('acr', 'Azure Container Registry'),
         ('gcr', 'Google Container Registry'),
         ('jfrog', 'JFrog Artifactory'),
+        ('ecr', 'Amazon Elastic Container Registry'),
         ('dockerhub', 'Docker Hub'),
         ('harbor', 'Harbor'),
     ]

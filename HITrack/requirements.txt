@@ -19,3 +19,4 @@ gunicorn
 openpyxl
 packaging
 xlsxwriter
+boto3

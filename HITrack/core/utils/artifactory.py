@@ -513,3 +513,17 @@ def get_artifactory_image_digest(registry_url: str, token: str, image_ref: str) 
         image_ref,
     )
     return _digest_from_docker_pull(image_ref)
+
+
+# ---------------------------------------------------------------------------
+# Provider dispatch table
+# ---------------------------------------------------------------------------
+
+PROVIDER_FUNCTIONS = {
+    'get_bearer_token': get_bearer_token,
+    'get_repositories': get_repositories,
+    'get_tags': get_tags,
+    'get_manifest': get_manifest,
+    'get_helm_images': get_helm_images,
+    'get_image_digest': get_artifactory_image_digest,
+}
