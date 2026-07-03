@@ -17,6 +17,12 @@ class ContainerRegistry(models.Model):
     password = models.CharField(max_length=256, blank=True)
     token = models.TextField(blank=True, null=True)
     last_sync = models.DateTimeField(null=True, blank=True)
+    image_fallback_repositories = models.JSONField(
+        default=list,
+        blank=True,
+        help_text='Fallback Docker repos for Helm image resolution. '
+                  'Each entry: {"url": "...", "name": "...", "registry_uuid": "..."}',
+    )
 
     class Meta:
         verbose_name_plural = "Registry"
@@ -104,6 +110,43 @@ class RepositoryTag(models.Model):
         return f"{self.repository.name}:{self.tag}"
 
 
+class RepositoryTagScanSnapshot(models.Model):
+    uuid = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    repository_tag = models.ForeignKey(
+        RepositoryTag,
+        on_delete=models.CASCADE,
+        related_name='scan_snapshots',
+    )
+    processing_status = models.CharField(max_length=32, default='success')
+    total_images = models.IntegerField(default=0)
+    successful_images = models.IntegerField(default=0)
+    unique_vulnerabilities_count = models.IntegerField(default=0)
+    weighted_risk_score = models.FloatField(default=0.0)
+    previous_unique_vulnerabilities_count = models.IntegerField(default=0)
+    new_vulnerabilities_count = models.IntegerField(default=0)
+    fixed_vulnerabilities_count = models.IntegerField(default=0)
+    severity_increased_count = models.IntegerField(default=0)
+    new_kev_relevant_count = models.IntegerField(default=0)
+    risk_score_delta = models.FloatField(default=0.0)
+    has_changes = models.BooleanField(default=False)
+    fixability_breakdown = models.JSONField(default=dict, blank=True)
+    vulnerability_state = models.JSONField(default=dict, blank=True)
+    delta_summary = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Repository Tag Scan Snapshot'
+        verbose_name_plural = 'Repository Tag Scan Snapshots'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['repository_tag', '-created_at']),
+            models.Index(fields=['has_changes', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f"Snapshot for {self.repository_tag} at {self.created_at.isoformat()}"
+
+
 class Image(models.Model):
     uuid = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=255)
@@ -123,12 +166,30 @@ class Image(models.Model):
         ],
         default='none'
     )
+    lineage_label = models.CharField(max_length=255, default='unknown')
+    lineage_source = models.CharField(max_length=64, default='unknown')
+    os_distro_name = models.CharField(max_length=255, null=True, blank=True)
+    os_distro_version = models.CharField(max_length=255, null=True, blank=True)
+    lineage_updated_at = models.DateTimeField(null=True, blank=True)
+    os_eol_status = models.CharField(max_length=32, default='unknown')
+    os_eol_source = models.CharField(max_length=32, default='unknown')
+    os_eol_message = models.CharField(max_length=255, null=True, blank=True)
+    os_eol_checked_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         indexes = [
             models.Index(fields=['scan_status']),
+            models.Index(fields=['os_eol_status']),
+            models.Index(
+                fields=['scan_status', 'lineage_label', 'lineage_source'],
+                name='core_image_scan_lineage_idx',
+            ),
+            models.Index(
+                fields=['lineage_label', 'lineage_source'],
+                name='core_image_lineage_idx',
+            ),
         ]
 
     def __str__(self):
@@ -172,6 +233,68 @@ class ComponentVersion(models.Model):
         return f"{self.component.name} {self.version}"
 
 
+class ImageComponentVersionContext(models.Model):
+    DEPENDENCY_SCOPE_CHOICES = [
+        ('direct', 'Direct'),
+        ('transitive', 'Transitive'),
+        ('unknown', 'Unknown'),
+    ]
+    PACKAGE_SCOPE_CHOICES = [
+        ('runtime', 'Runtime'),
+        ('development', 'Development'),
+        ('build', 'Build'),
+        ('test', 'Test'),
+        ('optional', 'Optional'),
+        ('unknown', 'Unknown'),
+    ]
+
+    uuid = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    image = models.ForeignKey(Image, on_delete=models.CASCADE, related_name='component_contexts')
+    component_version = models.ForeignKey(
+        ComponentVersion,
+        on_delete=models.CASCADE,
+        related_name='image_contexts',
+    )
+    cataloger = models.CharField(max_length=128, blank=True, default='')
+    metadata_type = models.CharField(max_length=128, blank=True, default='')
+    dependency_scope = models.CharField(
+        max_length=16,
+        choices=DEPENDENCY_SCOPE_CHOICES,
+        default='unknown',
+    )
+    dependency_depth = models.PositiveIntegerField(null=True, blank=True)
+    immediate_parent_name = models.CharField(max_length=255, null=True, blank=True)
+    immediate_parent_version = models.CharField(max_length=255, null=True, blank=True)
+    direct_introducer_name = models.CharField(max_length=255, null=True, blank=True)
+    direct_introducer_version = models.CharField(max_length=255, null=True, blank=True)
+    package_scope = models.CharField(
+        max_length=16,
+        choices=PACKAGE_SCOPE_CHOICES,
+        default='unknown',
+    )
+    package_arch = models.CharField(max_length=64, null=True, blank=True)
+    package_distro = models.CharField(max_length=255, null=True, blank=True)
+    package_repo = models.CharField(max_length=255, null=True, blank=True)
+    package_channel = models.CharField(max_length=255, null=True, blank=True)
+    source_package = models.CharField(max_length=255, null=True, blank=True)
+    source_package_version = models.CharField(max_length=255, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = [('image', 'component_version')]
+        indexes = [
+            models.Index(fields=['image', 'dependency_scope']),
+            models.Index(fields=['component_version']),
+            models.Index(fields=['package_arch']),
+            models.Index(fields=['source_package']),
+            models.Index(fields=['package_scope']),
+        ]
+
+    def __str__(self):
+        return f"{self.component_version} in {self.image.name}"
+
+
 class Vulnerability(models.Model):
     uuid = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     vulnerability_id = models.CharField(max_length=255, unique=True)
@@ -202,6 +325,178 @@ class Vulnerability(models.Model):
 
     def __str__(self):
         return f"{self.vulnerability_id} ({self.severity})"
+
+
+class ThreatIntelSnapshot(models.Model):
+    uuid = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    snapshot_date = models.DateField(unique=True)
+    period_start = models.DateField()
+    period_end = models.DateField()
+    observed_this_week = models.JSONField(default=dict, blank=True)
+    kev_added_this_week = models.JSONField(default=dict, blank=True)
+    supply_chain_this_week = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Threat Intel Snapshot'
+        verbose_name_plural = 'Threat Intel Snapshots'
+        ordering = ['-snapshot_date', '-updated_at']
+        indexes = [
+            models.Index(fields=['period_start', 'period_end']),
+        ]
+
+    def __str__(self):
+        return f"Threat intel snapshot for {self.snapshot_date.isoformat()}"
+
+
+class SharedRootCauseAnalyticsSnapshot(models.Model):
+    uuid = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    snapshot_date = models.DateField(unique=True)
+    total_items = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Shared Root Cause Analytics Snapshot'
+        verbose_name_plural = 'Shared Root Cause Analytics Snapshots'
+        ordering = ['-snapshot_date', '-updated_at']
+
+    def __str__(self):
+        return f"Shared root-cause snapshot for {self.snapshot_date.isoformat()}"
+
+
+class SharedRootCauseAnalyticsSnapshotRow(models.Model):
+    uuid = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    snapshot = models.ForeignKey(
+        SharedRootCauseAnalyticsSnapshot,
+        on_delete=models.CASCADE,
+        related_name='rows',
+    )
+    component_version_uuid = models.UUIDField()
+    component_uuid = models.UUIDField()
+    component_name = models.CharField(max_length=255)
+    version = models.CharField(max_length=255)
+    component_type = models.CharField(max_length=50, default='unknown')
+    purl = models.CharField(max_length=512, null=True, blank=True)
+    latest_version = models.CharField(max_length=255, null=True, blank=True)
+    affected_repositories_count = models.IntegerField(default=0)
+    affected_tags_count = models.IntegerField(default=0)
+    affected_releases_count = models.IntegerField(default=0)
+    affected_images_count = models.IntegerField(default=0)
+    vulnerabilities_count = models.IntegerField(default=0)
+    critical_vulnerabilities_count = models.IntegerField(default=0)
+    high_vulnerabilities_count = models.IntegerField(default=0)
+    kev_vulnerabilities_count = models.IntegerField(default=0)
+    exploit_vulnerabilities_count = models.IntegerField(default=0)
+    weighted_risk_score = models.FloatField(default=0.0)
+    max_fix_priority = models.IntegerField(default=0)
+    fixability_category = models.CharField(max_length=64, default='fix_unknown')
+    fixable_now_count = models.IntegerField(default=0)
+    fix_exists_but_not_in_repo_count = models.IntegerField(default=0)
+    no_fix_count = models.IntegerField(default=0)
+    fix_unknown_count = models.IntegerField(default=0)
+    latest_seen_at = models.DateTimeField(null=True, blank=True)
+    repositories_preview = models.JSONField(default=list, blank=True)
+    vulnerabilities_preview = models.JSONField(default=list, blank=True)
+
+    class Meta:
+        verbose_name = 'Shared Root Cause Analytics Snapshot Row'
+        verbose_name_plural = 'Shared Root Cause Analytics Snapshot Rows'
+        ordering = ['-weighted_risk_score', 'component_name', 'version']
+        unique_together = [('snapshot', 'component_version_uuid')]
+        indexes = [
+            models.Index(fields=['snapshot', '-weighted_risk_score']),
+            models.Index(fields=['snapshot', 'component_type']),
+            models.Index(fields=['snapshot', 'max_fix_priority']),
+            models.Index(fields=['snapshot', 'component_name']),
+            models.Index(fields=['snapshot', '-affected_repositories_count']),
+        ]
+
+    def __str__(self):
+        return f"{self.component_name}@{self.version} ({self.snapshot.snapshot_date.isoformat()})"
+
+    @property
+    def fixability_breakdown(self):
+        return {
+            'fixable_now': self.fixable_now_count,
+            'fix_exists_but_not_in_repo': self.fix_exists_but_not_in_repo_count,
+            'no_fix': self.no_fix_count,
+            'fix_unknown': self.fix_unknown_count,
+        }
+
+
+class BaseLineageRootCauseAnalyticsSnapshot(models.Model):
+    uuid = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    snapshot_date = models.DateField(unique=True)
+    total_items = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Base Lineage Root Cause Analytics Snapshot'
+        verbose_name_plural = 'Base Lineage Root Cause Analytics Snapshots'
+        ordering = ['-snapshot_date', '-updated_at']
+
+    def __str__(self):
+        return f"Base-lineage root-cause snapshot for {self.snapshot_date.isoformat()}"
+
+
+class BaseLineageRootCauseAnalyticsSnapshotRow(models.Model):
+    uuid = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    snapshot = models.ForeignKey(
+        BaseLineageRootCauseAnalyticsSnapshot,
+        on_delete=models.CASCADE,
+        related_name='rows',
+    )
+    key = models.CharField(max_length=255)
+    lineage_label = models.CharField(max_length=255)
+    lineage_source = models.CharField(max_length=64, default='unknown')
+    affected_repositories_count = models.IntegerField(default=0)
+    affected_tags_count = models.IntegerField(default=0)
+    affected_releases_count = models.IntegerField(default=0)
+    affected_images_count = models.IntegerField(default=0)
+    vulnerabilities_count = models.IntegerField(default=0)
+    critical_vulnerabilities_count = models.IntegerField(default=0)
+    high_vulnerabilities_count = models.IntegerField(default=0)
+    kev_vulnerabilities_count = models.IntegerField(default=0)
+    exploit_vulnerabilities_count = models.IntegerField(default=0)
+    weighted_risk_score = models.FloatField(default=0.0)
+    max_fix_priority = models.IntegerField(default=0)
+    fixability_category = models.CharField(max_length=64, default='fix_unknown')
+    fixable_now_count = models.IntegerField(default=0)
+    fix_exists_but_not_in_repo_count = models.IntegerField(default=0)
+    no_fix_count = models.IntegerField(default=0)
+    fix_unknown_count = models.IntegerField(default=0)
+    latest_seen_at = models.DateTimeField(null=True, blank=True)
+    repositories_preview = models.JSONField(default=list, blank=True)
+    components_preview = models.JSONField(default=list, blank=True)
+    vulnerabilities_preview = models.JSONField(default=list, blank=True)
+
+    class Meta:
+        verbose_name = 'Base Lineage Root Cause Analytics Snapshot Row'
+        verbose_name_plural = 'Base Lineage Root Cause Analytics Snapshot Rows'
+        ordering = ['-weighted_risk_score', 'lineage_label']
+        unique_together = [('snapshot', 'key')]
+        indexes = [
+            models.Index(fields=['snapshot', '-weighted_risk_score']),
+            models.Index(fields=['snapshot', 'lineage_label']),
+            models.Index(fields=['snapshot', 'lineage_source']),
+            models.Index(fields=['snapshot', 'max_fix_priority']),
+            models.Index(fields=['snapshot', '-affected_repositories_count']),
+        ]
+
+    def __str__(self):
+        return f"{self.lineage_label} ({self.snapshot.snapshot_date.isoformat()})"
+
+    @property
+    def fixability_breakdown(self):
+        return {
+            'fixable_now': self.fixable_now_count,
+            'fix_exists_but_not_in_repo': self.fix_exists_but_not_in_repo_count,
+            'no_fix': self.no_fix_count,
+            'fix_unknown': self.fix_unknown_count,
+        }
 
 
 class VulnerabilityDetails(models.Model):

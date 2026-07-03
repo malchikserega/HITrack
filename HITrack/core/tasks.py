@@ -35,10 +35,242 @@ logger = logging.getLogger(__name__)
 # Remove debug logging in production
 DEBUG_LOGGING = os.getenv('DEBUG_LOGGING', 'False').lower() == 'true'
 
+# SBOM task: docker pull + Syft/Grype often exceeds global CELERY_TASK_SOFT_TIME_LIMIT (420s)
+GENERATE_SBOM_SOFT_TIME_LIMIT = int(os.getenv("HITRACK_SBOM_SOFT_TIME_LIMIT", "3600"))
+GENERATE_SBOM_TIME_LIMIT = int(os.getenv("HITRACK_SBOM_TIME_LIMIT", "4200"))
+
 DOCKER_IMAGE_REGEX = re.compile(r'^[a-zA-Z0-9._/-]+(:[a-zA-Z0-9._-]+)?$')
+_LINEAGE_SOURCE_PRIORITY = {
+    'unknown': 0,
+    'package_distro': 1,
+    'sbom_distro': 2,
+}
+_OS_EOL_STATUS_PRIORITY = {
+    'unknown': 0,
+    'supported': 1,
+    'eol': 2,
+}
 
 def is_safe_image_ref(image_ref: str) -> bool:
     return bool(DOCKER_IMAGE_REGEX.match(image_ref)) and len(image_ref) < 200
+
+
+def _apply_image_lineage_fields(image, component_version_purls=None):
+    from .utils.lineage import derive_image_lineage, image_lineage_to_update_fields
+
+    if component_version_purls is None:
+        component_version_purls = image.component_versions.filter(
+            component__type__in=['deb', 'rpm', 'apk']
+        ).values_list('purl', flat=True)
+
+    lineage = derive_image_lineage(
+        sbom_data=image.sbom_data,
+        component_version_purls=component_version_purls,
+    )
+    desired_fields = image_lineage_to_update_fields(lineage)
+    update_fields = []
+
+    for field_name, desired_value in desired_fields.items():
+        if getattr(image, field_name) != desired_value:
+            setattr(image, field_name, desired_value)
+            update_fields.append(field_name)
+
+    if update_fields or image.lineage_updated_at is None:
+        image.lineage_updated_at = timezone.now()
+        update_fields.append('lineage_updated_at')
+
+    return update_fields
+
+
+def _copy_image_lineage_fields(source_image, target_image):
+    source_priority = _LINEAGE_SOURCE_PRIORITY.get(source_image.lineage_source or 'unknown', 0)
+    target_priority = _LINEAGE_SOURCE_PRIORITY.get(target_image.lineage_source or 'unknown', 0)
+
+    if source_priority == 0:
+        return []
+
+    should_replace = (
+        target_priority == 0
+        or source_priority > target_priority
+        or (
+            source_priority == target_priority
+            and (target_image.lineage_updated_at is None or (
+                source_image.lineage_updated_at and source_image.lineage_updated_at > target_image.lineage_updated_at
+            ))
+        )
+    )
+    if not should_replace:
+        return []
+
+    update_fields = []
+    for field_name in ('lineage_label', 'lineage_source', 'os_distro_name', 'os_distro_version'):
+        source_value = getattr(source_image, field_name)
+        if getattr(target_image, field_name) != source_value:
+            setattr(target_image, field_name, source_value)
+            update_fields.append(field_name)
+
+    if update_fields:
+        target_image.lineage_updated_at = source_image.lineage_updated_at or timezone.now()
+        update_fields.append('lineage_updated_at')
+
+    return update_fields
+
+
+def _apply_image_os_eol_fields(image, grype_data=None):
+    from .utils.os_eol import derive_image_os_eol_status, image_os_eol_to_update_fields
+
+    image_os_eol = derive_image_os_eol_status(
+        grype_data=grype_data if grype_data is not None else image.grype_data,
+        os_distro_name=image.os_distro_name,
+        lineage_label=image.lineage_label,
+    )
+    desired_fields = image_os_eol_to_update_fields(image_os_eol)
+    update_fields = []
+
+    for field_name, desired_value in desired_fields.items():
+        if getattr(image, field_name) != desired_value:
+            setattr(image, field_name, desired_value)
+            update_fields.append(field_name)
+
+    if update_fields or image.os_eol_checked_at is None:
+        image.os_eol_checked_at = timezone.now()
+        update_fields.append('os_eol_checked_at')
+
+    return update_fields
+
+
+def _copy_image_os_eol_fields(source_image, target_image):
+    source_priority = _OS_EOL_STATUS_PRIORITY.get(source_image.os_eol_status or 'unknown', 0)
+    target_priority = _OS_EOL_STATUS_PRIORITY.get(target_image.os_eol_status or 'unknown', 0)
+
+    if source_priority == 0:
+        return []
+
+    should_replace = (
+        target_priority == 0
+        or source_priority > target_priority
+        or (
+            source_priority == target_priority
+            and (target_image.os_eol_checked_at is None or (
+                source_image.os_eol_checked_at and source_image.os_eol_checked_at > target_image.os_eol_checked_at
+            ))
+        )
+    )
+    if not should_replace:
+        return []
+
+    update_fields = []
+    for field_name in ('os_eol_status', 'os_eol_source', 'os_eol_message'):
+        source_value = getattr(source_image, field_name)
+        if getattr(target_image, field_name) != source_value:
+            setattr(target_image, field_name, source_value)
+            update_fields.append(field_name)
+
+    if update_fields:
+        target_image.os_eol_checked_at = source_image.os_eol_checked_at or timezone.now()
+        update_fields.append('os_eol_checked_at')
+
+    return update_fields
+
+
+def _upsert_image_component_version_contexts(image, sbom_data=None):
+    from .models import ComponentVersion, ImageComponentVersionContext
+    from .utils.sbom_context import build_image_component_context_map
+
+    current_sbom_data = sbom_data if sbom_data is not None else image.sbom_data
+    if not current_sbom_data:
+        return {
+            'contexts_created': 0,
+            'contexts_updated': 0,
+            'contexts_deleted': 0,
+        }
+
+    context_map = build_image_component_context_map(current_sbom_data)
+    component_versions = list(
+        ComponentVersion.objects.filter(images=image).select_related('component')
+    )
+    component_version_by_key = {
+        (component_version.component.name, component_version.version): component_version
+        for component_version in component_versions
+    }
+    existing_contexts = {
+        context.component_version_id: context
+        for context in ImageComponentVersionContext.objects.filter(image=image)
+    }
+
+    to_create = []
+    to_update = []
+    matched_component_version_ids = set()
+    now = timezone.now()
+
+    field_names = [
+        'cataloger',
+        'metadata_type',
+        'dependency_scope',
+        'dependency_depth',
+        'immediate_parent_name',
+        'immediate_parent_version',
+        'direct_introducer_name',
+        'direct_introducer_version',
+        'package_scope',
+        'package_arch',
+        'package_distro',
+        'package_repo',
+        'package_channel',
+        'source_package',
+        'source_package_version',
+    ]
+
+    for key, context_data in context_map.items():
+        component_version = component_version_by_key.get(key)
+        if component_version is None:
+            continue
+        matched_component_version_ids.add(component_version.pk)
+        existing_context = existing_contexts.get(component_version.pk)
+
+        if existing_context is None:
+            to_create.append(
+                ImageComponentVersionContext(
+                    image=image,
+                    component_version=component_version,
+                    **{field_name: context_data.get(field_name) for field_name in field_names},
+                )
+            )
+            continue
+
+        updated = False
+        for field_name in field_names:
+            desired_value = context_data.get(field_name)
+            if getattr(existing_context, field_name) != desired_value:
+                setattr(existing_context, field_name, desired_value)
+                updated = True
+        if updated:
+            existing_context.updated_at = now
+            to_update.append(existing_context)
+
+    stale_context_ids = [
+        context.uuid
+        for component_version_id, context in existing_contexts.items()
+        if component_version_id not in matched_component_version_ids
+    ]
+    contexts_deleted = 0
+    if stale_context_ids:
+        contexts_deleted = ImageComponentVersionContext.objects.filter(uuid__in=stale_context_ids).delete()[0]
+
+    if to_create:
+        ImageComponentVersionContext.objects.bulk_create(to_create, batch_size=500)
+    if to_update:
+        ImageComponentVersionContext.objects.bulk_update(
+            to_update,
+            field_names + ['updated_at'],
+            batch_size=500,
+        )
+
+    return {
+        'contexts_created': len(to_create),
+        'contexts_updated': len(to_update),
+        'contexts_deleted': contexts_deleted,
+    }
 
 
 _PKG_VERSION_CACHE_TTL = 3600  # 1 hour
@@ -512,9 +744,11 @@ def _run_bulk_component_latest_version_update(
 
 
 def _is_supported_vulnerability_enrichment_target(vulnerability_id: str, vulnerability_type: str | None = None) -> bool:
-    if vulnerability_type and str(vulnerability_type).upper() == 'CVE':
+    normalized_type = str(vulnerability_type or '').upper()
+    normalized_id = str(vulnerability_id or '').upper()
+    if normalized_type in {'CVE', 'GHSA'}:
         return True
-    return bool(vulnerability_id and vulnerability_id.upper().startswith('CVE-'))
+    return normalized_id.startswith('CVE-') or normalized_id.startswith('GHSA-')
 
 
 def _dedupe_preserve_order(values):
@@ -538,6 +772,9 @@ def _build_vulnerability_data_sources(cve_details, exploit_info):
     if cve_details:
         if cve_details.get('epss_data_source'):
             data_sources.append(cve_details['epss_data_source'])
+        explicit_detail_sources = cve_details.get('_detail_sources')
+        if explicit_detail_sources:
+            data_sources.extend(explicit_detail_sources)
         cve_detail_fields = {
             'cve_details_score',
             'cve_details_severity',
@@ -546,7 +783,10 @@ def _build_vulnerability_data_sources(cve_details, exploit_info):
             'cve_details_summary',
             'cve_details_references',
         }
-        if any(cve_details.get(field) is not None for field in cve_detail_fields):
+        if (
+            any(cve_details.get(field) is not None for field in cve_detail_fields)
+            and not explicit_detail_sources
+        ):
             data_sources.append('CVE-CIRCL')
     if exploit_info:
         if exploit_info.get('cisa_kev_known_exploited'):
@@ -830,6 +1070,332 @@ def _resolve_repository_tag_image_digest(tag, image_ref, registry):
     return resolved_digest
 
 
+def _registry_host(value):
+    raw_value = str(value or '').strip()
+    if not raw_value:
+        return None
+
+    if raw_value.startswith(('http://', 'https://')):
+        raw_value = urlparse(raw_value).netloc
+
+    return raw_value.split('/', 1)[0] if raw_value else None
+
+
+def _parse_image_reference(image_ref):
+    raw_reference = str(image_ref or '').strip()
+    if not raw_reference:
+        return None
+
+    digest = None
+    tag = None
+    path = raw_reference
+
+    if '@' in path:
+        path, digest = path.rsplit('@', 1)
+        digest = _normalize_image_digest(digest)
+
+    last_segment = path.rsplit('/', 1)[-1]
+    if ':' in last_segment:
+        path, tag = path.rsplit(':', 1)
+
+    segments = [segment for segment in path.split('/') if segment]
+    if not segments:
+        return None
+
+    host = None
+    if len(segments) > 1 and (
+        '.' in segments[0] or ':' in segments[0] or segments[0] == 'localhost'
+    ):
+        host = segments[0]
+        repository = '/'.join(segments[1:])
+    else:
+        repository = '/'.join(segments)
+
+    return {
+        'host': host,
+        'repository': repository,
+        'tag': tag,
+        'digest': digest,
+    }
+
+
+def _compose_image_reference(host, repository, tag=None, digest=None):
+    if not repository:
+        return None
+
+    base = f"{host}/{repository}" if host else repository
+    normalized_digest = _normalize_image_digest(digest)
+    if normalized_digest:
+        return f"{base}@{normalized_digest}"
+    if tag:
+        return f"{base}:{tag}"
+    return base
+
+
+def _repository_path_from_url(repository_url):
+    parsed = _parse_image_reference(repository_url)
+    if parsed:
+        return parsed['repository']
+
+    raw_url = str(repository_url or '').strip()
+    if not raw_url:
+        return None
+    if raw_url.startswith(('http://', 'https://')):
+        parsed_url = urlparse(raw_url)
+        return parsed_url.path.lstrip('/') or None
+    return raw_url.split('/', 1)[1] if '/' in raw_url else None
+
+
+def _derive_same_registry_image_candidates(repository, registry, image_ref):
+    parsed_ref = _parse_image_reference(image_ref)
+    if not parsed_ref or not parsed_ref.get('repository'):
+        return [image_ref]
+
+    registry_host = (
+        _registry_host(getattr(registry, 'api_url', None))
+        or parsed_ref.get('host')
+        or _registry_host(repository.url)
+    )
+    repo_path = parsed_ref['repository']
+
+    candidate_paths = [repo_path]
+    if repo_path.startswith('helm/'):
+        candidate_paths.append(repo_path.removeprefix('helm/'))
+
+    for chart_repo_path in filter(None, [repository.name, _repository_path_from_url(repository.url)]):
+        if repo_path == chart_repo_path and chart_repo_path.startswith('helm/'):
+            candidate_paths.append(chart_repo_path.removeprefix('helm/'))
+        if repo_path.startswith(f"{chart_repo_path}/") and chart_repo_path.startswith('helm/'):
+            candidate_paths.append(
+                f"{chart_repo_path.removeprefix('helm/')}{repo_path[len(chart_repo_path):]}"
+            )
+
+    candidates = []
+    for candidate_path in _dedupe_preserve_order(candidate_paths):
+        candidate_ref = _compose_image_reference(
+            registry_host or parsed_ref.get('host'),
+            candidate_path,
+            tag=parsed_ref.get('tag'),
+            digest=parsed_ref.get('digest'),
+        )
+        if candidate_ref:
+            candidates.append(candidate_ref)
+
+    return _dedupe_preserve_order(candidates or [image_ref])
+
+
+def _resolve_helm_image_location(repository, repo_tag, registry, image_ref):
+    from .models import ContainerRegistry, Image
+    from .utils.registry import (
+        build_fallback_image_ref,
+        build_fallback_image_ref_from_url,
+        get_image_digest,
+        to_docker_pull_ref,
+    )
+
+    chart_ref = _repository_tag_image_ref(repository, repo_tag, registry)
+    existing_image = (
+        Image.objects.filter(name=image_ref)
+        .order_by('-updated_at')
+        .first()
+    )
+    if existing_image and (
+        _has_completed_image_payload(existing_image)
+        or (
+            existing_image.digest
+            and existing_image.artifact_reference
+            and existing_image.artifact_reference != chart_ref
+        )
+    ):
+        return (
+            existing_image.name,
+            _normalize_image_digest(existing_image.digest),
+            existing_image.artifact_reference or existing_image.name,
+            None,
+        )
+
+    if registry:
+        try:
+            original_digest = _normalize_image_digest(
+                get_image_digest(registry, image_ref)
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to resolve Helm child image digest for original ref %s: %s",
+                image_ref,
+                exc,
+            )
+            original_digest = None
+        if original_digest:
+            resolved_pull_ref = (
+                to_docker_pull_ref(image_ref)
+                if "/artifactory/" in image_ref
+                else image_ref
+            )
+            return (
+                resolved_pull_ref,
+                original_digest,
+                resolved_pull_ref,
+                None,
+            )
+
+    candidate_refs = _derive_same_registry_image_candidates(repository, registry, image_ref)
+
+    for candidate_ref in candidate_refs:
+        try:
+            candidate_digest = _normalize_image_digest(get_image_digest(registry, candidate_ref))
+        except Exception as exc:
+            logger.warning(
+                "Failed to resolve Helm child image digest for %s via %s: %s",
+                candidate_ref,
+                getattr(registry, 'name', 'unknown'),
+                exc,
+            )
+            candidate_digest = None
+
+        if candidate_digest:
+            resolved_pull_ref = to_docker_pull_ref(candidate_ref)
+            return (
+                resolved_pull_ref,
+                candidate_digest,
+                resolved_pull_ref,
+                None,
+            )
+
+    fallback_repositories = list(
+        repository.image_fallback_repositories.filter(
+            repository_type='docker',
+            container_registry__isnull=False,
+        ).select_related('container_registry')
+    )
+    for candidate_ref in candidate_refs:
+        for fallback_repository in fallback_repositories:
+            if not fallback_repository.container_registry:
+                continue
+            fallback_ref = build_fallback_image_ref(fallback_repository, candidate_ref)
+            if not fallback_ref:
+                continue
+            fallback_digest = _normalize_image_digest(
+                get_image_digest(fallback_repository.container_registry, fallback_ref)
+            )
+            if fallback_digest:
+                resolved_pull_ref = to_docker_pull_ref(fallback_ref)
+                return (
+                    resolved_pull_ref,
+                    fallback_digest,
+                    resolved_pull_ref,
+                    None,
+                )
+
+    for candidate_ref in candidate_refs:
+        for fallback_entry in (getattr(registry, 'image_fallback_repositories', None) or []):
+            fallback_url = fallback_entry.get('url') if isinstance(fallback_entry, dict) else None
+            auth_registry_uuid = fallback_entry.get('registry_uuid') if isinstance(fallback_entry, dict) else None
+            if not fallback_url or not auth_registry_uuid:
+                continue
+            auth_registry = ContainerRegistry.objects.filter(uuid=auth_registry_uuid).first()
+            if not auth_registry:
+                continue
+            fallback_ref = build_fallback_image_ref_from_url(fallback_url, candidate_ref)
+            if not fallback_ref:
+                continue
+            fallback_digest = _normalize_image_digest(get_image_digest(auth_registry, fallback_ref))
+            if fallback_digest:
+                resolved_pull_ref = to_docker_pull_ref(fallback_ref)
+                return (
+                    resolved_pull_ref,
+                    fallback_digest,
+                    resolved_pull_ref,
+                    None,
+                )
+
+    return (
+        None,
+        None,
+        None,
+        (
+            f"Could not resolve Helm child image {image_ref} in registry {getattr(registry, 'name', 'unknown')}. "
+            f"Tried: {', '.join(candidate_refs)}"
+        ),
+    )
+
+
+def _select_sbom_pull_reference(image, art_type='docker'):
+    chart_refs = set()
+    if art_type == 'helm':
+        for linked_tag in image.repository_tags.all():
+            repository = getattr(linked_tag, 'repository', None)
+            if not repository or repository.repository_type != 'helm':
+                continue
+            chart_refs.add(
+                _repository_tag_image_ref(
+                    repository,
+                    linked_tag,
+                    getattr(repository, 'container_registry', None),
+                )
+            )
+
+    candidates = []
+    artifact_ref = (image.artifact_reference or '').strip()
+    image_name = (image.name or '').strip()
+
+    if art_type == 'helm':
+        if artifact_ref and artifact_ref not in chart_refs and not artifact_ref.startswith(("http://", "https://")):
+            candidates.append(artifact_ref)
+        if image_name:
+            candidates.append(image_name)
+    else:
+        if artifact_ref and not artifact_ref.startswith(("http://", "https://")):
+            candidates.append(artifact_ref)
+        if image_name:
+            candidates.append(image_name)
+
+    for candidate in _dedupe_preserve_order(candidates):
+        if is_safe_image_ref(candidate):
+            return candidate
+
+    fallback_ref = image_name or artifact_ref
+    return fallback_ref
+
+
+def _reconcile_helm_tag_images(repo_tag, keep_image_ids):
+    keep_ids = set(keep_image_ids or [])
+    repository = repo_tag.repository
+    registry = repository.container_registry
+    chart_ref = _repository_tag_image_ref(repository, repo_tag, registry)
+    current_images = list(repo_tag.images.all())
+
+    if keep_ids:
+        repo_tag.images.set(list(keep_ids))
+    else:
+        repo_tag.images.clear()
+
+    removed_count = 0
+    deleted_count = 0
+
+    for image in current_images:
+        if image.pk in keep_ids:
+            continue
+        if image.artifact_reference != chart_ref:
+            continue
+
+        removed_count += 1
+        if (
+            not image.repository_tags.exclude(pk=repo_tag.pk).exists()
+            and image.sbom_data is None
+            and image.grype_data is None
+            and not image.component_versions.exists()
+            and not image.component_locations.exists()
+        ):
+            image.delete()
+            deleted_count += 1
+
+    return {
+        'removed_count': removed_count,
+        'deleted_count': deleted_count,
+    }
+
+
 def _has_completed_image_scan(image):
     return (
         image.scan_status == 'success' and
@@ -930,9 +1496,10 @@ def _get_or_create_canonical_image(name, digest=None, artifact_reference=None):
             if normalized_digest and image.digest != normalized_digest:
                 image.digest = normalized_digest
                 updated_fields.append('digest')
-            if artifact_reference and not image.artifact_reference:
-                image.artifact_reference = artifact_reference
-                updated_fields.append('artifact_reference')
+            if artifact_reference and artifact_reference != image.artifact_reference:
+                if not image.artifact_reference or not artifact_reference.startswith(("http://", "https://")):
+                    image.artifact_reference = artifact_reference
+                    updated_fields.append('artifact_reference')
             if updated_fields:
                 image.save(update_fields=updated_fields + ['updated_at'])
 
@@ -940,12 +1507,12 @@ def _get_or_create_canonical_image(name, digest=None, artifact_reference=None):
 
 
 def _propagate_image_completion_to_equivalent_images(image):
-    from .models import ComponentLocation
+    from .models import ComponentLocation, ImageComponentVersionContext
 
     duplicate_images = list(
         _equivalent_images_queryset(image.name, image.digest)
         .exclude(pk=image.pk)
-        .prefetch_related('repository_tags', 'component_versions', 'component_locations')
+        .prefetch_related('repository_tags', 'component_versions', 'component_locations', 'component_contexts')
     )
     if not duplicate_images:
         return list(image.repository_tags.values_list('pk', flat=True))
@@ -953,6 +1520,9 @@ def _propagate_image_completion_to_equivalent_images(image):
     source_component_versions = list(image.component_versions.values_list('pk', flat=True))
     source_locations = list(
         image.component_locations.select_related('component_version').all()
+    )
+    source_contexts = list(
+        image.component_contexts.select_related('component_version').all()
     )
     related_tag_ids = set(image.repository_tags.values_list('pk', flat=True))
 
@@ -973,6 +1543,8 @@ def _propagate_image_completion_to_equivalent_images(image):
                     'annotations': location.annotations,
                 },
             )
+        for context in source_contexts:
+            _merge_component_context_into_image(context, duplicate)
 
         update_fields = []
         if duplicate.digest != image.digest:
@@ -987,8 +1559,10 @@ def _propagate_image_completion_to_equivalent_images(image):
         if duplicate.scan_status != 'success':
             duplicate.scan_status = 'success'
             update_fields.append('scan_status')
+        update_fields.extend(_copy_image_lineage_fields(image, duplicate))
+        update_fields.extend(_copy_image_os_eol_fields(image, duplicate))
         if update_fields:
-            duplicate.save(update_fields=update_fields + ['updated_at'])
+            duplicate.save(update_fields=sorted(set(update_fields)) + ['updated_at'])
 
     return list(related_tag_ids)
 
@@ -1023,6 +1597,93 @@ def _merge_component_location_into_image(source_location, target_image):
     return False
 
 
+def _merge_component_context_into_image(source_context, target_image):
+    from .models import ImageComponentVersionContext
+
+    target_context, created = ImageComponentVersionContext.objects.get_or_create(
+        component_version=source_context.component_version,
+        image=target_image,
+        defaults={
+            'cataloger': source_context.cataloger,
+            'metadata_type': source_context.metadata_type,
+            'dependency_scope': source_context.dependency_scope,
+            'dependency_depth': source_context.dependency_depth,
+            'immediate_parent_name': source_context.immediate_parent_name,
+            'immediate_parent_version': source_context.immediate_parent_version,
+            'direct_introducer_name': source_context.direct_introducer_name,
+            'direct_introducer_version': source_context.direct_introducer_version,
+            'package_scope': source_context.package_scope,
+            'package_arch': source_context.package_arch,
+            'package_distro': source_context.package_distro,
+            'package_repo': source_context.package_repo,
+            'package_channel': source_context.package_channel,
+            'source_package': source_context.source_package,
+            'source_package_version': source_context.source_package_version,
+        },
+    )
+    if created:
+        return True
+
+    updated_fields = []
+    for field_name in (
+        'cataloger',
+        'metadata_type',
+        'immediate_parent_name',
+        'immediate_parent_version',
+        'direct_introducer_name',
+        'direct_introducer_version',
+        'package_arch',
+        'package_distro',
+        'package_repo',
+        'package_channel',
+        'source_package',
+        'source_package_version',
+    ):
+        current_value = getattr(target_context, field_name)
+        incoming_value = getattr(source_context, field_name)
+        if not current_value and incoming_value:
+            setattr(target_context, field_name, incoming_value)
+            updated_fields.append(field_name)
+
+    current_depth = target_context.dependency_depth
+    incoming_depth = source_context.dependency_depth
+    if current_depth is None or (incoming_depth is not None and incoming_depth < current_depth):
+        target_context.dependency_depth = incoming_depth
+        target_context.dependency_scope = source_context.dependency_scope
+        target_context.immediate_parent_name = source_context.immediate_parent_name
+        target_context.immediate_parent_version = source_context.immediate_parent_version
+        target_context.direct_introducer_name = source_context.direct_introducer_name
+        target_context.direct_introducer_version = source_context.direct_introducer_version
+        updated_fields.extend([
+            'dependency_depth',
+            'dependency_scope',
+            'immediate_parent_name',
+            'immediate_parent_version',
+            'direct_introducer_name',
+            'direct_introducer_version',
+        ])
+    elif target_context.dependency_scope == 'unknown' and source_context.dependency_scope != 'unknown':
+        target_context.dependency_scope = source_context.dependency_scope
+        updated_fields.append('dependency_scope')
+
+    scope_priority = {
+        'unknown': 0,
+        'optional': 1,
+        'test': 2,
+        'build': 3,
+        'development': 4,
+        'runtime': 5,
+    }
+    if scope_priority.get(source_context.package_scope or 'unknown', 0) > scope_priority.get(target_context.package_scope or 'unknown', 0):
+        target_context.package_scope = source_context.package_scope
+        updated_fields.append('package_scope')
+
+    if updated_fields:
+        target_context.save(update_fields=sorted(set(updated_fields)) + ['updated_at'])
+
+    return False
+
+
 def _merge_duplicate_image_group(images, normalized_digest):
     if len(images) <= 1:
         return None
@@ -1047,6 +1708,7 @@ def _merge_duplicate_image_group(images, normalized_digest):
     merged_tag_links = 0
     merged_component_links = 0
     merged_locations = 0
+    merged_contexts = 0
     normalized_images = 0
     deleted_images = 0
 
@@ -1079,6 +1741,9 @@ def _merge_duplicate_image_group(images, normalized_digest):
         for location in duplicate.component_locations.select_related('component_version').all():
             if _merge_component_location_into_image(location, primary):
                 merged_locations += 1
+        for context in duplicate.component_contexts.select_related('component_version').all():
+            if _merge_component_context_into_image(context, primary):
+                merged_contexts += 1
 
         if not primary.artifact_reference and duplicate.artifact_reference:
             primary.artifact_reference = duplicate.artifact_reference
@@ -1096,7 +1761,11 @@ def _merge_duplicate_image_group(images, normalized_digest):
         if status_rank.get(duplicate.scan_status, 99) < status_rank.get(primary.scan_status, 99):
             primary.scan_status = duplicate.scan_status
             update_fields.append('scan_status')
+        update_fields.extend(_copy_image_lineage_fields(duplicate, primary))
+        update_fields.extend(_copy_image_os_eol_fields(duplicate, primary))
 
+    update_fields.extend(_apply_image_lineage_fields(primary))
+    update_fields.extend(_apply_image_os_eol_fields(primary))
     if update_fields:
         primary.save(update_fields=sorted(set(update_fields)) + ['updated_at'])
 
@@ -1114,8 +1783,45 @@ def _merge_duplicate_image_group(images, normalized_digest):
         'repository_tag_links_merged': merged_tag_links,
         'component_version_links_merged': merged_component_links,
         'component_locations_merged': merged_locations,
+        'component_contexts_merged': merged_contexts,
         'images_normalized': normalized_images,
     }
+
+
+def _capture_repository_tag_scan_snapshot(tag_id):
+    from .models import RepositoryTag, RepositoryTagScanSnapshot
+    from .utils.analytics import (
+        build_repository_tag_scan_summary,
+        compare_vulnerability_states,
+    )
+
+    tag = RepositoryTag.objects.get(pk=tag_id)
+    current_summary = build_repository_tag_scan_summary(tag)
+    previous_snapshot = tag.scan_snapshots.order_by('-created_at').first()
+    previous_state = previous_snapshot.vulnerability_state if previous_snapshot else {}
+    delta = compare_vulnerability_states(previous_state, current_summary['vulnerability_state'])
+    risk_score_delta = current_summary['weighted_risk_score'] - (
+        previous_snapshot.weighted_risk_score if previous_snapshot else 0.0
+    )
+
+    return RepositoryTagScanSnapshot.objects.create(
+        repository_tag=tag,
+        processing_status=current_summary['processing_status'],
+        total_images=current_summary['total_images'],
+        successful_images=current_summary['successful_images'],
+        unique_vulnerabilities_count=current_summary['unique_vulnerabilities_count'],
+        weighted_risk_score=current_summary['weighted_risk_score'],
+        previous_unique_vulnerabilities_count=delta['previous_unique_vulnerabilities_count'],
+        new_vulnerabilities_count=delta['new_vulnerabilities_count'],
+        fixed_vulnerabilities_count=delta['fixed_vulnerabilities_count'],
+        severity_increased_count=delta['severity_increased_count'],
+        new_kev_relevant_count=delta['new_kev_relevant_count'],
+        risk_score_delta=round(risk_score_delta, 2),
+        has_changes=delta['has_changes'] or round(risk_score_delta, 2) != 0,
+        fixability_breakdown=current_summary['fixability_breakdown'],
+        vulnerability_state=current_summary['vulnerability_state'],
+        delta_summary=delta['delta_summary'],
+    )
 
 
 def _sync_repository_tag_processing_statuses(tag_ids):
@@ -1137,6 +1843,7 @@ def _sync_repository_tag_processing_statuses(tag_ids):
     now = timezone.now()
     updated_tags = []
     resolved_statuses = {}
+    snapshot_tag_ids = []
 
     for tag in status_rows:
         new_status = resolve_repository_tag_processing_status(
@@ -1149,6 +1856,8 @@ def _sync_repository_tag_processing_statuses(tag_ids):
         )
         resolved_statuses[str(tag.pk)] = new_status
         if tag.processing_status != new_status:
+            if new_status == 'success':
+                snapshot_tag_ids.append(tag.pk)
             tag.processing_status = new_status
             tag.updated_at = now
             updated_tags.append(tag)
@@ -1156,9 +1865,21 @@ def _sync_repository_tag_processing_statuses(tag_ids):
     if updated_tags:
         RepositoryTag.objects.bulk_update(updated_tags, ['processing_status', 'updated_at'])
 
+    for tag_id in snapshot_tag_ids:
+        try:
+            _capture_repository_tag_scan_snapshot(tag_id)
+        except Exception as exc:
+            logger.error("Failed to capture repository tag snapshot for %s: %s", tag_id, exc)
+
     return resolved_statuses
 
-@celery_app.task(bind=True, max_retries=1, name="Generate SBOM and Create Components")
+@celery_app.task(
+    bind=True,
+    max_retries=1,
+    name="Generate SBOM and Create Components",
+    soft_time_limit=GENERATE_SBOM_SOFT_TIME_LIMIT,
+    time_limit=GENERATE_SBOM_TIME_LIMIT,
+)
 def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="docker"):
     """
     Generate SBOM data for an image using Syft.
@@ -1198,8 +1919,7 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
         image.scan_status = 'in_process'
         image.save()
         
-        # Get image reference
-        image_ref = image.name or image.artifact_reference
+        image_ref = _select_sbom_pull_reference(image, art_type=art_type)
         if not is_safe_image_ref(image_ref):
             logger.error(f"Unsafe image_ref: {image_ref}")
             image.scan_status = 'error'
@@ -1315,7 +2035,18 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
             # Reset stale Grype data so the follow-up vulnerability scan is always rerun.
             image.grype_data = None
             image.scan_status = 'in_process'
-            image.save()
+            lineage_update_fields = _apply_image_lineage_fields(image)
+            eol_update_fields = _apply_image_os_eol_fields(image, grype_data=None)
+            image.save(
+                update_fields=[
+                    'sbom_data',
+                    'grype_data',
+                    'scan_status',
+                    *lineage_update_fields,
+                    *eol_update_fields,
+                    'updated_at',
+                ]
+            )
             
             logger.info(f"Successfully generated SBOM for image {image_uuid}")
 
@@ -1598,7 +2329,7 @@ def process_all_tags():
     Process all tags from active repositories and create images if they don't exist.
     This task can be manually triggered.
     """
-    from .models import Repository, RepositoryTag, Image
+    from .models import Repository, RepositoryTag
     from .utils.registry import (
         get_manifest,
         is_helm_chart,
@@ -2053,8 +2784,28 @@ def parse_sbom_and_create_components(image_uuid: str):
                             image_version_pks.add(version_obj.pk)
                             links_created += 1
 
+                lineage_update_fields = _apply_image_lineage_fields(
+                    image,
+                    component_version_purls=[
+                        version_data.get('purl')
+                        for data in component_data.values()
+                        for version_data in data['versions'].values()
+                    ],
+                )
+                if lineage_update_fields:
+                    image.save(update_fields=lineage_update_fields + ['updated_at'])
+
             batch_time = time.time() - batch_start_time
             logger.info(f"Completed batch {current_batch}/{total_batches} in {batch_time:.2f} seconds")
+
+        context_summary = _upsert_image_component_version_contexts(image)
+        logger.info(
+            "Updated image component contexts for %s: created=%s updated=%s deleted=%s",
+            image_uuid,
+            context_summary['contexts_created'],
+            context_summary['contexts_updated'],
+            context_summary['contexts_deleted'],
+        )
 
         total_time = time.time() - start_time
         logger.info(f"SBOM parsing completed in {total_time:.2f} seconds")
@@ -2240,6 +2991,7 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
     try:
         image = Image.objects.get(uuid=image_uuid)
         matches = scan_results.get('matches', [])
+        eol_update_fields = _apply_image_os_eol_fields(image, grype_data=scan_results)
 
         # Collect unique names/versions/ids
         component_names = set()
@@ -2434,7 +3186,8 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
 
         # Set status to success only after all matches are processed
         image.scan_status = 'success'
-        image.save(update_fields=['scan_status', 'updated_at'])
+        image.grype_data = scan_results
+        image.save(update_fields=['scan_status', 'grype_data', *eol_update_fields, 'updated_at'])
         related_tag_ids = _propagate_image_completion_to_equivalent_images(image)
         _sync_repository_tag_processing_statuses(related_tag_ids)
         logger.info(f"Successfully processed Grype scan results for image {image_uuid}")
@@ -3116,7 +3869,7 @@ def process_single_tag(tag_uuid: str):
     Process a single repository tag and create an image if it doesn't exist.
     After processing, trigger SBOM scan for all images linked to this tag.
     """
-    from .models import RepositoryTag, Image
+    from .models import RepositoryTag
     from .utils.registry import (
         get_manifest,
         is_helm_chart,
@@ -3258,7 +4011,24 @@ def process_single_tag(tag_uuid: str):
                 image, created = _get_or_create_canonical_image(
                     name=resolved_image_ref,
                     digest=image_digest,
-                    artifact_reference=artifact_ref,
+                    artifact_reference=artifact_ref or resolved_name,
+                )
+                resolved_image_ids.append(image.pk)
+                logger.info(
+                    "%s Helm image %s as %s with digest %s",
+                    'Created' if created else 'Linked',
+                    image_ref,
+                    resolved_name,
+                    image_digest,
+                )
+
+            _reconcile_helm_tag_images(tag, resolved_image_ids)
+            if not resolved_image_ids:
+                return _helm_processing_error_result(
+                    (
+                        f"No resolvable child images found for Helm tag {tag.tag}. "
+                        f"Unresolved refs: {', '.join(item['image_ref'] for item in unresolved_image_refs) or 'none'}"
+                    )
                 )
                 image.repository_tags.add(tag)
                 resolved_image_ids.append(image.pk)
@@ -3285,7 +4055,7 @@ def process_single_tag(tag_uuid: str):
                 image.save(update_fields=['scan_status', 'updated_at'])
                 repaired_tag_ids.update(_propagate_image_completion_to_equivalent_images(image))
                 continue
-            if image.scan_status in ['in_process', 'pending']:
+            if image.scan_status == 'in_process':
                 continue
             if _has_completed_image_scan(image):
                 continue
@@ -3335,6 +4105,10 @@ def process_single_tag(tag_uuid: str):
         if total_images_linked == 0:
             tag.processing_status = 'success'
             tag.save(update_fields=['processing_status', 'updated_at'])
+            try:
+                _capture_repository_tag_scan_snapshot(tag.pk)
+            except Exception as exc:
+                logger.error("Failed to capture empty tag snapshot for %s: %s", tag.pk, exc)
         else:
             synced_statuses = _sync_repository_tag_processing_statuses(
                 list({tag.pk, *repaired_tag_ids})
@@ -3439,6 +4213,7 @@ def deduplicate_images_by_identity():
         'repository_tag_links_merged': 0,
         'component_version_links_merged': 0,
         'component_locations_merged': 0,
+        'component_contexts_merged': 0,
         'images_normalized': 0,
     }
     affected_primary_images = []
@@ -3499,6 +4274,7 @@ def deduplicate_images_by_identity():
                     'repository_tag_links_merged',
                     'component_version_links_merged',
                     'component_locations_merged',
+                    'component_contexts_merged',
                     'images_normalized',
                 ):
                     summary[key] += merge_result[key]
@@ -3513,6 +4289,207 @@ def deduplicate_images_by_identity():
         "message": (
             f"Image deduplication completed: {summary['duplicate_images_deleted']} duplicate "
             f"images removed across {summary['duplicate_groups_merged']} identity groups"
+        ),
+        "timestamp": timezone.now().isoformat(),
+    }
+
+
+@celery_app.task(name="Backfill Image Lineage Fields")
+def backfill_image_lineage_fields(batch_size: int = 200):
+    from django.db.models import Prefetch
+    from .models import ComponentVersion, Image
+
+    component_versions_prefetch = Prefetch(
+        'component_versions',
+        queryset=ComponentVersion.objects.filter(
+            component__type__in=['deb', 'rpm', 'apk']
+        ).select_related('component'),
+    )
+
+    summary = {
+        'total_images_seen': 0,
+        'images_updated': 0,
+        'sbom_distro_images': 0,
+        'package_distro_images': 0,
+        'unknown_images': 0,
+    }
+
+    buffered_ids = []
+
+    def process_batch(image_ids):
+        if not image_ids:
+            return
+
+        nonlocal summary
+        images = list(
+            Image.objects.filter(pk__in=image_ids)
+            .prefetch_related(component_versions_prefetch)
+            .order_by('created_at', 'uuid')
+        )
+        images_to_update = []
+        now = timezone.now()
+
+        for image in images:
+            summary['total_images_seen'] += 1
+            purls = [component_version.purl for component_version in image.component_versions.all()]
+            update_fields = _apply_image_lineage_fields(image, component_version_purls=purls)
+
+            if image.lineage_source == 'sbom_distro':
+                summary['sbom_distro_images'] += 1
+            elif image.lineage_source == 'package_distro':
+                summary['package_distro_images'] += 1
+            else:
+                summary['unknown_images'] += 1
+
+            if update_fields:
+                image.updated_at = now
+                images_to_update.append(image)
+
+        if images_to_update:
+            Image.objects.bulk_update(
+                images_to_update,
+                [
+                    'lineage_label',
+                    'lineage_source',
+                    'os_distro_name',
+                    'os_distro_version',
+                    'lineage_updated_at',
+                    'updated_at',
+                ],
+                batch_size=batch_size,
+            )
+            summary['images_updated'] += len(images_to_update)
+
+    image_id_iterator = (
+        Image.objects.order_by('created_at', 'uuid')
+        .values_list('pk', flat=True)
+        .iterator(chunk_size=batch_size)
+    )
+
+    for image_id in image_id_iterator:
+        buffered_ids.append(image_id)
+        if len(buffered_ids) >= batch_size:
+            process_batch(buffered_ids)
+            buffered_ids = []
+
+    if buffered_ids:
+        process_batch(buffered_ids)
+
+    return {
+        "status": "success",
+        "task_name": "Backfill Image Lineage Fields",
+        "summary": summary,
+        "message": (
+            f"Image lineage backfill completed: {summary['images_updated']} images updated "
+            f"out of {summary['total_images_seen']} processed"
+        ),
+        "timestamp": timezone.now().isoformat(),
+    }
+
+
+@celery_app.task(name="Backfill Image SBOM Security Metadata")
+def backfill_image_sbom_security_metadata(batch_size: int = 100):
+    from django.db.models import Prefetch
+    from .models import ComponentVersion, Image
+
+    component_versions_prefetch = Prefetch(
+        'component_versions',
+        queryset=ComponentVersion.objects.select_related('component'),
+    )
+
+    summary = {
+        'total_images_seen': 0,
+        'images_updated': 0,
+        'contexts_created': 0,
+        'contexts_updated': 0,
+        'contexts_deleted': 0,
+        'eol_images': 0,
+        'supported_images': 0,
+        'unknown_eol_images': 0,
+    }
+
+    buffered_ids = []
+
+    def process_batch(image_ids):
+        if not image_ids:
+            return
+
+        nonlocal summary
+        images = list(
+            Image.objects.filter(pk__in=image_ids)
+            .prefetch_related(component_versions_prefetch)
+            .order_by('created_at', 'uuid')
+        )
+        images_to_update = []
+        now = timezone.now()
+
+        for image in images:
+            summary['total_images_seen'] += 1
+
+            update_fields = []
+            update_fields.extend(_apply_image_lineage_fields(
+                image,
+                component_version_purls=[component_version.purl for component_version in image.component_versions.all()],
+            ))
+            update_fields.extend(_apply_image_os_eol_fields(image))
+
+            if image.os_eol_status == 'eol':
+                summary['eol_images'] += 1
+            elif image.os_eol_status == 'supported':
+                summary['supported_images'] += 1
+            else:
+                summary['unknown_eol_images'] += 1
+
+            if update_fields:
+                image.updated_at = now
+                images_to_update.append(image)
+
+            context_summary = _upsert_image_component_version_contexts(image)
+            summary['contexts_created'] += context_summary['contexts_created']
+            summary['contexts_updated'] += context_summary['contexts_updated']
+            summary['contexts_deleted'] += context_summary['contexts_deleted']
+
+        if images_to_update:
+            Image.objects.bulk_update(
+                images_to_update,
+                [
+                    'lineage_label',
+                    'lineage_source',
+                    'os_distro_name',
+                    'os_distro_version',
+                    'lineage_updated_at',
+                    'os_eol_status',
+                    'os_eol_source',
+                    'os_eol_message',
+                    'os_eol_checked_at',
+                    'updated_at',
+                ],
+                batch_size=batch_size,
+            )
+            summary['images_updated'] += len(images_to_update)
+
+    image_id_iterator = (
+        Image.objects.order_by('created_at', 'uuid')
+        .values_list('pk', flat=True)
+        .iterator(chunk_size=batch_size)
+    )
+
+    for image_id in image_id_iterator:
+        buffered_ids.append(image_id)
+        if len(buffered_ids) >= batch_size:
+            process_batch(buffered_ids)
+            buffered_ids = []
+
+    if buffered_ids:
+        process_batch(buffered_ids)
+
+    return {
+        "status": "success",
+        "task_name": "Backfill Image SBOM Security Metadata",
+        "summary": summary,
+        "message": (
+            "Image SBOM security metadata backfill completed: "
+            f"{summary['images_updated']} images updated out of {summary['total_images_seen']} processed"
         ),
         "timestamp": timezone.now().isoformat(),
     }
@@ -3858,7 +4835,7 @@ def update_critical_vulnerability_details():
             return {
                 "status": "completed",
                 "task_name": "Update Critical Vulnerability Details",
-                "message": "No critical or stale CVEs need updating",
+                "message": "No critical or stale supported vulnerabilities need updating",
                 "summary": {
                     "total_vulnerabilities": 0,
                     "critical_severity_count": critical_vulns.count(),
@@ -4064,7 +5041,7 @@ def update_vulnerability_details_bulk(vulnerability_uuids: List[str], batch_size
                 },
                 'processing_time': time.time() - start_time,
                 'processing_time_formatted': f"{time.time() - start_time:.2f} seconds",
-                'message': 'No supported CVE identifiers were supplied for enrichment',
+                'message': 'No supported vulnerability identifiers were supplied for enrichment',
                 'timestamp': timezone.now().isoformat()
             }
         
@@ -4789,3 +5766,142 @@ def recalculate_vulnerability_fix_availability():
             "error": str(e),
             "error_type": type(e).__name__,
         }
+
+
+@celery_app.task(name="Cleanup Threat Intel Snapshots")
+def cleanup_threat_intel_snapshots(retention_days: int = 90):
+    """Delete old persisted threat-intel snapshots."""
+    from .utils.threat_intel import cleanup_old_threat_intel_snapshots
+
+    deleted_count = cleanup_old_threat_intel_snapshots(retention_days=retention_days)
+    return {
+        "status": "success",
+        "task_name": "Cleanup Threat Intel Snapshots",
+        "summary": {
+            "retention_days": retention_days,
+            "deleted_snapshots": deleted_count,
+        },
+        "timestamp": timezone.now().isoformat(),
+    }
+
+
+@celery_app.task(name="Collect Weekly Threat Intel Snapshot")
+def collect_weekly_threat_intel_snapshot(retention_days: int = 90, limit: int | None = None):
+    """Persist the current weekly threat-intel summary and rotate older snapshots."""
+    from .utils.threat_intel import save_weekly_threat_intel_snapshot
+
+    start_time = time.time()
+    snapshot = save_weekly_threat_intel_snapshot(limit=limit)
+    cleanup_result = cleanup_threat_intel_snapshots(retention_days=retention_days)
+    processing_time = time.time() - start_time
+
+    return {
+        "status": "success",
+        "task_name": "Collect Weekly Threat Intel Snapshot",
+        "summary": {
+            "snapshot_date": snapshot.snapshot_date.isoformat(),
+            "period_start": snapshot.period_start.isoformat(),
+            "period_end": snapshot.period_end.isoformat(),
+            "retention_days": retention_days,
+            "observed_this_week_count": (snapshot.observed_this_week or {}).get("count", 0),
+            "kev_added_this_week_count": (snapshot.kev_added_this_week or {}).get("count", 0),
+            "supply_chain_this_week_count": (snapshot.supply_chain_this_week or {}).get("count", 0),
+            "deleted_snapshots": cleanup_result.get("summary", {}).get("deleted_snapshots", 0),
+        },
+        "processing_time": processing_time,
+        "timestamp": timezone.now().isoformat(),
+    }
+
+
+@celery_app.task(name="Cleanup Root Cause Analytics Snapshots")
+def cleanup_root_cause_analytics_snapshots(retention_days: int = 30):
+    from .utils.analytics import cleanup_old_root_cause_analytics_snapshots
+
+    cleanup_result = cleanup_old_root_cause_analytics_snapshots(retention_days=retention_days)
+    return {
+        "status": "success",
+        "task_name": "Cleanup Root Cause Analytics Snapshots",
+        "summary": {
+            "retention_days": retention_days,
+            **cleanup_result,
+        },
+        "timestamp": timezone.now().isoformat(),
+    }
+
+
+@celery_app.task(
+    name="Collect Shared Root Cause Analytics Snapshot",
+    soft_time_limit=3600,
+    time_limit=4200,
+)
+def collect_shared_root_cause_analytics_snapshot(retention_days: int = 30, batch_size: int = 500):
+    from .utils.analytics import save_shared_root_cause_analytics_snapshot
+
+    start_time = time.time()
+    snapshot = save_shared_root_cause_analytics_snapshot(batch_size=batch_size)
+    processing_time = time.time() - start_time
+
+    return {
+        "status": "success",
+        "task_name": "Collect Shared Root Cause Analytics Snapshot",
+        "summary": {
+            "snapshot_date": snapshot.snapshot_date.isoformat(),
+            "retention_days": retention_days,
+            "shared_root_causes_count": snapshot.total_items,
+            "batch_size": batch_size,
+        },
+        "processing_time": processing_time,
+        "timestamp": timezone.now().isoformat(),
+    }
+
+
+@celery_app.task(
+    name="Collect Base Lineage Root Cause Analytics Snapshot",
+    soft_time_limit=3600,
+    time_limit=4200,
+)
+def collect_base_lineage_root_cause_analytics_snapshot(retention_days: int = 30, batch_size: int = 500):
+    from .utils.analytics import save_base_lineage_root_cause_analytics_snapshot
+
+    start_time = time.time()
+    snapshot = save_base_lineage_root_cause_analytics_snapshot(batch_size=batch_size)
+    processing_time = time.time() - start_time
+
+    return {
+        "status": "success",
+        "task_name": "Collect Base Lineage Root Cause Analytics Snapshot",
+        "summary": {
+            "snapshot_date": snapshot.snapshot_date.isoformat(),
+            "retention_days": retention_days,
+            "base_lineage_root_causes_count": snapshot.total_items,
+            "batch_size": batch_size,
+        },
+        "processing_time": processing_time,
+        "timestamp": timezone.now().isoformat(),
+    }
+
+
+@celery_app.task(name="Collect Root Cause Analytics Snapshot")
+def collect_root_cause_analytics_snapshot(retention_days: int = 30, batch_size: int = 500):
+    shared_result = collect_shared_root_cause_analytics_snapshot.delay(
+        retention_days=retention_days,
+        batch_size=batch_size,
+    )
+    base_lineage_result = collect_base_lineage_root_cause_analytics_snapshot.delay(
+        retention_days=retention_days,
+        batch_size=batch_size,
+    )
+    cleanup_result = cleanup_root_cause_analytics_snapshots.delay(retention_days=retention_days)
+
+    return {
+        "status": "queued",
+        "task_name": "Collect Root Cause Analytics Snapshot",
+        "summary": {
+            "retention_days": retention_days,
+            "batch_size": batch_size,
+            "shared_task_id": shared_result.id,
+            "base_lineage_task_id": base_lineage_result.id,
+            "cleanup_task_id": cleanup_result.id,
+        },
+        "timestamp": timezone.now().isoformat(),
+    }

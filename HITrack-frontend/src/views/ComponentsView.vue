@@ -17,17 +17,20 @@
             class="mb-4"
             @click:clear="componentsSearch = ''"
           ></v-text-field>
-          <v-data-table
+          <v-data-table-server
             :headers="headers"
             :items="components"
+            :items-length="totalItems"
             :loading="loading"
             :items-per-page="itemsPerPage"
             :page="page"
+            v-model:sort-by="sortBy"
             hide-default-footer
             class="elevation-1"
             hover
             density="comfortable"
             item-value="uuid"
+            @update:options="onTableOptionsUpdate"
           >
             <template v-slot:item.name="{ item }">
               <div @click="onRowClick(item)" style="cursor: pointer; width: 100%; height: 100%;">
@@ -55,7 +58,7 @@
                 {{ item.type }}
               </v-chip>
             </template>
-          </v-data-table>
+          </v-data-table-server>
           <div class="d-flex align-center justify-end mt-2 gap-4">
             <v-select
               :items="[10, 20, 50, 100]"
@@ -70,7 +73,6 @@
             <v-pagination
               v-model="page"
               :length="pageCount"
-              @update:model-value="fetchComponents"
               :total-visible="7"
               density="comfortable"
             />
@@ -87,15 +89,27 @@ import { useRouter } from 'vue-router'
 import api from '../plugins/axios'
 import { notificationService } from '../plugins/notifications'
 import type { Component, PaginatedResponse } from '../types/interfaces'
+import type { DataTableSortItem } from 'vuetify'
 
 const components = ref<Component[]>([])
 const loading = ref(false)
 const page = ref(1)
 const itemsPerPage = ref(10)
 const totalItems = ref(0)
-const sortBy = ref<string[]>([])
-const sortDesc = ref<boolean[]>([])
+const sortBy = ref<DataTableSortItem[]>([{ key: 'updated_at', order: 'desc' }])
 const componentsSearch = ref('')
+
+const normalizeSortBy = (items?: readonly DataTableSortItem[]): DataTableSortItem[] =>
+  (items || []).map((item) => {
+    const order: 'asc' | 'desc' = item.order === 'desc' ? 'desc' : 'asc'
+    return {
+      key: String(item.key),
+      order,
+    }
+  })
+
+const areSortByEqual = (left: readonly DataTableSortItem[], right: readonly DataTableSortItem[]) =>
+  JSON.stringify(normalizeSortBy(left)) === JSON.stringify(normalizeSortBy(right))
 
 const pageCount = computed(() => Math.ceil(totalItems.value / itemsPerPage.value))
 
@@ -127,7 +141,9 @@ const fetchComponents = async () => {
     const params = {
       page: page.value,
       page_size: itemsPerPage.value,
-      ordering: sortBy.value.length ? `${sortDesc.value[0] ? '-' : ''}${sortBy.value[0]}` : undefined,
+      ordering: sortBy.value.length
+        ? `${sortBy.value[0].order === 'desc' ? '-' : ''}${String(sortBy.value[0].key)}`
+        : undefined,
       search: componentsSearch.value || undefined
     }
     const response = await api.get<PaginatedResponse<Component>>('components/', { params })
@@ -145,16 +161,6 @@ const fetchComponents = async () => {
 const onItemsPerPageChange = (val: number) => {
   itemsPerPage.value = val
   page.value = 1
-  fetchComponents()
-}
-
-const onSortByChange = (newSortBy: string[]) => {
-  sortBy.value = newSortBy
-  fetchComponents()
-}
-const onSortDescChange = (newSortDesc: boolean[]) => {
-  sortDesc.value = newSortDesc
-  fetchComponents()
 }
 
 // Debounce helper
@@ -181,8 +187,7 @@ const onRowClick = (event: any) => {
 watch([
   page,
   itemsPerPage,
-  sortBy,
-  sortDesc
+  sortBy
 ], fetchComponents)
 
 watch(componentsSearch, () => {
@@ -193,6 +198,25 @@ watch(componentsSearch, () => {
 onMounted(() => {
   fetchComponents()
 })
+
+const onTableOptionsUpdate = (options: { page: number; itemsPerPage: number; sortBy: DataTableSortItem[] }) => {
+  const nextSortBy = normalizeSortBy(options.sortBy)
+  const currentSortBy = normalizeSortBy(sortBy.value)
+
+  if (
+    page.value === options.page &&
+    itemsPerPage.value === options.itemsPerPage &&
+    JSON.stringify(currentSortBy) === JSON.stringify(nextSortBy)
+  ) {
+    return
+  }
+
+  page.value = options.page
+  itemsPerPage.value = options.itemsPerPage
+  if (!areSortByEqual(sortBy.value, nextSortBy)) {
+    sortBy.value = nextSortBy
+  }
+}
 </script>
 
 <style scoped>

@@ -268,6 +268,14 @@
                   </div>
                 </div>
               </template>
+              <template v-slot:item.updated_at="{ item }">
+                <div class="date-meta-cell">
+                  <div class="date-meta-cell__primary">{{ $formatDate(item.updated_at) }}</div>
+                  <div class="date-meta-cell__secondary">
+                    Created: {{ $formatDate(item.created_at) }}
+                  </div>
+                </div>
+              </template>
             </v-data-table-server>
 
             <!-- Pagination -->
@@ -285,7 +293,6 @@
               <v-pagination
                 v-model="currentPage"
                 :length="pageCount"
-                @update:model-value="fetchVulnerabilities"
                 :total-visible="7"
                 density="comfortable"
               />
@@ -308,6 +315,18 @@ import type { Vulnerability, PaginatedResponse } from '../types/interfaces'
 
 interface SortItem { key: string; order: 'asc' | 'desc' }
 
+const normalizeSortBy = (items?: readonly SortItem[]): SortItem[] =>
+  (items || []).map((item) => {
+    const order: 'asc' | 'desc' = item.order === 'desc' ? 'desc' : 'asc'
+    return {
+      key: item.key,
+      order,
+    }
+  })
+
+const areSortByEqual = (left: readonly SortItem[], right: readonly SortItem[]) =>
+  JSON.stringify(normalizeSortBy(left)) === JSON.stringify(normalizeSortBy(right))
+
 const router = useRouter()
 const route = useRoute()
 
@@ -319,7 +338,7 @@ const total = ref(0)
 // Pagination state
 const currentPage = ref(1)
 const itemsPerPage = ref(20)
-const pageCount = computed(() => Math.ceil(total.value / itemsPerPage.value))
+const pageCount = computed(() => Math.ceil(total.value / itemsPerPage.value) || 1)
 
 // Sorting state (server-side)
 const sortBy = ref<SortItem[]>([])
@@ -358,9 +377,10 @@ const headers = [
   { title: 'Type', key: 'vulnerability_type', sortable: true },
   { title: 'Severity', key: 'severity', sortable: true },
   { title: 'EPSS', key: 'epss', sortable: true },
-  { title: 'CISA KEV', key: 'cisa_kev', sortable: false },
-  { title: 'Exploit', key: 'exploit_available', sortable: false },
-  { title: 'Details', key: 'has_details', sortable: false },
+  { title: 'CISA KEV', key: 'cisa_kev', sortable: true },
+  { title: 'Exploit', key: 'exploit_available', sortable: true },
+  { title: 'Details', key: 'has_details', sortable: true },
+  { title: 'Updated', key: 'updated_at', sortable: true, width: '210px' },
   { title: 'Description', key: 'description', sortable: false }
 ] as const
 
@@ -430,18 +450,15 @@ const debouncedFetchVulnerabilities = debounce(fetchVulnerabilities, 300)
 // Handle URL parameters for filters
 const handleUrlParams = () => {
   const severity = route.query.severity as string
+  const vulnerabilityType = route.query.vulnerability_type as string
   const fixable = route.query.fixable as string
   const cisaKev = route.query.cisa_kev as string
   const exploitAvailable = route.query.exploit_available as string
   const ransomware = route.query.ransomware as string
   
-  if (severity) {
-    severityFilter.value = severity
-  }
-  
-  if (fixable === 'true') {
-    fixableFilter.value = true
-  }
+  severityFilter.value = severity || ''
+  typeFilter.value = vulnerabilityType || ''
+  fixableFilter.value = fixable === 'true'
   
   if (cisaKev === 'true') {
     // Set CISA KEV filter
@@ -467,15 +484,25 @@ const onVulnerabilityRowClick = (_: MouseEvent, { item }: { item: Vulnerability 
 const onItemsPerPageChange = (val: number) => {
   itemsPerPage.value = val
   currentPage.value = 1
-  fetchVulnerabilities()
 }
 
 // Server table: when user changes sort/page/itemsPerPage in the table, we refetch
 const onTableOptionsUpdate = (options: { page: number; itemsPerPage: number; sortBy: SortItem[] }) => {
+  const nextSortBy = normalizeSortBy(options.sortBy)
+
+  if (
+    currentPage.value === options.page &&
+    itemsPerPage.value === options.itemsPerPage &&
+    areSortByEqual(sortBy.value, nextSortBy)
+  ) {
+    return
+  }
+
   currentPage.value = options.page
   itemsPerPage.value = options.itemsPerPage
-  sortBy.value = options.sortBy?.length ? options.sortBy : []
-  fetchVulnerabilities()
+  if (!areSortByEqual(sortBy.value, nextSortBy)) {
+    sortBy.value = nextSortBy
+  }
 }
 
 // Helper function to get description with fallback to CVE Details
@@ -508,14 +535,17 @@ const getDescriptionSource = (item: Vulnerability): string => {
 }
 
 const onFilterChange = () => {
-  currentPage.value = 1
+  if (currentPage.value !== 1) {
+    currentPage.value = 1
+    return
+  }
   fetchVulnerabilities()
 }
 
 // Color utilities imported from utils/colors.ts
 
-// Watchers (pagination controls update page/itemsPerPage and trigger fetch)
-watch([currentPage, itemsPerPage], fetchVulnerabilities)
+// Watchers (pagination controls update page/itemsPerPage/sortBy and trigger fetch)
+watch([currentPage, itemsPerPage, sortBy], fetchVulnerabilities)
 
 watch(searchQuery, () => {
   currentPage.value = 1
@@ -540,7 +570,6 @@ const getFilterIcon = (): string => {
 const clearActiveFilter = () => {
   activeFilter.value = ''
   router.push({ query: {} })
-  fetchVulnerabilities()
 }
 
 const toggleFilter = (filterType: string) => {
@@ -559,6 +588,7 @@ const toggleFilter = (filterType: string) => {
 
 // Update active filter based on route query
 watch(() => route.query, (newQuery) => {
+  handleUrlParams()
   if (newQuery.cisa_kev === 'true') {
     activeFilter.value = 'CISA KEV Vulnerabilities'
   } else if (newQuery.exploit_available === 'true') {
@@ -569,14 +599,17 @@ watch(() => route.query, (newQuery) => {
     activeFilter.value = ''
   }
   
-  // Refetch data when query parameters change
+  if (currentPage.value !== 1) {
+    currentPage.value = 1
+    return
+  }
+
   fetchVulnerabilities()
 }, { immediate: true })
 
 // Initialize
 onMounted(() => {
   handleUrlParams()
-  fetchVulnerabilities()
 })
 </script>
 
@@ -649,5 +682,19 @@ onMounted(() => {
 
 .flex-shrink-0 {
   flex-shrink: 0;
+}
+
+.date-meta-cell {
+  line-height: 1.2;
+}
+
+.date-meta-cell__primary {
+  font-weight: 500;
+}
+
+.date-meta-cell__secondary {
+  color: #6b7280;
+  font-size: 0.82rem;
+  margin-top: 4px;
 }
 </style> 

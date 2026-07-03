@@ -4,9 +4,19 @@
       <v-row>
         <v-col cols="12">
           <h1 class="text-h4 mb-4 font-weight-black">Images</h1>
-          <v-btn color="primary" @click="openDialog('New Image')" class="mb-4">
-            Add Image
-          </v-btn>
+          <div class="d-flex align-center ga-3 mb-4">
+            <v-btn color="primary" @click="openDialog('New Image')">
+              Add Image
+            </v-btn>
+            <v-btn
+              variant="outlined"
+              color="primary"
+              prepend-icon="mdi-compare"
+              @click="openImageComparisons"
+            >
+              Compare By Logical Name
+            </v-btn>
+          </div>
         </v-col>
       </v-row>
 
@@ -40,30 +50,77 @@
       <v-row>
         <v-col cols="12">
           <div class="images-table-responsive" style="margin-top:-8px !important;padding-top:0 !important;">
-            <v-data-table
+            <v-data-table-server
               :headers="headers"
               :items="images"
+              :items-length="totalItems"
               :loading="loading"
               class="elevation-1"
               item-class="clickable-row"
               :items-per-page="itemsPerPage"
               :page="page"
-              :sort-by.sync="sortBy"
+              v-model:sort-by="sortBy"
               hide-default-footer
+              @update:options="onTableOptionsUpdate"
             >
               <template #item="{ item }">
                 <tr class="clickable-row">
                   <td @click="onRowClick(item)">
-                    <span>{{ item.name }}</span>
-                    <v-chip
-                      size="x-small"
-                      :color="statusColor(item.scan_status)"
-                      class="ml-2"
-                      variant="tonal"
-                      style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;"
-                    >
-                      {{ statusLabel(item.scan_status) }}
-                    </v-chip>
+                    <div class="image-name-cell">
+                      <div class="image-name-cell__title">
+                        <span>{{ item.name }}</span>
+                        <v-chip
+                          size="x-small"
+                          :color="statusColor(item.scan_status)"
+                          class="ml-2"
+                          variant="tonal"
+                          style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;"
+                        >
+                          {{ statusLabel(item.scan_status) }}
+                        </v-chip>
+                      </div>
+                    </div>
+                  </td>
+                  <td @click="onRowClick(item)">
+                    <div v-if="hasLineage(item)" class="lineage-cell">
+                      <v-chip
+                        size="small"
+                        color="teal"
+                        variant="tonal"
+                        class="lineage-cell__label"
+                      >
+                        {{ item.lineage_label }}
+                      </v-chip>
+                      <v-tooltip location="top">
+                        <template #activator="{ props }">
+                          <v-chip
+                            v-bind="props"
+                            size="x-small"
+                            color="grey-darken-1"
+                            variant="outlined"
+                            class="mt-1"
+                          >
+                            {{ lineageSourceLabel(item.lineage_source) }}
+                          </v-chip>
+                        </template>
+                        <span>{{ lineageSourceTooltip(item.lineage_source) }}</span>
+                      </v-tooltip>
+                      <v-tooltip v-if="item.os_eol_status && item.os_eol_status !== 'unknown'" location="top">
+                        <template #activator="{ props }">
+                          <v-chip
+                            v-bind="props"
+                            size="x-small"
+                            :color="osEolStatusColor(item.os_eol_status)"
+                            variant="tonal"
+                            class="mt-1"
+                          >
+                            {{ osEolStatusLabel(item.os_eol_status) }}
+                          </v-chip>
+                        </template>
+                        <span>{{ osEolStatusTooltip(item) }}</span>
+                      </v-tooltip>
+                    </div>
+                    <span v-else class="text-medium-emphasis text-caption">Unknown</span>
                   </td>
                   <td @click="onRowClick(item)">
                     <v-tooltip location="top">
@@ -99,7 +156,12 @@
                     {{ item.components_count }}
                   </td>
                   <td @click="onRowClick(item)">
-                    <span class="nowrap">{{ $formatDate(item.updated_at) }}</span>
+                    <div class="date-meta-cell">
+                      <div class="date-meta-cell__primary nowrap">{{ $formatDate(item.updated_at) }}</div>
+                      <div class="date-meta-cell__secondary nowrap">
+                        Created: {{ $formatDate(item.created_at) }}
+                      </div>
+                    </div>
                   </td>
                   <td>
                     <v-tooltip location="top">
@@ -167,7 +229,7 @@
                   </td>
                 </tr>
               </template>
-            </v-data-table>
+            </v-data-table-server>
           </div>
         </v-col>
       </v-row>
@@ -186,7 +248,6 @@
         <v-pagination
           v-model="page"
           :length="pageCount"
-          @update:model-value="fetchImages"
           :total-visible="7"
           density="comfortable"
         />
@@ -270,6 +331,14 @@ const editedItem = ref<Image>({
   name: '',
   digest: '',
   scan_status: '',
+  lineage_label: '',
+  lineage_source: '',
+  os_distro_name: '',
+  os_distro_version: '',
+  os_eol_status: 'unknown',
+  os_eol_source: 'unknown',
+  os_eol_message: '',
+  os_eol_checked_at: null,
   has_sbom: false,
   has_grype: false,
   findings: 0,
@@ -291,12 +360,32 @@ const showUniqueFindings = ref(false)
 const router = useRouter()
 let refreshTimer: number | null = null
 
+const normalizeSortBy = (items?: readonly DataTableSortItem[]): DataTableSortItem[] =>
+  (items || []).map((item) => {
+    const order: 'asc' | 'desc' = item.order === 'desc' ? 'desc' : 'asc'
+    return {
+      key: String(item.key),
+      order,
+    }
+  })
+
+const areSortByEqual = (left: readonly DataTableSortItem[], right: readonly DataTableSortItem[]) =>
+  JSON.stringify(normalizeSortBy(left)) === JSON.stringify(normalizeSortBy(right))
+
 const defaultItem = {
   id: undefined,
   uuid: '',
   name: '',
   digest: '',
   scan_status: '',
+  lineage_label: '',
+  lineage_source: '',
+  os_distro_name: '',
+  os_distro_version: '',
+  os_eol_status: 'unknown',
+  os_eol_source: 'unknown',
+  os_eol_message: '',
+  os_eol_checked_at: null,
   has_sbom: false,
   has_grype: false,
   findings: 0,
@@ -315,11 +404,12 @@ const defaultItem = {
 
 const headers: any[] = [
   { title: 'Name', key: 'name', sortable: true },
+  { title: 'OS / Distro', key: 'lineage_label', sortable: true, width: '220px' },
   { title: 'Digest', key: 'digest', sortable: true },
   { title: 'SBOM', key: 'has_sbom', sortable: false },
   { title: 'Findings', key: 'findings', sortable: true },
   { title: 'Components', key: 'components_count', sortable: true },
-  { title: 'Updated', key: 'updated_at', sortable: true },
+  { title: 'Updated', key: 'updated_at', sortable: true, width: '210px' },
   { title: 'Actions', key: 'actions', sortable: false }
 ]
 
@@ -336,7 +426,11 @@ const fetchImages = async () => {
     }
     if (search.value) params.search = search.value
     if (sortBy.value && sortBy.value.length > 0) {
-      params.ordering = sortBy.value.map(s => s.order === 'desc' ? `-${s.key}` : s.key).join(',')
+      const [sort] = sortBy.value
+      const resolvedKey = sort.key === 'findings'
+        ? (showUniqueFindings.value ? 'unique_findings_count' : 'findings_count')
+        : String(sort.key)
+      params.ordering = `${sort.order === 'desc' ? '-' : ''}${resolvedKey}`
     }
     const response = await api.get<PaginatedResponse<Image>>('images/', { params })
     images.value = response.data.results
@@ -368,13 +462,29 @@ const pageCount = computed(() => Math.ceil(totalItems.value / itemsPerPage.value
 const onItemsPerPageChange = (val: number) => {
   itemsPerPage.value = val
   page.value = 1
-  fetchImages()
 }
 
-watch([search, sortBy], () => {
-  page.value = 1
+watch(search, () => {
+  if (page.value !== 1) {
+    page.value = 1
+    return
+  }
   fetchImages()
 })
+
+watch(sortBy, () => {
+  if (page.value !== 1) {
+    page.value = 1
+    return
+  }
+  fetchImages()
+})
+watch(showUniqueFindings, () => {
+  if (sortBy.value[0]?.key === 'findings') {
+    fetchImages()
+  }
+})
+watch([page, itemsPerPage], fetchImages)
 watch(hasActiveImageScans, (isActive) => {
   if (isActive) {
     startAutoRefresh()
@@ -392,6 +502,14 @@ const openDialog = (title: string, item?: Image) => {
       name: item.name,
       digest: item.digest,
       scan_status: item.scan_status,
+      lineage_label: item.lineage_label,
+      lineage_source: item.lineage_source,
+      os_distro_name: item.os_distro_name,
+      os_distro_version: item.os_distro_version,
+      os_eol_status: item.os_eol_status,
+      os_eol_source: item.os_eol_source,
+      os_eol_message: item.os_eol_message,
+      os_eol_checked_at: item.os_eol_checked_at,
       has_sbom: item.has_sbom,
       has_grype: item.has_grype,
       findings: item.findings,
@@ -416,6 +534,25 @@ const openDialog = (title: string, item?: Image) => {
 const closeDialog = () => {
   dialog.value = false
   editedItem.value = Object.assign({}, defaultItem)
+}
+
+const onTableOptionsUpdate = (options: { page: number; itemsPerPage: number; sortBy: DataTableSortItem[] }) => {
+  const nextSortBy = normalizeSortBy(options.sortBy)
+  const currentSortBy = normalizeSortBy(sortBy.value)
+
+  if (
+    page.value === options.page &&
+    itemsPerPage.value === options.itemsPerPage &&
+    JSON.stringify(currentSortBy) === JSON.stringify(nextSortBy)
+  ) {
+    return
+  }
+
+  page.value = options.page
+  itemsPerPage.value = options.itemsPerPage
+  if (!areSortByEqual(sortBy.value, nextSortBy)) {
+    sortBy.value = nextSortBy
+  }
 }
 
 const save = async () => {
@@ -548,6 +685,10 @@ const onViewComponentLocations = (image: Image) => {
   router.push({ name: 'component-locations', params: { uuid: image.uuid } })
 }
 
+const openImageComparisons = () => {
+  router.push({ name: 'image-comparisons' })
+}
+
 const formatDigest = (digest: string) => {
   if (!digest) return ''
   if (digest.length <= 20) return digest
@@ -585,6 +726,63 @@ const getFindingsColor = (findings: number) => {
   if (findings === 0) return 'success'
   if (findings <= 5) return 'warning'
   return 'error'
+}
+
+const hasLineage = (image: Image) =>
+  Boolean(image.lineage_label && image.lineage_label !== 'unknown')
+
+const lineageSourceLabel = (source?: string) => {
+  switch (source) {
+    case 'sbom_distro':
+      return 'SBOM distro'
+    case 'package_distro':
+      return 'Pkg distro'
+    default:
+      return 'Unknown'
+  }
+}
+
+const lineageSourceTooltip = (source?: string) => {
+  switch (source) {
+    case 'sbom_distro':
+      return 'Detected directly from SBOM distro metadata.'
+    case 'package_distro':
+      return 'Inferred from OS package metadata when SBOM distro was unavailable.'
+    default:
+      return 'OS lineage could not be determined.'
+  }
+}
+
+const osEolStatusLabel = (status?: string) => {
+  switch (status) {
+    case 'eol':
+      return 'EOL distro'
+    case 'supported':
+      return 'Supported'
+    default:
+      return 'Unknown'
+  }
+}
+
+const osEolStatusColor = (status?: string) => {
+  switch (status) {
+    case 'eol':
+      return 'error'
+    case 'supported':
+      return 'success'
+    default:
+      return 'grey'
+  }
+}
+
+const osEolStatusTooltip = (image: Image) => {
+  if (image.os_eol_status === 'eol') {
+    return image.os_eol_message || 'Grype detected packages from an end-of-life distro. Vulnerability coverage may be incomplete.'
+  }
+  if (image.os_eol_status === 'supported') {
+    return 'No distro EOL warning was present in Grype for this tracked OS lineage.'
+  }
+  return 'OS lifecycle status is currently unknown.'
 }
 
 const onRowClick = (item: Image) => {
@@ -696,6 +894,41 @@ onUnmounted(() => {
 .switch-compact :deep(.v-label) {
   font-size: 0.75rem;
   opacity: 0.7;
+}
+
+.date-meta-cell {
+  line-height: 1.2;
+}
+
+.image-name-cell {
+  min-width: 260px;
+}
+
+.image-name-cell__title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.lineage-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.lineage-cell__label {
+  max-width: 100%;
+}
+
+.date-meta-cell__primary {
+  font-weight: 500;
+}
+
+.date-meta-cell__secondary {
+  color: #6b7280;
+  font-size: 0.82rem;
+  margin-top: 4px;
 }
 
 .clickable-row {

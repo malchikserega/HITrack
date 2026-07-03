@@ -36,9 +36,10 @@
       </v-row>
       <v-row>
         <v-col cols="12">
-          <v-data-table
+          <v-data-table-server
             :headers="headers"
             :items="repositories"
+            :items-length="totalItems"
             :loading="loading"
             class="elevation-1"
             hover
@@ -46,9 +47,8 @@
             :items-per-page="itemsPerPage"
             :page="page"
             v-model:sort-by="sortBy"
-            :server-items-length="totalItems"
             hide-default-footer
-            @update:sort-by="sortBy = $event"
+            @update:options="onTableOptionsUpdate"
           >
             <template #item="{ item }">
               <tr class="clickable-row" @click="onRowClick(item)">
@@ -84,8 +84,14 @@
                     {{ item.tag_count }}
                   </v-chip>
                 </td>
-                <td>{{ $formatDate(item.created_at) }}</td>
-                <td>{{ $formatDate(item.updated_at) }}</td>
+                <td>
+                  <div class="date-meta-cell">
+                    <div class="date-meta-cell__primary">{{ $formatDate(item.updated_at) }}</div>
+                    <div class="date-meta-cell__secondary">
+                      Created: {{ $formatDate(item.created_at) }}
+                    </div>
+                  </div>
+                </td>
                 <td>
                   <div style="display: flex; flex-direction: row; gap: 8px; justify-content: center; align-items: center;">
                     <v-tooltip :text="getScanTooltip(item)" location="top">
@@ -132,7 +138,7 @@
                 </td>
               </tr>
             </template>
-          </v-data-table>
+          </v-data-table-server>
         </v-col>
       </v-row>
 
@@ -245,6 +251,18 @@ import { useRouter } from 'vue-router'
 
 interface SortItem { key: string; order: 'asc' | 'desc' }
 
+const normalizeSortBy = (items?: readonly SortItem[]): SortItem[] =>
+  (items || []).map((item) => {
+    const order: 'asc' | 'desc' = item.order === 'desc' ? 'desc' : 'asc'
+    return {
+      key: item.key,
+      order,
+    }
+  })
+
+const areSortByEqual = (left: readonly SortItem[], right: readonly SortItem[]) =>
+  JSON.stringify(normalizeSortBy(left)) === JSON.stringify(normalizeSortBy(right))
+
 const router = useRouter()
 const repositories = ref<Repository[]>([])
 const loading = ref(false)
@@ -280,8 +298,7 @@ const headers: any[] = [
   { title: 'URL', key: 'url', sortable: true },
   { title: 'Status', key: 'scan_status', sortable: false, width: '190px' },
   { title: 'Tags', key: 'tag_count', align: 'center', sortable: true },
-  { title: 'Created', key: 'created_at', sortable: true },
-  { title: 'Updated', key: 'updated_at', sortable: true },
+  { title: 'Updated', key: 'updated_at', sortable: true, width: '210px' },
   { title: 'Actions', key: 'actions', sortable: false }
 ]
 
@@ -368,6 +385,25 @@ const onPageChange = (newPage: number) => {
 const onItemsPerPageChange = (newItemsPerPage: number) => {
   itemsPerPage.value = newItemsPerPage
   page.value = 1 // Reset to first page when changing items per page
+}
+
+const onTableOptionsUpdate = (options: { page: number; itemsPerPage: number; sortBy: SortItem[] }) => {
+  const nextSortBy = normalizeSortBy(options.sortBy)
+  const currentSortBy = normalizeSortBy(sortBy.value)
+
+  if (
+    page.value === options.page &&
+    itemsPerPage.value === options.itemsPerPage &&
+    JSON.stringify(currentSortBy) === JSON.stringify(nextSortBy)
+  ) {
+    return
+  }
+
+  page.value = options.page
+  itemsPerPage.value = options.itemsPerPage
+  if (!areSortByEqual(sortBy.value, nextSortBy)) {
+    sortBy.value = nextSortBy
+  }
 }
 
 const openDialog = (title: string, item?: Repository) => {
@@ -614,6 +650,20 @@ onUnmounted(() => {
   align-items: center;
   text-align: center;
   min-width: 40px;
+}
+
+.date-meta-cell {
+  line-height: 1.2;
+}
+
+.date-meta-cell__primary {
+  font-weight: 500;
+}
+
+.date-meta-cell__secondary {
+  color: #6b7280;
+  font-size: 0.82rem;
+  margin-top: 4px;
 }
 
 .v-theme--matrix :deep(.v-table .v-table__wrapper > table > thead > tr > th) {

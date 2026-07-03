@@ -2,7 +2,7 @@ from django.contrib import admin
 from django.contrib import messages
 from django.utils import timezone
 from django.db import models
-from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, VulnerabilityDetails, ContainerRegistry, ComponentVersionVulnerability, Release, RepositoryTagRelease
+from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, VulnerabilityDetails, ContainerRegistry, ComponentVersionVulnerability, Release, RepositoryTagRelease, ThreatIntelSnapshot
 from .tasks import update_vulnerability_details
 
 
@@ -70,6 +70,14 @@ class ImageAdmin(admin.ModelAdmin):
     search_fields = ('name', 'digest')
     list_filter = ('scan_status',)
     filter_horizontal = ('repository_tags',)
+
+
+@admin.register(ThreatIntelSnapshot)
+class ThreatIntelSnapshotAdmin(admin.ModelAdmin):
+    list_display = ('snapshot_date', 'period_start', 'period_end', 'created_at', 'updated_at')
+    search_fields = ('snapshot_date',)
+    ordering = ('-snapshot_date', '-updated_at')
+    readonly_fields = ('created_at', 'updated_at')
 
 @admin.register(Component)
 class ComponentAdmin(admin.ModelAdmin):
