@@ -46,7 +46,49 @@
                 </v-chip>
               </div>
               <div class="mb-1"><b>Digest:</b> <span class="digest-text">{{ image.digest }}</span></div>
+              <div class="mb-3">
+                <b>OS / Distro:</b>
+                <template v-if="hasLineage(image)">
+                  <v-chip
+                    size="small"
+                    color="teal"
+                    variant="tonal"
+                    class="ml-2 mr-2"
+                  >
+                    {{ image.lineage_label }}
+                  </v-chip>
+                  <v-tooltip location="top">
+                    <template #activator="{ props }">
+                      <v-chip
+                        v-bind="props"
+                        size="x-small"
+                        color="grey-darken-1"
+                        variant="outlined"
+                      >
+                        {{ lineageSourceLabel(image.lineage_source) }}
+                      </v-chip>
+                    </template>
+                    <span>{{ lineageSourceTooltip(image.lineage_source) }}</span>
+                  </v-tooltip>
+                  <v-tooltip v-if="image.os_eol_status && image.os_eol_status !== 'unknown'" location="top">
+                    <template #activator="{ props }">
+                      <v-chip
+                        v-bind="props"
+                        size="x-small"
+                        :color="osEolStatusColor(image.os_eol_status)"
+                        variant="tonal"
+                        class="mr-2"
+                      >
+                        {{ osEolStatusLabel(image.os_eol_status) }}
+                      </v-chip>
+                    </template>
+                    <span>{{ osEolStatusTooltip(image) }}</span>
+                  </v-tooltip>
+                </template>
+                <span v-else class="text-medium-emphasis ml-2">Unknown</span>
+              </div>
               <div class="mb-1"><b>Updated:</b> {{ $formatDate(image.updated_at) }}</div>
+              <div class="mb-1"><b>Created:</b> {{ $formatDate(image.created_at) }}</div>
             </v-card>
 
             <!-- Two circles below card -->
@@ -281,19 +323,20 @@
                     <div v-if="componentsSearch" class="text-caption text-grey mb-4 text-right">
                       Found {{ componentsTotal }} result{{ componentsTotal !== 1 ? 's' : '' }}
                     </div>
-                    <v-data-table
+                    <v-data-table-server
                       :headers="componentHeaders"
                       :items="components"
+                      :items-length="componentsTotal"
                       :loading="componentsLoading"
                       :items-per-page="componentsPerPage"
                       :page="componentsPage"
-                      :sort-by="componentsSortBy"
-                      :sort-desc="componentsSortDesc"
+                      v-model:sort-by="componentsSortBy"
                       hide-default-footer
                       class="elevation-1"
                       hover
                       density="comfortable"
                       :no-data-text="componentsSearch ? 'No components found matching your search' : 'No components found'"
+                      @update:options="onComponentsTableOptionsUpdate"
                       @click:row="onComponentRowClick"
                     >
                       <template v-slot:item.name="{ item }">
@@ -306,6 +349,97 @@
                         <v-chip size="small" :color="getComponentTypeColor(item.component.type)" variant="tonal">
                           {{ item.component.type }}
                         </v-chip>
+                      </template>
+                      <template v-slot:item.dependency_scope="{ item }">
+                        <v-tooltip location="top">
+                          <template #activator="{ props }">
+                            <v-chip
+                              v-bind="props"
+                              size="small"
+                              :color="dependencyScopeColor(item.dependency_scope)"
+                              variant="tonal"
+                            >
+                              {{ dependencyScopeLabel(item.dependency_scope, item.dependency_depth) }}
+                            </v-chip>
+                          </template>
+                          <span>{{ dependencyScopeTooltip(item) }}</span>
+                        </v-tooltip>
+                      </template>
+                      <template v-slot:item.package_context="{ item }">
+                        <div class="d-flex flex-wrap ga-1">
+                          <v-tooltip
+                            v-if="item.direct_introducer_name"
+                            location="top"
+                          >
+                            <template #activator="{ props }">
+                              <v-chip
+                                v-bind="props"
+                                size="x-small"
+                                color="deep-orange"
+                                variant="outlined"
+                              >
+                                via {{ item.direct_introducer_name }}<template v-if="item.direct_introducer_version">@{{ item.direct_introducer_version }}</template>
+                              </v-chip>
+                            </template>
+                            <span>{{ dependencyIntroducerTooltip(item) }}</span>
+                          </v-tooltip>
+                          <v-tooltip
+                            v-if="item.immediate_parent_name && item.immediate_parent_name !== item.direct_introducer_name"
+                            location="top"
+                          >
+                            <template #activator="{ props }">
+                              <v-chip
+                                v-bind="props"
+                                size="x-small"
+                                color="orange-darken-2"
+                                variant="tonal"
+                              >
+                                parent {{ item.immediate_parent_name }}<template v-if="item.immediate_parent_version">@{{ item.immediate_parent_version }}</template>
+                              </v-chip>
+                            </template>
+                            <span>{{ dependencyParentTooltip(item) }}</span>
+                          </v-tooltip>
+                          <v-chip
+                            v-if="item.package_scope && item.package_scope !== 'unknown'"
+                            size="x-small"
+                            color="indigo"
+                            variant="tonal"
+                          >
+                            {{ packageScopeLabel(item.package_scope) }}
+                          </v-chip>
+                          <v-chip
+                            v-if="item.package_arch"
+                            size="x-small"
+                            color="blue-grey"
+                            variant="outlined"
+                          >
+                            {{ item.package_arch }}
+                          </v-chip>
+                          <v-chip
+                            v-if="item.source_package"
+                            size="x-small"
+                            color="deep-purple"
+                            variant="outlined"
+                          >
+                            src: {{ item.source_package }}<template v-if="item.source_package_version">@{{ item.source_package_version }}</template>
+                          </v-chip>
+                          <v-chip
+                            v-if="item.package_repo"
+                            size="x-small"
+                            color="brown"
+                            variant="outlined"
+                          >
+                            repo: {{ item.package_repo }}
+                          </v-chip>
+                          <v-chip
+                            v-if="item.package_channel"
+                            size="x-small"
+                            color="brown"
+                            variant="tonal"
+                          >
+                            {{ item.package_channel }}
+                          </v-chip>
+                        </div>
                       </template>
                       <template v-slot:item.vulnerabilities_count="{ item }: { item: ComponentVersion }">
                         <v-chip
@@ -329,7 +463,7 @@
                       <template v-slot:item.created_at="{ item }">
                         {{ $formatDate(item.created_at) }}
                       </template>
-                    </v-data-table>
+                    </v-data-table-server>
                     <div class="d-flex align-center justify-end mt-2 gap-4">
                       <v-select
                         :items="[10, 20, 50, 100]"
@@ -344,7 +478,6 @@
                       <v-pagination
                         v-model="componentsPage"
                         :length="componentsPageCount"
-                        @update:model-value="fetchComponents"
                         :total-visible="7"
                         density="comfortable"
                       />
@@ -374,18 +507,19 @@
                         Found {{ vulnerabilitiesTotal }} result{{ vulnerabilitiesTotal !== 1 ? 's' : '' }}
                       </div>
                     </div>
-                    <v-data-table
+                    <v-data-table-server
                       :headers="vulnerabilityHeaders"
                       :items="vulnerabilities"
+                      :items-length="vulnerabilitiesTotal"
                       :loading="vulnerabilitiesLoading"
                       :items-per-page="vulnerabilitiesPerPage"
                       :page="vulnerabilitiesPage"
-                      :sort-by="vulnerabilitiesSortBy"
-                      :sort-desc="vulnerabilitiesSortDesc"
+                      v-model:sort-by="vulnerabilitiesSortBy"
                       hide-default-footer
                       class="elevation-1"
                       hover
                       density="comfortable"
+                      @update:options="onVulnerabilitiesTableOptionsUpdate"
                       @click:row="onVulnerabilityRowClick"
                       :no-data-text="vulnerabilitiesSearch ? 'No vulnerabilities found matching your search' : 'No vulnerabilities found'"
                     >
@@ -460,7 +594,7 @@
                         <span v-else-if="item.fix_state" class="text-caption text-grey">{{ item.fix_state }}</span>
                         <span v-else class="text-caption text-grey">No fix available</span>
                       </template>
-                    </v-data-table>
+                    </v-data-table-server>
                     <div class="d-flex align-center justify-end mt-2 gap-4">
                       <v-select
                         :items="[10, 20, 50, 100]"
@@ -475,7 +609,6 @@
                       <v-pagination
                         v-model="vulnerabilitiesPage"
                         :length="vulnerabilitiesPageCount"
-                        @update:model-value="fetchVulnerabilities"
                         :total-visible="7"
                         density="comfortable"
                       />
@@ -690,6 +823,148 @@ const breadcrumbItems = computed((): BreadcrumbItem[] => {
   return items
 })
 
+const hasLineage = (item: Image | null) =>
+  Boolean(item?.lineage_label && item.lineage_label !== 'unknown')
+
+const lineageSourceLabel = (source?: string) => {
+  switch (source) {
+    case 'sbom_distro':
+      return 'SBOM distro'
+    case 'package_distro':
+      return 'Pkg distro'
+    default:
+      return 'Unknown'
+  }
+}
+
+const lineageSourceTooltip = (source?: string) => {
+  switch (source) {
+    case 'sbom_distro':
+      return 'Detected directly from SBOM distro metadata.'
+    case 'package_distro':
+      return 'Inferred from OS package metadata when SBOM distro was unavailable.'
+    default:
+      return 'OS lineage could not be determined.'
+  }
+}
+
+const osEolStatusLabel = (status?: string) => {
+  switch (status) {
+    case 'eol':
+      return 'EOL distro'
+    case 'supported':
+      return 'Supported'
+    default:
+      return 'Unknown'
+  }
+}
+
+const osEolStatusColor = (status?: string) => {
+  switch (status) {
+    case 'eol':
+      return 'error'
+    case 'supported':
+      return 'success'
+    default:
+      return 'grey'
+  }
+}
+
+const osEolStatusTooltip = (item: Image | null) => {
+  if (!item) return 'OS lifecycle status is currently unknown.'
+  if (item.os_eol_status === 'eol') {
+    return item.os_eol_message || 'Grype detected packages from an end-of-life distro. Vulnerability coverage may be incomplete.'
+  }
+  if (item.os_eol_status === 'supported') {
+    return 'No distro EOL warning was present in Grype for this tracked OS lineage.'
+  }
+  return 'OS lifecycle status is currently unknown.'
+}
+
+const dependencyScopeColor = (scope?: string | null) => {
+  switch (scope) {
+    case 'direct':
+      return 'primary'
+    case 'transitive':
+      return 'deep-orange'
+    default:
+      return 'grey'
+  }
+}
+
+const dependencyScopeLabel = (scope?: string | null, depth?: number | null) => {
+  switch (scope) {
+    case 'direct':
+      return 'Direct'
+    case 'transitive':
+      return depth != null ? `Transitive (${depth})` : 'Transitive'
+    default:
+      return 'Unknown'
+  }
+}
+
+const dependencyScopeTooltip = (component: ComponentVersion) => {
+  if (component.dependency_scope === 'direct') {
+    return 'Derived from Syft dependency relationships: this package appears at the root level for the image.'
+  }
+  if (component.dependency_scope === 'transitive') {
+    const viaRef = formatComponentReference(
+      component.direct_introducer_name,
+      component.direct_introducer_version,
+    )
+    return component.dependency_depth != null
+      ? `Derived from Syft dependency relationships: transitive dependency depth ${component.dependency_depth}.${viaRef ? ` Introduced through ${viaRef}.` : ''}`
+      : `Derived from Syft dependency relationships: transitive dependency.${viaRef ? ` Introduced through ${viaRef}.` : ''}`
+  }
+  return 'Dependency scope could not be derived reliably from the SBOM relationships.'
+}
+
+const formatComponentReference = (name?: string | null, version?: string | null) => {
+  if (!name) {
+    return ''
+  }
+  return version ? `${name}@${version}` : name
+}
+
+const dependencyIntroducerTooltip = (component: ComponentVersion) => {
+  const viaRef = formatComponentReference(
+    component.direct_introducer_name,
+    component.direct_introducer_version,
+  )
+  if (!viaRef) {
+    return 'Nearest direct dependency could not be derived reliably from the SBOM relationships.'
+  }
+  return `Nearest direct dependency that brings this package into the image: ${viaRef}.`
+}
+
+const dependencyParentTooltip = (component: ComponentVersion) => {
+  const parentRef = formatComponentReference(
+    component.immediate_parent_name,
+    component.immediate_parent_version,
+  )
+  if (!parentRef) {
+    return 'Immediate parent dependency could not be derived reliably from the SBOM relationships.'
+  }
+  return `Immediate parent in the shortest known SBOM dependency path: ${parentRef}.`
+}
+
+const packageScopeLabel = (scope?: string | null) => {
+  switch (scope) {
+    case 'runtime':
+      return 'runtime'
+    case 'development':
+      return 'dev'
+    case 'build':
+      return 'build'
+    case 'test':
+      return 'test'
+    case 'optional':
+      return 'optional'
+    default:
+      return 'unknown'
+  }
+}
+
 function onLegendClick(i: number) {
   legendVisible.value[i] = !legendVisible.value[i]
 }
@@ -844,15 +1119,28 @@ const componentsLoading = ref(false)
 const componentsTotal = ref(0)
 const componentsPage = ref(1)
 const componentsPerPage = ref(10)
-const componentsSortBy = ref<readonly DataTableSortItem[]>([])
-const componentsSortDesc = ref<boolean[]>([])
+const componentsSortBy = ref<DataTableSortItem[]>([{ key: 'name', order: 'asc' }])
 const componentsSearch = ref('')
 const componentsPageCount = computed(() => Math.ceil(componentsTotal.value / componentsPerPage.value))
 
+const normalizeSortBy = (items?: readonly DataTableSortItem[]): DataTableSortItem[] =>
+  (items || []).map((item) => {
+    const order: 'asc' | 'desc' = item.order === 'desc' ? 'desc' : 'asc'
+    return {
+      key: String(item.key),
+      order,
+    }
+  })
+
+const areSortByEqual = (left: readonly DataTableSortItem[], right: readonly DataTableSortItem[]) =>
+  JSON.stringify(normalizeSortBy(left)) === JSON.stringify(normalizeSortBy(right))
+
 const componentHeaders = [
-  { title: 'Component', key: 'component.name', sortable: true },
+  { title: 'Component', key: 'name', sortable: true },
   { title: 'Version', key: 'version', sortable: true },
-  { title: 'Type', key: 'component.type', sortable: true },
+  { title: 'Type', key: 'type', sortable: true },
+  { title: 'Dependency', key: 'dependency_scope', sortable: false },
+  { title: 'Context', key: 'package_context', sortable: false },
   { title: 'Vulnerabilities', key: 'vulnerabilities_count', sortable: true },
   { title: 'Used in:', key: 'used_count', sortable: true }
 ] as const
@@ -865,12 +1153,11 @@ const fetchComponents = async () => {
   componentsLoading.value = true
   try {
     const sortField = componentsSortBy.value[0]
-    const sortDesc = componentsSortDesc.value[0]
     
     let ordering = undefined
     if (sortField) {
-      const prefix = sortDesc ? '-' : ''
-      ordering = `${prefix}${sortField}`
+      const prefix = sortField.order === 'desc' ? '-' : ''
+      ordering = `${prefix}${String(sortField.key)}`
     }
 
     const params = {
@@ -901,8 +1188,7 @@ const vulnerabilitiesLoading = ref(false)
 const vulnerabilitiesTotal = ref(0)
 const vulnerabilitiesPage = ref(1)
 const vulnerabilitiesPerPage = ref(10)
-const vulnerabilitiesSortBy = ref<readonly DataTableSortItem[]>([])
-const vulnerabilitiesSortDesc = ref<boolean[]>([])
+const vulnerabilitiesSortBy = ref<DataTableSortItem[]>([{ key: 'severity', order: 'desc' }])
 const vulnerabilitiesSearch = ref('')
 const vulnerabilitiesPageCount = computed(() => Math.ceil(vulnerabilitiesTotal.value / vulnerabilitiesPerPage.value))
 
@@ -921,15 +1207,12 @@ const fetchVulnerabilities = async () => {
   }
   vulnerabilitiesLoading.value = true
   try {
-    // Get the first sort field and direction
     const sortField = vulnerabilitiesSortBy.value[0]
-    const sortDesc = vulnerabilitiesSortDesc.value[0]
     
-    // Build ordering parameter
     let ordering = undefined
     if (sortField) {
-      const prefix = sortDesc ? '-' : ''
-      ordering = `${prefix}${sortField}`
+      const prefix = sortField.order === 'desc' ? '-' : ''
+      ordering = `${prefix}${String(sortField.key)}`
     }
 
     const params = {
@@ -970,8 +1253,7 @@ const debouncedFetchVulnerabilities = debounce(() => {
 watch([
   componentsPage,
   componentsPerPage,
-  componentsSortBy,
-  componentsSortDesc
+  componentsSortBy
 ], fetchComponents)
 
 watch(componentsSearch, () => {
@@ -983,8 +1265,7 @@ watch(componentsSearch, () => {
 watch([
   vulnerabilitiesPage,
   vulnerabilitiesPerPage,
-  vulnerabilitiesSortBy,
-  vulnerabilitiesSortDesc
+  vulnerabilitiesSortBy
 ], fetchVulnerabilities)
 
 watch(vulnerabilitiesSearch, () => {
@@ -1002,13 +1283,49 @@ watch(activeTab, (newTab) => {
 const onVulnerabilitiesItemsPerPageChange = (val: number) => {
   vulnerabilitiesPerPage.value = val
   vulnerabilitiesPage.value = 1
-  fetchVulnerabilities()
 }
 
 const onComponentsItemsPerPageChange = (val: number) => {
   componentsPerPage.value = val
   componentsPage.value = 1
-  fetchComponents()
+}
+
+const onComponentsTableOptionsUpdate = (options: { page: number; itemsPerPage: number; sortBy: DataTableSortItem[] }) => {
+  const nextSortBy = normalizeSortBy(options.sortBy)
+  const currentSortBy = normalizeSortBy(componentsSortBy.value)
+
+  if (
+    componentsPage.value === options.page &&
+    componentsPerPage.value === options.itemsPerPage &&
+    JSON.stringify(currentSortBy) === JSON.stringify(nextSortBy)
+  ) {
+    return
+  }
+
+  componentsPage.value = options.page
+  componentsPerPage.value = options.itemsPerPage
+  if (!areSortByEqual(componentsSortBy.value, nextSortBy)) {
+    componentsSortBy.value = nextSortBy
+  }
+}
+
+const onVulnerabilitiesTableOptionsUpdate = (options: { page: number; itemsPerPage: number; sortBy: DataTableSortItem[] }) => {
+  const nextSortBy = normalizeSortBy(options.sortBy)
+  const currentSortBy = normalizeSortBy(vulnerabilitiesSortBy.value)
+
+  if (
+    vulnerabilitiesPage.value === options.page &&
+    vulnerabilitiesPerPage.value === options.itemsPerPage &&
+    JSON.stringify(currentSortBy) === JSON.stringify(nextSortBy)
+  ) {
+    return
+  }
+
+  vulnerabilitiesPage.value = options.page
+  vulnerabilitiesPerPage.value = options.itemsPerPage
+  if (!areSortByEqual(vulnerabilitiesSortBy.value, nextSortBy)) {
+    vulnerabilitiesSortBy.value = nextSortBy
+  }
 }
 
 const onVulnerabilityRowClick = (event: MouseEvent, { item }: { item: Vulnerability }) => {

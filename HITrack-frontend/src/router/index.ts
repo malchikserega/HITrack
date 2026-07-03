@@ -30,6 +30,24 @@ const router = createRouter({
       meta: { requiresAuth: true }
     },
     {
+      path: '/image-comparisons',
+      name: 'image-comparisons',
+      component: () => import('../views/ImageComparisonsView.vue'),
+      meta: { requiresAuth: true }
+    },
+    {
+      path: '/root-causes',
+      name: 'shared-root-causes',
+      component: () => import('../views/SharedRootCausesView.vue'),
+      meta: { requiresAuth: true }
+    },
+    {
+      path: '/base-lineage-root-causes',
+      name: 'base-lineage-root-causes',
+      component: () => import('../views/BaseLineageRootCausesView.vue'),
+      meta: { requiresAuth: true }
+    },
+    {
       path: '/images/:uuid',
       name: 'image-detail',
       component: () => import('../views/ImageDetailView.vue'),
@@ -51,6 +69,18 @@ const router = createRouter({
       path: '/vulnerabilities/:uuid',
       name: 'vulnerability-detail',
       component: () => import('../views/VulnerabilityDetailView.vue'),
+      meta: { requiresAuth: true }
+    },
+    {
+      path: '/activities',
+      name: 'recent-activities',
+      component: () => import('../views/RecentActivitiesView.vue'),
+      meta: { requiresAuth: true }
+    },
+    {
+      path: '/threat-intel',
+      name: 'weekly-threat-intel',
+      component: () => import('../views/WeeklyThreatIntelView.vue'),
       meta: { requiresAuth: true }
     },
     {

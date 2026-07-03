@@ -45,13 +45,18 @@
           </v-card-title>
           
           <v-card-text class="pa-0">
-            <v-data-table
+            <v-data-table-server
               :headers="headers"
-              :items="filteredReleases"
+              :items="releases"
+              :items-length="totalReleases"
               :loading="loading"
-              :search="search"
+              :items-per-page="itemsPerPage"
+              :page="page"
+              v-model:sort-by="sortBy"
+              hide-default-footer
               class="elevation-0"
               item-value="uuid"
+              @update:options="onTableOptionsUpdate"
             >
               <template #item.name="{ item }">
                 <div class="d-flex align-center">
@@ -126,7 +131,28 @@
                   />
                 </div>
               </template>
-            </v-data-table>
+            </v-data-table-server>
+            <div class="d-flex align-center justify-end px-4 py-3 gap-4">
+              <v-select
+                :items="[10, 25, 50, 100]"
+                v-model="itemsPerPage"
+                label="Items per page"
+                density="compact"
+                variant="outlined"
+                hide-details
+                style="width: 90px"
+                @update:model-value="onItemsPerPageChange"
+              />
+              <span class="text-body-2">
+                {{ releaseRangeStart }}-{{ releaseRangeEnd }} of {{ totalReleases }}
+              </span>
+              <v-pagination
+                v-model="page"
+                :length="pageCount"
+                :total-visible="7"
+                density="comfortable"
+              />
+            </div>
           </v-card-text>
         </v-card>
       </v-col>
@@ -254,6 +280,73 @@
                     This release still has {{ incompleteReleaseTagCount }} tag(s) that are not fully scanned yet.
                   </template>
                 </v-alert>
+              </v-col>
+            </v-row>
+
+            <v-row class="mb-4">
+              <v-col cols="12" md="6">
+                <v-card variant="outlined" class="h-100">
+                  <v-card-title class="text-subtitle-1 font-weight-bold">Current Exposure</v-card-title>
+                  <v-card-text class="d-flex flex-wrap ga-2">
+                    <v-chip color="error" variant="tonal">
+                      Risk {{ formatRiskScore(releaseAnalytics.weighted_risk_score) }}
+                    </v-chip>
+                    <v-chip color="primary" variant="tonal">
+                      Unique vulns {{ releaseAnalytics.current_unique_vulnerabilities_count }}
+                    </v-chip>
+                    <v-chip color="info" variant="tonal">
+                      Active tags {{ releaseAnalytics.active_tags_count }}
+                    </v-chip>
+                    <v-chip color="secondary" variant="tonal">
+                      Active images {{ releaseAnalytics.active_images_count }}
+                    </v-chip>
+                    <v-chip color="success" variant="tonal">
+                      Fixable now {{ releaseAnalytics.fixability_breakdown.fixable_now }}
+                    </v-chip>
+                    <v-chip color="warning" variant="tonal">
+                      Not in repo {{ releaseAnalytics.fixability_breakdown.fix_exists_but_not_in_repo }}
+                    </v-chip>
+                  </v-card-text>
+                </v-card>
+              </v-col>
+
+              <v-col cols="12" md="6">
+                <v-card variant="outlined" class="h-100">
+                  <v-card-title class="text-subtitle-1 font-weight-bold">
+                    Delta Vs Previous Release
+                  </v-card-title>
+                  <v-card-text>
+                    <div class="text-body-2 mb-3">
+                      <template v-if="releaseDelta.previous_release">
+                        Comparing with {{ releaseDelta.previous_release.name }}
+                        ({{ formatDate(releaseDelta.previous_release.created_at) }})
+                      </template>
+                      <template v-else>
+                        No previous release found for comparison
+                      </template>
+                    </div>
+                    <div class="d-flex flex-wrap ga-2">
+                      <v-chip color="error" variant="tonal">
+                        New {{ releaseDelta.new_vulnerabilities_count }}
+                      </v-chip>
+                      <v-chip color="success" variant="tonal">
+                        Fixed {{ releaseDelta.fixed_vulnerabilities_count }}
+                      </v-chip>
+                      <v-chip color="warning" variant="tonal">
+                        Severity up {{ releaseDelta.severity_increased_count }}
+                      </v-chip>
+                      <v-chip color="deep-orange" variant="tonal">
+                        New KEV {{ releaseDelta.new_kev_relevant_count }}
+                      </v-chip>
+                      <v-chip
+                        :color="releaseDelta.risk_score_delta >= 0 ? 'error' : 'success'"
+                        variant="tonal"
+                      >
+                        Risk {{ formatRiskDelta(releaseDelta.risk_score_delta) }}
+                      </v-chip>
+                    </div>
+                  </v-card-text>
+                </v-card>
               </v-col>
             </v-row>
 
@@ -677,6 +770,7 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { notificationService } from '@/plugins/notifications'
 import api from '@/plugins/axios'
+import type { DataTableSortItem } from 'vuetify'
 
 interface Release {
   uuid: string
@@ -735,6 +829,34 @@ interface ReleaseContentsResponse {
     created_at: string
   }
   summary: ReleaseContentsSummary
+  analytics?: {
+    active_images_count: number
+    active_tags_count: number
+    current_unique_vulnerabilities_count: number
+    weighted_risk_score: number
+    fixability_breakdown: {
+      fixable_now: number
+      fix_exists_but_not_in_repo: number
+      no_fix: number
+      fix_unknown: number
+    }
+  }
+  delta_from_previous_release?: {
+    previous_release?: {
+      uuid: string
+      name: string
+      created_at: string
+      weighted_risk_score: number
+      current_unique_vulnerabilities_count: number
+    } | null
+    previous_unique_vulnerabilities_count: number
+    current_unique_vulnerabilities_count: number
+    new_vulnerabilities_count: number
+    fixed_vulnerabilities_count: number
+    severity_increased_count: number
+    new_kev_relevant_count: number
+    risk_score_delta: number
+  }
   tags: ReleaseTagItem[]
 }
 
@@ -747,6 +869,10 @@ const loading = ref(false)
 const saving = ref(false)
 const deleting = ref(false)
 const search = ref('')
+const page = ref(1)
+const itemsPerPage = ref(10)
+const totalReleases = ref(0)
+const sortBy = ref<DataTableSortItem[]>([{ key: 'created_at', order: 'desc' }])
 const dialog = ref(false)
 const detailsDialog = ref(false)
 const deleteDialog = ref(false)
@@ -783,6 +909,15 @@ const releaseForm = ref({
   description: ''
 })
 
+const normalizeSortBy = (items?: readonly DataTableSortItem[]): DataTableSortItem[] =>
+  (items || []).map((item) => ({
+    key: String(item.key),
+    order: item.order === 'desc' ? 'desc' : 'asc',
+  }))
+
+const areSortByEqual = (left: readonly DataTableSortItem[], right: readonly DataTableSortItem[]) =>
+  JSON.stringify(normalizeSortBy(left)) === JSON.stringify(normalizeSortBy(right))
+
 // Table headers
 const headers = [
   { title: 'Name', key: 'name', sortable: true },
@@ -815,15 +950,15 @@ const jsonTableHeaders = [
 ]
 
 // Computed
-const filteredReleases = computed(() => {
-  if (!search.value) return releases.value
-  
-  const searchLower = search.value.toLowerCase()
-  return releases.value.filter(release => 
-    release.name.toLowerCase().includes(searchLower) ||
-    release.description.toLowerCase().includes(searchLower)
-  )
-})
+const pageCount = computed(() => Math.ceil(totalReleases.value / itemsPerPage.value) || 1)
+
+const releaseRangeStart = computed(() => (
+  totalReleases.value === 0 ? 0 : ((page.value - 1) * itemsPerPage.value) + 1
+))
+
+const releaseRangeEnd = computed(() => (
+  totalReleases.value === 0 ? 0 : Math.min(page.value * itemsPerPage.value, totalReleases.value)
+))
 
 const hasFoundTags = computed(() => {
   return parsedData.value.some(item => 
@@ -864,12 +999,53 @@ const releasableScanCount = computed(() => (
   releaseTags.value.filter(tag => !['success', 'pending', 'in_process'].includes(tag.processing_status)).length
 ))
 
+const releaseAnalytics = computed(() => releaseContents.value?.analytics || {
+  active_images_count: 0,
+  active_tags_count: 0,
+  current_unique_vulnerabilities_count: 0,
+  weighted_risk_score: 0,
+  fixability_breakdown: {
+    fixable_now: 0,
+    fix_exists_but_not_in_repo: 0,
+    no_fix: 0,
+    fix_unknown: 0,
+  },
+})
+
+const releaseDelta = computed(() => releaseContents.value?.delta_from_previous_release || {
+  previous_release: null,
+  previous_unique_vulnerabilities_count: 0,
+  current_unique_vulnerabilities_count: 0,
+  new_vulnerabilities_count: 0,
+  fixed_vulnerabilities_count: 0,
+  severity_increased_count: 0,
+  new_kev_relevant_count: 0,
+  risk_score_delta: 0,
+})
+
+function debounce(fn: Function, delay: number) {
+  let timeout: ReturnType<typeof setTimeout> | null = null
+  return (...args: any[]) => {
+    if (timeout) clearTimeout(timeout)
+    timeout = setTimeout(() => fn(...args), delay)
+  }
+}
+
 // Methods
 const fetchReleases = async () => {
   loading.value = true
   try {
-    const response = await api.get('/releases/with_stats/')
-    releases.value = response.data
+    const params = {
+      page: page.value,
+      page_size: itemsPerPage.value,
+      ordering: sortBy.value.length
+        ? `${sortBy.value[0].order === 'desc' ? '-' : ''}${String(sortBy.value[0].key)}`
+        : undefined,
+      search: search.value || undefined,
+    }
+    const response = await api.get('/releases/with_stats/', { params })
+    releases.value = response.data.results || []
+    totalReleases.value = response.data.count || 0
   } catch (error) {
     console.error('Error fetching releases:', error)
     notificationService.error('Failed to load releases')
@@ -887,11 +1063,42 @@ const fetchReleaseNames = async () => {
   }
 }
 
+const debouncedFetchReleases = debounce(fetchReleases, 300)
+
+const onItemsPerPageChange = (value: number) => {
+  itemsPerPage.value = value
+  page.value = 1
+}
+
+const onTableOptionsUpdate = (options: { page: number; itemsPerPage: number; sortBy: DataTableSortItem[] }) => {
+  const nextSortBy = normalizeSortBy(options.sortBy)
+
+  if (
+    page.value === options.page &&
+    itemsPerPage.value === options.itemsPerPage &&
+    areSortByEqual(sortBy.value, nextSortBy)
+  ) {
+    return
+  }
+
+  page.value = options.page
+  itemsPerPage.value = options.itemsPerPage
+  if (!areSortByEqual(sortBy.value, nextSortBy)) {
+    sortBy.value = nextSortBy
+  }
+}
+
 const checkReleaseNameExists = (name: string, excludeUuid?: string) => {
   return releaseNames.value.some(release => 
     release.name.toLowerCase() === name.toLowerCase() && 
     release.uuid !== excludeUuid
   )
+}
+
+const formatRiskScore = (value: number | string | null | undefined) => Number(value || 0).toFixed(1)
+const formatRiskDelta = (value: number | string | null | undefined) => {
+  const numericValue = Number(value || 0)
+  return `${numericValue >= 0 ? '+' : ''}${numericValue.toFixed(1)}`
 }
 
 const openCreateDialog = () => {
@@ -1383,6 +1590,13 @@ const createReleaseWithTags = async () => {
 onMounted(() => {
   fetchReleases()
   fetchReleaseNames()
+})
+
+watch([page, itemsPerPage, sortBy], fetchReleases)
+
+watch(search, () => {
+  page.value = 1
+  debouncedFetchReleases()
 })
 
 watch(

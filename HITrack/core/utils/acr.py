@@ -9,8 +9,6 @@ It handles authentication, data retrieval, and basic operations with ACR.
 import base64
 import logging
 import re
-import subprocess
-import tempfile
 import urllib.parse
 from typing import Generator, List, Optional, Tuple
 

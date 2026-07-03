@@ -17,41 +17,47 @@
           <v-chip class="mr-2">Type: {{ repository?.repository_type }}</v-chip>
           <v-chip class="mr-2">Tags: {{ repository?.tag_count }}</v-chip>
           <v-chip class="mr-2">URL: {{ repository?.url }}</v-chip>
+          <v-chip class="mr-2" color="primary" variant="tonal">
+            Current vulns: {{ repository?.current_unique_vulnerabilities_count || 0 }}
+          </v-chip>
+          <v-chip class="mr-2" color="error" variant="tonal">
+            Risk score: {{ formatRiskScore(repository?.weighted_risk_score) }}
+          </v-chip>
+          <v-chip class="mr-2" color="info" variant="tonal">
+            Active images: {{ repository?.active_images_count || 0 }}
+          </v-chip>
         </div>
-        <!-- Helm: Image fallback Docker repositories (when chart image refs fail) -->
+        <!-- Helm: Image fallback Docker repositories are managed at registry level -->
         <v-row v-if="repository?.repository_type === 'helm'" class="mt-4">
           <v-col cols="12">
             <v-card variant="outlined" class="pa-4">
               <v-card-title class="text-subtitle-1 font-weight-bold pb-2">
                 Image fallback repositories
               </v-card-title>
-              <v-card-subtitle class="text-caption pb-3">
-                When chart image refs fail to resolve, try these Docker repositories to download the same image.
+              <v-card-subtitle class="text-caption pb-1">
+                Fallback Docker repositories are configured at the registry level and apply to all Helm repositories in that registry.
               </v-card-subtitle>
-              <v-select
-                v-model="selectedFallbackRepoUuids"
-                :items="dockerReposForFallback"
-                item-title="name"
-                item-value="uuid"
-                label="Docker repositories"
-                multiple
-                chips
-                closable-chips
-                density="comfortable"
-                variant="outlined"
-                hide-details
-                class="mb-3"
-                :loading="dockerReposLoading"
-              />
-              <v-btn
-                color="primary"
-                size="small"
-                :loading="savingFallback"
-                :disabled="savingFallback || fallbackUnchanged"
-                @click="saveFallbackRepositories"
-              >
-                Save fallback list
-              </v-btn>
+              <div class="d-flex align-center mt-2">
+                <v-icon size="small" class="mr-2">mdi-information-outline</v-icon>
+                <span class="text-body-2">
+                  Manage fallback repositories on the
+                  <router-link to="/acr">Container Registries</router-link> page.
+                </span>
+              </div>
+              <div v-if="registryFallbackRepos.length" class="mt-3">
+                <v-chip
+                  v-for="(fb, idx) in registryFallbackRepos"
+                  :key="idx"
+                  size="small"
+                  class="mr-2 mb-1"
+                  variant="tonal"
+                >
+                  {{ fb.name || fb.url }}
+                </v-chip>
+              </div>
+              <div v-else class="mt-2 text-body-2 text-medium-emphasis">
+                No fallback repositories configured for this registry.
+              </div>
             </v-card>
           </v-col>
         </v-row>
@@ -309,7 +315,12 @@
             </div>
           </template>
           <template v-slot:item.updated_at="{ item }">
-            {{ $formatDate(item.updated_at) }}
+            <div class="date-meta-cell">
+              <div class="date-meta-cell__primary">{{ $formatDate(item.updated_at) }}</div>
+              <div class="date-meta-cell__secondary">
+                Created: {{ $formatDate(item.created_at) }}
+              </div>
+            </div>
           </template>
         </v-data-table>
         <div class="d-flex align-center justify-end mt-2 gap-4">
@@ -495,7 +506,7 @@ const headers = [
   { title: 'Status', key: 'processing_status', sortable: false, width: '190px' },
   { title: 'Vulnerabilities', key: 'findings', sortable: false, width: '120px' },
   { title: 'Components', key: 'components', sortable: false, width: '120px' },
-  { title: 'Updated', key: 'updated_at', sortable: false, width: '160px' },
+  { title: 'Updated', key: 'updated_at', sortable: false, width: '210px' },
   { title: 'Actions', key: 'actions', sortable: false, width: '172px' }
 ]
 
@@ -557,11 +568,8 @@ const showDeleteDialog = ref(false)
 const tagToDelete = ref<any>(null)
 const scanning = ref(false)
 const showScanDialog = ref(false)
-// Helm: image fallback Docker repositories
-const dockerReposForFallback = ref<{ uuid: string; name: string }[]>([])
-const dockerReposLoading = ref(false)
-const selectedFallbackRepoUuids = ref<string[]>([])
-const savingFallback = ref(false)
+// Helm: registry-level image fallback repositories (read-only display)
+const registryFallbackRepos = ref<{ url: string; name: string; registry_uuid: string }[]>([])
 
 const tagNameRules = [
   (v: string) => !!v || 'Tag name is required',
@@ -858,8 +866,7 @@ const fetchRepository = async () => {
     const resp = await api.get(`repositories/${route.params.uuid}/`)
     repository.value = resp.data
     if (resp.data?.repository_type === 'helm') {
-      selectedFallbackRepoUuids.value = (resp.data.image_fallback_repositories || []).map((r: { uuid: string }) => r.uuid)
-      loadDockerRepos()
+      loadRegistryFallbacks()
     }
   } finally {
     repositoryLoading.value = false
@@ -867,41 +874,22 @@ const fetchRepository = async () => {
   }
 }
 
-const loadDockerRepos = async () => {
-  dockerReposLoading.value = true
-  try {
-    const resp = await api.get('repositories/names/', { params: { repository_type: 'docker' } })
-    dockerReposForFallback.value = (resp.data || []).map((r: any) => ({ uuid: r.uuid, name: r.name }))
-  } catch (e: any) {
-    notificationService.error(e?.response?.data?.error || 'Failed to load Docker repositories')
-  } finally {
-    dockerReposLoading.value = false
+const loadRegistryFallbacks = async () => {
+  const registryUuid = repository.value?.container_registry
+  if (!registryUuid) {
+    registryFallbackRepos.value = []
+    return
   }
-}
-
-const fallbackUnchanged = computed(() => {
-  const current = (repository.value?.image_fallback_repositories || []).map((r: { uuid: string }) => r.uuid).sort().join(',')
-  const selected = [...selectedFallbackRepoUuids.value].sort().join(',')
-  return current === selected
-})
-
-const saveFallbackRepositories = async () => {
-  if (!repository.value?.uuid) return
-  savingFallback.value = true
   try {
-    await api.patch(`repositories/${repository.value.uuid}/`, {
-      image_fallback_repository_uuids: selectedFallbackRepoUuids.value
-    })
-    notificationService.success('Fallback repositories saved')
-    await fetchRepository()
-  } catch (e: any) {
-    notificationService.error(e?.response?.data?.error || 'Failed to save fallback list')
-  } finally {
-    savingFallback.value = false
+    const resp = await api.get(`registries/${registryUuid}/`)
+    registryFallbackRepos.value = resp.data.image_fallback_repositories || []
+  } catch {
+    registryFallbackRepos.value = []
   }
 }
 
 const goBack = () => router.back()
+const formatRiskScore = (value: number | string | null | undefined) => Number(value || 0).toFixed(1)
 const navigateToTagImages = (item: any) => {
   router.push({ name: 'tag-images', params: { uuid: item.uuid } })
 }
@@ -1241,8 +1229,8 @@ onUnmounted(() => {
 
   :deep(.tag-table th:nth-child(6)),
   :deep(.tag-table td:nth-child(6)) {
-    width: 160px;
-    min-width: 160px;
+    width: 210px;
+    min-width: 210px;
   }
 
   :deep(.tag-table th:nth-child(7)),
@@ -1295,5 +1283,19 @@ onUnmounted(() => {
   min-height: 300px;
   display: flex;
   align-items: flex-start;
+}
+
+.date-meta-cell {
+  line-height: 1.2;
+}
+
+.date-meta-cell__primary {
+  font-weight: 500;
+}
+
+.date-meta-cell__secondary {
+  color: #6b7280;
+  font-size: 0.82rem;
+  margin-top: 4px;
 }
 </style> 

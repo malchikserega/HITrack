@@ -93,8 +93,52 @@ export interface Vulnerability extends BaseEntity {
   has_details: boolean
   exploit_available: boolean
   cisa_kev: boolean
+  threat_intel_match?: VulnerabilityThreatIntelMatch
+  weighted_risk_score?: number
+  currently_present?: boolean
+  fixability_category?: string
+  affected_repositories_count?: number
+  affected_tags_count?: number
+  affected_releases_count?: number
+  affected_images_count?: number
+  active_images_count?: number
   created_at: string
   updated_at: string
+}
+
+export interface VulnerabilityRiskPrioritization {
+  weighted_risk_score: number
+  currently_present: boolean
+  fixability_category: string
+  affected_repositories_count: number
+  affected_tags_count: number
+  affected_releases_count: number
+  affected_images_count: number
+  active_images_count: number
+}
+
+export interface VulnerabilityThreatIntelEntry {
+  intel_type: 'observed' | 'kev' | 'supply_chain'
+  label: string
+  identifier: string
+  title: string
+  timestamp?: string | null
+  source_labels?: string[]
+  tags?: string[]
+  matched_by?: string | null
+  matched_identifier?: string | null
+  matched_vulnerability_id?: string | null
+  currently_present?: boolean
+  relevant_in_hitrack?: boolean
+  hitrack_match?: WeeklyThreatIntelMatch | null
+}
+
+export interface VulnerabilityThreatIntelMatch {
+  matched_this_week: boolean
+  period_start?: string | null
+  period_end?: string | null
+  has_external_matches: boolean
+  entries: VulnerabilityThreatIntelEntry[]
 }
 
 /**
@@ -114,6 +158,14 @@ export interface Image extends BaseEntity {
   name: string
   digest: string
   scan_status: string
+  lineage_label?: string
+  lineage_source?: string
+  os_distro_name?: string | null
+  os_distro_version?: string | null
+  os_eol_status?: string
+  os_eol_source?: string
+  os_eol_message?: string | null
+  os_eol_checked_at?: string | null
   has_sbom: boolean
   has_grype: boolean
   findings: number
@@ -136,6 +188,191 @@ export interface Image extends BaseEntity {
   updated_at: string
   repository_tags?: RepositoryTag[]
   component_versions?: ComponentVersion[]
+}
+
+export interface ImageComparisonVariantTag {
+  repository_name: string
+  repository_uuid: string
+  repository_type: string
+  tag: string
+  tag_uuid: string
+}
+
+export interface ImageComparisonVariant {
+  uuid: string
+  name: string
+  logical_name: string
+  registry_host: string
+  repository_path: string
+  digest: string | null
+  scan_status: string
+  has_sbom: boolean
+  has_grype: boolean
+  findings: number
+  unique_findings: number
+  components_count: number
+  repository_tags: ImageComparisonVariantTag[]
+  created_at: string
+  updated_at: string
+}
+
+export interface ImageComparisonGroup {
+  logical_name: string
+  variant_count: number
+  registry_count: number
+  distinct_digests: number
+  different_digests: boolean
+  max_findings: number
+  max_unique_findings: number
+  max_components_count: number
+  latest_updated_at: string
+  status_breakdown: Record<string, number>
+  variants: ImageComparisonVariant[]
+}
+
+export interface RootCauseRepositoryPreview {
+  repository_uuid: string
+  repository_name: string
+  affected_images_count: number
+  affected_tags_count: number
+}
+
+export interface RootCauseVulnerabilityPreview {
+  uuid: string
+  vulnerability_id: string
+  severity: string
+  epss: number
+  cisa_kev: boolean
+  exploit_available: boolean
+  fix_status?: string | null
+}
+
+export interface SharedRootCause {
+  uuid: string
+  component_uuid: string
+  component_name: string
+  version: string
+  component_type: string
+  purl?: string | null
+  latest_version?: string | null
+  affected_repositories_count: number
+  affected_tags_count: number
+  affected_releases_count: number
+  affected_images_count: number
+  vulnerabilities_count: number
+  critical_vulnerabilities_count: number
+  high_vulnerabilities_count: number
+  kev_vulnerabilities_count: number
+  exploit_vulnerabilities_count: number
+  weighted_risk_score: number
+  fixability_category: string
+  fixability_breakdown: {
+    fixable_now: number
+    fix_exists_but_not_in_repo: number
+    no_fix: number
+    fix_unknown: number
+  }
+  latest_seen_at?: string | null
+  repositories_preview: RootCauseRepositoryPreview[]
+  vulnerabilities_preview: RootCauseVulnerabilityPreview[]
+  previews_loaded?: boolean
+}
+
+export interface SharedRootCauseResponse extends PaginatedResponse<SharedRootCause> {
+  scope?: string
+  component_type?: string
+  fixability?: string
+}
+
+export interface SharedRootCausePreviewResponse {
+  repositories_preview: RootCauseRepositoryPreview[]
+  vulnerabilities_preview: RootCauseVulnerabilityPreview[]
+}
+
+export interface BaseLineageComponentPreview {
+  component_uuid: string
+  component_name: string
+  version: string
+  component_type: string
+  affected_images_count: number
+  vulnerabilities_count: number
+}
+
+export interface BaseLineageRootCause {
+  key: string
+  lineage_label: string
+  lineage_source: string
+  affected_repositories_count: number
+  affected_tags_count: number
+  affected_releases_count: number
+  affected_images_count: number
+  vulnerabilities_count: number
+  critical_vulnerabilities_count: number
+  high_vulnerabilities_count: number
+  kev_vulnerabilities_count: number
+  exploit_vulnerabilities_count: number
+  weighted_risk_score: number
+  fixability_category: string
+  fixability_breakdown: {
+    fixable_now: number
+    fix_exists_but_not_in_repo: number
+    no_fix: number
+    fix_unknown: number
+  }
+  latest_seen_at?: string | null
+  repositories_preview: RootCauseRepositoryPreview[]
+  components_preview: BaseLineageComponentPreview[]
+  vulnerabilities_preview: RootCauseVulnerabilityPreview[]
+  previews_loaded?: boolean
+}
+
+export interface BaseLineageRootCauseResponse extends PaginatedResponse<BaseLineageRootCause> {
+  scope?: string
+  fixability?: string
+  include_unknown?: boolean
+}
+
+export interface BaseLineageRootCausePreviewResponse {
+  repositories_preview: RootCauseRepositoryPreview[]
+  components_preview: BaseLineageComponentPreview[]
+  vulnerabilities_preview: RootCauseVulnerabilityPreview[]
+}
+
+export interface BaseLineageRootCauseBatchPreviewEntry extends BaseLineageRootCausePreviewResponse {
+  lineage_label: string
+  lineage_source: string
+}
+
+export interface BaseLineageRootCauseBatchPreviewResponse {
+  results: BaseLineageRootCauseBatchPreviewEntry[]
+}
+
+export type BaseLineageRootCauseSectionName = 'repositories' | 'components' | 'vulnerabilities'
+
+export interface BaseLineageRootCauseSectionResponse<T> {
+  offset: number
+  limit: number
+  next_offset: number | null
+  has_more: boolean
+  results: T[]
+}
+
+export interface VulnerabilityAffectedImageTag {
+  repository_name: string
+  repository_uuid: string
+  repository_type: string
+  tag: string
+  tag_uuid: string
+}
+
+export interface VulnerabilityAffectedImage {
+  uuid: string
+  name: string
+  digest: string
+  scan_status: string
+  has_sbom: boolean
+  has_grype: boolean
+  repository_tags: VulnerabilityAffectedImageTag[]
 }
 
 /**
@@ -161,6 +398,21 @@ export interface ComponentVersion extends BaseEntity {
   vulnerabilities: Vulnerability[]
   vulnerabilities_count: number
   used_count: number
+  dependency_scope?: string | null
+  dependency_depth?: number | null
+  immediate_parent_name?: string | null
+  immediate_parent_version?: string | null
+  direct_introducer_name?: string | null
+  direct_introducer_version?: string | null
+  package_scope?: string | null
+  package_arch?: string | null
+  package_distro?: string | null
+  package_repo?: string | null
+  package_channel?: string | null
+  source_package?: string | null
+  source_package_version?: string | null
+  cataloger?: string | null
+  metadata_type?: string | null
   created_at: string
   updated_at: string
 }
@@ -175,6 +427,54 @@ export interface PaginatedResponse<T> {
   results: T[]
 }
 
+export interface RecentActivity {
+  type: 'scan' | 'vulnerability'
+  title: string
+  timestamp: string
+  severity?: string | null
+  status?: string | null
+  target_type?: 'repository' | 'vulnerability' | 'image' | 'component' | 'repository_tag' | 'release' | null
+  target_uuid?: string | null
+}
+
+export type WeeklyThreatIntelType = 'all' | 'observed' | 'kev' | 'supply_chain'
+
+export interface WeeklyThreatIntelMatch {
+  repository_count: number
+  repositories: string[]
+  tag_count: number
+  tags: string[]
+  image_count: number
+  images: string[]
+}
+
+export interface WeeklyThreatIntelListItem {
+  id: string
+  type: 'observed' | 'kev' | 'supply_chain'
+  identifier: string
+  title: string
+  context: string
+  timestamp: string
+  severity?: string | null
+  source_labels?: string[]
+  tags?: string[]
+  relevant_in_hitrack?: boolean
+  currently_present?: boolean
+  target_type?: 'vulnerability' | null
+  target_uuid?: string | null
+  external_url?: string | null
+  matched_identifier?: string | null
+  matched_by?: string | null
+  matched_vulnerability_id?: string | null
+  hitrack_match?: WeeklyThreatIntelMatch | null
+}
+
+export interface WeeklyThreatIntelResponse extends PaginatedResponse<WeeklyThreatIntelListItem> {
+  period_start?: string
+  period_end?: string
+  selected_type?: WeeklyThreatIntelType
+}
+
 export interface Stats {
   repositories: number
   images: number
@@ -185,10 +485,17 @@ export interface Stats {
 /** Container registry provider (ACR or Artifactory) */
 export type RegistryProvider = 'acr' | 'jfrog'
 
+export interface RegistryFallbackEntry {
+  url: string
+  name: string
+  registry_uuid: string
+}
+
 export interface ContainerRegistry {
   uuid: string
   name: string
   api_url: string
+  image_fallback_repositories?: RegistryFallbackEntry[]
 }
 
 // Celery Task Interfaces
