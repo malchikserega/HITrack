@@ -22,7 +22,6 @@ logger = logging.getLogger(__name__)
 # Configuration
 PAGE_SIZE = 500
 
-
 def get_bearer_token(api_url: str, login: str, password: str) -> str:
     """
     Get a bearer token for ACR authentication.

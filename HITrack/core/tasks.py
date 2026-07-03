@@ -817,6 +817,232 @@ def _normalize_image_digest(digest):
     return normalized
 
 
+_REGISTRY_LOOKUP_CACHE_TTL = 300
+
+
+def _registry_host(registry):
+    if not registry or not getattr(registry, 'api_url', None):
+        return None
+    raw = str(registry.api_url).strip()
+    if not raw:
+        return None
+    if '://' not in raw:
+        raw = f"https://{raw}"
+    parsed = urlparse(raw)
+    return (parsed.netloc or parsed.path or '').strip().lower() or None
+
+
+def _parse_image_reference(image_ref):
+    reference = (image_ref or '').strip()
+    if not reference:
+        return None
+
+    digest = None
+    if '@' in reference:
+        reference, raw_digest = reference.split('@', 1)
+        digest = _normalize_image_digest(raw_digest)
+
+    host = None
+    repository = reference
+    if '/' in reference:
+        first_segment, remainder = reference.split('/', 1)
+        if '.' in first_segment or ':' in first_segment or first_segment == 'localhost':
+            host = first_segment.lower()
+            repository = remainder
+
+    tag = None
+    last_slash = repository.rfind('/')
+    last_colon = repository.rfind(':')
+    if last_colon > last_slash:
+        tag = repository[last_colon + 1:].strip() or None
+        repository = repository[:last_colon]
+
+    repository = repository.strip('/')
+    if not repository:
+        return None
+
+    return {
+        "host": host,
+        "repository": repository,
+        "tag": tag,
+        "digest": digest,
+    }
+
+
+def _compose_image_reference(host, repository, tag=None, digest=None):
+    base = f"{host}/{repository}".strip('/')
+    if digest:
+        normalized = _normalize_image_digest(digest)
+        return f"{base}@{normalized}" if normalized else base
+    if tag:
+        return f"{base}:{tag}"
+    return base
+
+
+def _get_cached_registry_repository_names(registry):
+    from django.core.cache import cache
+    from .utils.registry import get_repositories
+
+    if not registry:
+        return set()
+
+    cache_key = f"registry-repositories:{registry.pk}"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return set(cached)
+
+    names = set()
+    last_repo = None
+    while True:
+        repositories, last_repo = get_repositories(registry, page_size=200, last_repo=last_repo)
+        for repository_info in repositories:
+            if repository_info and repository_info[0]:
+                names.add(repository_info[0])
+        if not last_repo:
+            break
+
+    cache.set(cache_key, sorted(names), _REGISTRY_LOOKUP_CACHE_TTL)
+    return names
+
+
+def _get_cached_registry_tags(registry, repository_name, limit=200):
+    from django.core.cache import cache
+    from .utils.registry import get_tags
+
+    if not registry or not repository_name:
+        return []
+
+    cache_key = f"registry-tags:{registry.pk}:{repository_name}:{limit}"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return list(cached)
+
+    tags = list(get_tags(registry, repository_name, limit=limit))
+    cache.set(cache_key, tags, _REGISTRY_LOOKUP_CACHE_TTL)
+    return tags
+
+
+def _derive_same_registry_repo_candidates(repository, parsed_ref):
+    candidates = []
+    repo_path = parsed_ref.get("repository")
+    if repo_path:
+        candidates.append(repo_path)
+
+    if repo_path and repo_path.startswith("helm/"):
+        candidates.append(repo_path.removeprefix("helm/"))
+
+    repository_name = (getattr(repository, 'name', '') or '').strip('/')
+    base_repo = repository_name.removeprefix("helm/") if repository_name.startswith("helm/") else repository_name
+    base_leaf = base_repo.split('/')[-1] if base_repo else None
+    repo_leaf = repo_path.split('/')[-1] if repo_path else None
+
+    if base_repo and repo_leaf:
+        candidates.extend([
+            f"{base_repo}/{repo_leaf}",
+            f"{base_repo}-{repo_leaf}",
+        ])
+
+    if base_leaf and repo_leaf and base_leaf != base_repo:
+        candidates.extend([
+            f"{base_leaf}/{repo_leaf}",
+            f"{base_leaf}-{repo_leaf}",
+        ])
+
+    if repo_path and repo_leaf and '/' not in repo_path and base_repo:
+        candidates.append(f"{base_repo}/{repo_path}")
+
+    return _dedupe_preserve_order(candidates)
+
+
+def _resolve_helm_image_location(repository, registry, image_ref):
+    from .models import Image
+    from .utils.registry import build_fallback_image_ref, get_image_digest
+
+    existing_image = _pick_preferred_image(list(Image.objects.filter(name=image_ref)[:10]))
+    if existing_image and (
+        existing_image.digest or _has_completed_image_payload(existing_image)
+    ):
+        return image_ref, _normalize_image_digest(existing_image.digest), None
+
+    parsed_ref = _parse_image_reference(image_ref)
+    if not parsed_ref:
+        return image_ref, None, "Unable to parse extracted image reference"
+
+    registry_host = _registry_host(registry)
+    same_registry = bool(registry_host) and (parsed_ref["host"] in {None, registry_host})
+    resolution_notes = []
+
+    if same_registry:
+        repo_names = _get_cached_registry_repository_names(registry)
+        candidate_repositories = _derive_same_registry_repo_candidates(repository, parsed_ref)
+        existing_repositories = [candidate for candidate in candidate_repositories if candidate in repo_names]
+        ordered_repositories = _dedupe_preserve_order(existing_repositories + candidate_repositories)
+
+        for candidate_repository in ordered_repositories:
+            candidate_ref = _compose_image_reference(
+                registry_host,
+                candidate_repository,
+                tag=parsed_ref["tag"],
+                digest=parsed_ref["digest"],
+            )
+            try:
+                digest = _normalize_image_digest(get_image_digest(registry, candidate_ref))
+            except Exception as exc:
+                logger.warning(
+                    "Failed to resolve digest for Helm image candidate %s: %s",
+                    candidate_ref,
+                    exc,
+                )
+                digest = None
+
+            if digest:
+                return candidate_ref, digest, None
+
+            if parsed_ref["tag"] and candidate_repository in repo_names:
+                available_tags = _get_cached_registry_tags(registry, candidate_repository, limit=200)
+                if parsed_ref["tag"] not in available_tags:
+                    preview = ", ".join(available_tags[:3]) if available_tags else "no tags available"
+                    resolution_notes.append(
+                        f"{candidate_repository}: requested tag {parsed_ref['tag']} not found (available: {preview})"
+                    )
+
+    fallback_repositories = []
+    if repository and repository.repository_type == 'helm':
+        fallback_repositories = list(
+            repository.image_fallback_repositories.filter(
+                repository_type='docker',
+                container_registry__isnull=False,
+            ).select_related('container_registry')
+        )
+
+    for fallback_repository in fallback_repositories:
+        candidate_ref = build_fallback_image_ref(fallback_repository, image_ref)
+        if not candidate_ref:
+            continue
+        try:
+            digest = _normalize_image_digest(get_image_digest(fallback_repository.container_registry, candidate_ref))
+        except Exception as exc:
+            logger.warning(
+                "Failed to resolve fallback Helm image candidate %s via %s: %s",
+                candidate_ref,
+                fallback_repository.name,
+                exc,
+            )
+            digest = None
+        if digest:
+            logger.info(
+                "Resolved Helm image %s via configured fallback repo %s as %s",
+                image_ref,
+                fallback_repository.name,
+                candidate_ref,
+            )
+            return candidate_ref, digest, None
+
+    if resolution_notes:
+        return image_ref, None, "; ".join(resolution_notes[:3])
+    return image_ref, None, "No matching image candidate could be resolved in the same registry or configured fallback repositories"
+
+
 def _resolve_repository_tag_image_digest(tag, image_ref, registry):
     from .utils.registry import get_image_digest
 
@@ -2230,46 +2456,63 @@ def process_all_tags():
                             repo_tag.save(update_fields=['processing_status', 'updated_at'])
                             continue
 
-                    resolved_image_ids = []
-                    unresolved_refs = []
-                    for image_ref in _dedupe_preserve_order(image_refs):
-                        resolved_name, image_digest, artifact_ref, resolution_error = _resolve_helm_image_location(
+                    for image_ref in image_refs:
+                        resolved_image_ref, image_digest, resolution_error = _resolve_helm_image_location(
                             repository,
-                            repo_tag,
                             registry,
                             image_ref,
                         )
-                        if not resolved_name:
-                            unresolved_refs.append((image_ref, resolution_error))
+                        if resolution_error:
                             logger.error(
-                                "Failed to resolve Helm child image %s for %s:%s: %s",
-                                image_ref,
+                                "Failed Helm image resolution for %s:%s -> %s: %s",
                                 repository.name,
                                 repo_tag.tag,
+                                image_ref,
                                 resolution_error,
                             )
-                            continue
-
-                        image, created = _get_or_create_canonical_image(
-                            name=resolved_name,
-                            digest=image_digest,
-                            artifact_reference=artifact_ref or resolved_name,
-                        )
-                        resolved_image_ids.append(image.pk)
-                        logger.info(
-                            "%s Helm image %s as %s with digest %s",
-                            'Created' if created else 'Linked',
-                            image_ref,
-                            resolved_name,
-                            image_digest,
-                        )
-
-                    if repository.repository_type == 'helm':
-                        _reconcile_helm_tag_images(repo_tag, resolved_image_ids)
-                        if not resolved_image_ids and (unresolved_refs or image_refs):
                             repo_tag.processing_status = 'error'
                             repo_tag.save(update_fields=['processing_status', 'updated_at'])
                             continue
+                        # Create or get image with proper digest
+                        artifact_ref = f"{repository.url}:{repo_tag.tag}"
+                        if image_digest:
+                            image = Image.objects.filter(name=resolved_image_ref, digest=image_digest).first()
+                            if image:
+                                created = False
+                            else:
+                                existing_image = Image.objects.filter(name=resolved_image_ref).exclude(digest=image_digest).first()
+                                if existing_image:
+                                    image = Image.objects.create(
+                                        name=resolved_image_ref,
+                                        digest=image_digest,
+                                        artifact_reference=artifact_ref
+                                    )
+                                    created = True
+                                else:
+                                    image = Image.objects.create(
+                                        name=resolved_image_ref,
+                                        digest=image_digest,
+                                        artifact_reference=artifact_ref
+                                    )
+                                    created = True
+                        else:
+                            image = Image.objects.filter(name=resolved_image_ref).first()
+                            if image:
+                                created = False
+                            else:
+                                image = Image.objects.create(
+                                    name=resolved_image_ref,
+                                    digest=None,
+                                    artifact_reference=artifact_ref
+                                )
+                                created = True
+                        image.repository_tags.add(repo_tag)
+                        logger.info(
+                            "%s Helm image %s with digest %s",
+                            'Created' if created else 'Linked',
+                            resolved_image_ref,
+                            image_digest,
+                        )
 
                 processed_tags.append(repo_tag.tag)
 
@@ -3651,6 +3894,7 @@ def process_single_tag(tag_uuid: str):
         tag.save()
         repository = tag.repository
         registry = repository.container_registry
+        unresolved_image_refs = []
         logger.info(f"Processing tag {tag.tag} from repository {repository.name}")
 
         def _helm_processing_error_result(message: str):
@@ -3697,6 +3941,8 @@ def process_single_tag(tag_uuid: str):
             # For Helm charts: native Helm (Artifactory index.yaml) or OCI manifest (Docker/ACR)
             image_refs = []
             chart_digest = None
+            unresolved_image_refs = []
+            resolved_image_ids = []
 
             if repository.repository_type == 'helm' and registry.provider == 'jfrog':
                 # Native Helm repo: do not call get_manifest (Helm repos don't expose Docker API).
@@ -3745,31 +3991,25 @@ def process_single_tag(tag_uuid: str):
                         f"Manifest for {repository.name}:{tag.tag} is not recognized as a Helm chart"
                     )
 
-            resolved_image_ids = []
-            unresolved_image_refs = []
-            for image_ref in _dedupe_preserve_order(image_refs):
-                resolved_name, image_digest, artifact_ref, resolution_error = _resolve_helm_image_location(
+            for image_ref in image_refs:
+                resolved_image_ref, image_digest, resolution_error = _resolve_helm_image_location(
                     repository,
-                    tag,
                     registry,
                     image_ref,
                 )
-                if not resolved_name:
-                    unresolved_image_refs.append({
-                        'image_ref': image_ref,
-                        'error': resolution_error,
-                    })
+                if resolution_error:
+                    unresolved_image_refs.append(f"{image_ref}: {resolution_error}")
                     logger.error(
-                        "Failed to resolve Helm child image %s for %s:%s: %s",
-                        image_ref,
+                        "Failed Helm image resolution for %s:%s -> %s: %s",
                         repository.name,
                         tag.tag,
+                        image_ref,
                         resolution_error,
                     )
                     continue
-
+                artifact_ref = f"{repository.url}:{tag.tag}"
                 image, created = _get_or_create_canonical_image(
-                    name=resolved_name,
+                    name=resolved_image_ref,
                     digest=image_digest,
                     artifact_reference=artifact_ref or resolved_name,
                 )
@@ -3790,9 +4030,23 @@ def process_single_tag(tag_uuid: str):
                         f"Unresolved refs: {', '.join(item['image_ref'] for item in unresolved_image_refs) or 'none'}"
                     )
                 )
+                image.repository_tags.add(tag)
+                resolved_image_ids.append(image.pk)
+                logger.info(
+                    "%s Helm image %s with digest %s",
+                    'Created' if created else 'Linked',
+                    resolved_image_ref,
+                    image_digest,
+                )
+
+            if unresolved_image_refs and not resolved_image_ids:
+                return _helm_processing_error_result("; ".join(unresolved_image_refs[:3]))
 
         # Trigger SBOM scan for all images linked to this tag
-        images = tag.images.all()
+        if repository.repository_type == 'helm':
+            images = tag.images.filter(pk__in=resolved_image_ids) if resolved_image_ids else tag.images.none()
+        else:
+            images = tag.images.all()
         started = 0
         repaired_tag_ids = set()
         for image in images:
@@ -3821,6 +4075,32 @@ def process_single_tag(tag_uuid: str):
         total_images_linked = images.count()
         images_pending_before = images.filter(scan_status='pending').count()
         images_in_process_before = images.filter(scan_status='in_process').count()
+
+        if unresolved_image_refs:
+            tag.processing_status = 'error'
+            tag.save(update_fields=['processing_status', 'updated_at'])
+            return {
+                "status": "error",
+                "task_name": "Process Single Tag",
+                "tag_uuid": str(tag_uuid),
+                "repository": repository.name,
+                "repository_uuid": str(repository.uuid),
+                "tag": tag.tag,
+                "tag_digest": tag.digest,
+                "repository_type": repository.repository_type,
+                "error": "; ".join(unresolved_image_refs[:3]),
+                "error_type": "HelmImageResolutionError",
+                "summary": {
+                    "total_images_linked": total_images_linked,
+                    "images_scanned": started,
+                    "images_pending_before": images_pending_before,
+                    "images_in_process_before": images_in_process_before,
+                    "sbom_scans_triggered": started,
+                    "tag_processing_status": tag.processing_status,
+                },
+                "message": f"Helm image resolution failed for one or more images in tag {tag.tag}",
+                "timestamp": timezone.now().isoformat(),
+            }
 
         if total_images_linked == 0:
             tag.processing_status = 'success'

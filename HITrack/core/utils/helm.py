@@ -12,13 +12,9 @@ import yaml
 logger = logging.getLogger(__name__)
 
 RENDERED_IMAGE_RE = re.compile(
-    r'image:\s*["\']?([A-Za-z0-9][A-Za-z0-9./:_${}-]*(?::[A-Za-z0-9._${}-]+|@sha256:[a-f0-9]{64}))'
+    r'image:\s*["\']?([A-Za-z0-9][A-Za-z0-9./:_-]*(?::[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64}))'
 )
 VALUES_PATH_RE = re.compile(r"\.Values(?:\.[A-Za-z0-9_-]+)+")
-REQUIRED_VALUES_RE = re.compile(
-    r'required\s+(?:"[^"]*"|`[^`]*`)\s+(\.Values(?:\.[A-Za-z0-9_-]+)+)'
-    r'|(\.Values(?:\.[A-Za-z0-9_-]+)+)\s*\|\s*required'
-)
 
 
 def _helm_template_error_detail(error: BaseException) -> str:
@@ -60,7 +56,7 @@ def _guess_placeholder_value(path: list[str]) -> Any:
         return "https://example.invalid"
     if "port" in tail:
         return 443
-    if tail in {"replicas", "replicacount", "count"}:
+    if tail in {"replicas", "replicaCount".lower(), "count"}:
         return 1
     return "hitrack-placeholder"
 
@@ -111,7 +107,6 @@ def _discover_images_via_helm_template(chart_path: str, chart_ref: str) -> list[
     overrides: dict[str, Any] = {}
     seen_paths: set[tuple[str, ...]] = set()
     last_error = ""
-    scanned_templates = False
 
     for attempt in range(4):
         try:
@@ -125,17 +120,6 @@ def _discover_images_via_helm_template(chart_path: str, chart_ref: str) -> list[
                 if key not in seen_paths:
                     seen_paths.add(key)
                     new_paths.append(path)
-            if not new_paths and not scanned_templates:
-                scanned_templates = True
-                logger.info(
-                    "No .Values paths in error output for %s; scanning template sources",
-                    chart_ref,
-                )
-                for path in _extract_values_paths_from_templates(chart_path):
-                    key = tuple(path)
-                    if key not in seen_paths:
-                        seen_paths.add(key)
-                        new_paths.append(path)
             if not new_paths:
                 raise RuntimeError(f"Helm template failed for {chart_ref}: {last_error}") from error
             for path in new_paths:
@@ -155,15 +139,9 @@ def _looks_like_image_ref(value: str) -> bool:
     candidate = value.strip().strip("'\"")
     if not candidate:
         return False
-    if candidate.startswith(("http://", "https://")):
-        return False
     if "@sha256:" in candidate:
         return True
-    if ":" in candidate:
-        return True
-    if "/" in candidate and "." in candidate.split("/")[0]:
-        return True
-    return False
+    return ":" in candidate and not candidate.startswith(("http://", "https://"))
 
 
 def _compose_image_from_mapping(node: dict[str, Any]) -> str | None:
@@ -191,14 +169,10 @@ def _compose_image_from_mapping(node: dict[str, Any]) -> str | None:
         return f"{base}@{digest_value}"
 
     if tag is None:
-        if "/" in base or "." in base:
-            return base
         return None
 
     tag_value = str(tag).strip().strip("'\"")
     if not tag_value:
-        if "/" in base or "." in base:
-            return base
         return None
     return f"{base}:{tag_value}"
 
@@ -230,50 +204,8 @@ def _safe_extract_chart_archive(chart_path: str, output_dir: str):
         archive.extractall(output_dir)
 
 
-def _extract_values_paths_from_templates(chart_path: str) -> list[list[str]]:
-    """Scan template files for .Values paths used in ``required`` calls.
-
-    Only targets paths inside ``required "msg" .Values.xxx`` or
-    ``.Values.xxx | required "msg"`` expressions so that we provide
-    placeholders solely for values that cause ``required``/``fail``
-    errors without overriding real defaults (like image repositories).
-    """
-    paths: list[list[str]] = []
-    seen: set[tuple[str, ...]] = set()
-    with tempfile.TemporaryDirectory() as temp_dir:
-        _safe_extract_chart_archive(chart_path, temp_dir)
-        for fp in Path(temp_dir).rglob("*"):
-            if not fp.is_file():
-                continue
-            if "/templates/" not in str(fp).replace("\\", "/"):
-                continue
-            if fp.suffix.lower() not in {".yaml", ".yml", ".tpl"}:
-                continue
-            try:
-                content = fp.read_text(encoding="utf-8")
-            except UnicodeDecodeError:
-                continue
-            for match in REQUIRED_VALUES_RE.finditer(content):
-                raw = match.group(1) or match.group(2)
-                if not raw:
-                    continue
-                segments = [s for s in raw.split(".") if s and s != "Values"]
-                key = tuple(segments)
-                if segments and key not in seen:
-                    seen.add(key)
-                    paths.append(segments)
-    logger.debug(
-        "Template source scan of %s found %d required .Values path(s)",
-        chart_path,
-        len(paths),
-    )
-    return paths
-
-
 def _extract_images_from_chart_archive(chart_path: str) -> list[str]:
     images: set[str] = set()
-    files_scanned = 0
-    values_files_found = 0
     with tempfile.TemporaryDirectory() as temp_dir:
         _safe_extract_chart_archive(chart_path, temp_dir)
         for file_path in Path(temp_dir).rglob("*"):
@@ -285,27 +217,13 @@ def _extract_images_from_chart_archive(chart_path: str) -> list[str]:
                 content = file_path.read_text(encoding="utf-8")
             except UnicodeDecodeError:
                 continue
-            files_scanned += 1
             images.update(_extract_image_refs_from_text(content))
             if file_path.name in {"values.yaml", "values.yml"}:
-                values_files_found += 1
                 try:
                     parsed = yaml.safe_load(content)
                 except yaml.YAMLError:
                     parsed = None
-                values_images = _extract_images_from_values_node(parsed)
-                logger.debug(
-                    "Parsed %s: found %d image ref(s) from values structure",
-                    file_path.name,
-                    len(values_images),
-                )
-                images.update(values_images)
-    logger.debug(
-        "Static chart archive scan: %d files scanned, %d values.yaml found, %d total image ref(s)",
-        files_scanned,
-        values_files_found,
-        len(images),
-    )
+                images.update(_extract_images_from_values_node(parsed))
     return sorted(images)
 
 
