@@ -4420,26 +4420,54 @@ def backfill_image_sbom_security_metadata(batch_size: int = 100):
 @celery_app.task(name="Delete Old Repository Tags")
 def delete_old_repository_tags(days: int = 1):
     """
-    Delete all RepositoryTag objects older than `days` days.
+    Delete all RepositoryTag objects older than `days` days, along with any
+    Image records that become orphaned as a result (i.e. images linked only
+    to tags being deleted, not shared with any tag that is kept).
     """
-    from .models import RepositoryTag
+    from django.db.models import Exists, OuterRef
+    from .models import RepositoryTag, Image
+
     cutoff = timezone.now() - timedelta(days=days)
-    deleted_count, _ = RepositoryTag.objects.filter(created_at__lt=cutoff).delete()
+    tag_ids = list(
+        RepositoryTag.objects.filter(created_at__lt=cutoff).values_list('pk', flat=True)
+    )
+
+    deleted_image_count = 0
+    if tag_ids:
+        kept_tag_exists = RepositoryTag.objects.filter(images=OuterRef('pk')).exclude(pk__in=tag_ids)
+        orphaned_image_ids = list(
+            Image.objects.filter(repository_tags__pk__in=tag_ids)
+            .annotate(has_kept_tag=Exists(kept_tag_exists))
+            .filter(has_kept_tag=False)
+            .values_list('pk', flat=True)
+            .distinct()
+        )
+        if orphaned_image_ids:
+            deleted_image_count, _ = Image.objects.filter(pk__in=orphaned_image_ids).delete()
+
+    deleted_count = len(tag_ids)
+    if tag_ids:
+        RepositoryTag.objects.filter(pk__in=tag_ids).delete()
+
     # Calculate cleanup statistics
     cutoff_date_formatted = cutoff.strftime("%Y-%m-%d")
     space_saved_estimate = deleted_count * 0.1  # Rough estimate: 0.1 KB per tag record
-    
+
     return {
         "status": "success",
         "task_name": "Delete Old Repository Tags",
         "summary": {
             "deleted_count": deleted_count,
+            "deleted_image_count": deleted_image_count,
             "cutoff_days": days,
             "cutoff_date": cutoff_date_formatted,
             "space_saved_kb": round(space_saved_estimate, 2),
             "cleanup_type": "old_repository_tags"
         },
-        "message": f"Cleanup completed: {deleted_count} old repository tags removed",
+        "message": (
+            f"Cleanup completed: {deleted_count} old repository tags removed, "
+            f"{deleted_image_count} orphaned images removed"
+        ),
         "details": {
             "cutoff_criteria": f"Tags older than {days} days",
             "cutoff_timestamp": cutoff.isoformat(),
