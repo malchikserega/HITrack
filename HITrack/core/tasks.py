@@ -954,95 +954,6 @@ def _derive_same_registry_repo_candidates(repository, parsed_ref):
     return _dedupe_preserve_order(candidates)
 
 
-def _resolve_helm_image_location(repository, registry, image_ref):
-    from .models import Image
-    from .utils.registry import build_fallback_image_ref, get_image_digest
-
-    existing_image = _pick_preferred_image(list(Image.objects.filter(name=image_ref)[:10]))
-    if existing_image and (
-        existing_image.digest or _has_completed_image_payload(existing_image)
-    ):
-        return image_ref, _normalize_image_digest(existing_image.digest), None
-
-    parsed_ref = _parse_image_reference(image_ref)
-    if not parsed_ref:
-        return image_ref, None, "Unable to parse extracted image reference"
-
-    registry_host = _registry_host(registry)
-    same_registry = bool(registry_host) and (parsed_ref["host"] in {None, registry_host})
-    resolution_notes = []
-
-    if same_registry:
-        repo_names = _get_cached_registry_repository_names(registry)
-        candidate_repositories = _derive_same_registry_repo_candidates(repository, parsed_ref)
-        existing_repositories = [candidate for candidate in candidate_repositories if candidate in repo_names]
-        ordered_repositories = _dedupe_preserve_order(existing_repositories + candidate_repositories)
-
-        for candidate_repository in ordered_repositories:
-            candidate_ref = _compose_image_reference(
-                registry_host,
-                candidate_repository,
-                tag=parsed_ref["tag"],
-                digest=parsed_ref["digest"],
-            )
-            try:
-                digest = _normalize_image_digest(get_image_digest(registry, candidate_ref))
-            except Exception as exc:
-                logger.warning(
-                    "Failed to resolve digest for Helm image candidate %s: %s",
-                    candidate_ref,
-                    exc,
-                )
-                digest = None
-
-            if digest:
-                return candidate_ref, digest, None
-
-            if parsed_ref["tag"] and candidate_repository in repo_names:
-                available_tags = _get_cached_registry_tags(registry, candidate_repository, limit=200)
-                if parsed_ref["tag"] not in available_tags:
-                    preview = ", ".join(available_tags[:3]) if available_tags else "no tags available"
-                    resolution_notes.append(
-                        f"{candidate_repository}: requested tag {parsed_ref['tag']} not found (available: {preview})"
-                    )
-
-    fallback_repositories = []
-    if repository and repository.repository_type == 'helm':
-        fallback_repositories = list(
-            repository.image_fallback_repositories.filter(
-                repository_type='docker',
-                container_registry__isnull=False,
-            ).select_related('container_registry')
-        )
-
-    for fallback_repository in fallback_repositories:
-        candidate_ref = build_fallback_image_ref(fallback_repository, image_ref)
-        if not candidate_ref:
-            continue
-        try:
-            digest = _normalize_image_digest(get_image_digest(fallback_repository.container_registry, candidate_ref))
-        except Exception as exc:
-            logger.warning(
-                "Failed to resolve fallback Helm image candidate %s via %s: %s",
-                candidate_ref,
-                fallback_repository.name,
-                exc,
-            )
-            digest = None
-        if digest:
-            logger.info(
-                "Resolved Helm image %s via configured fallback repo %s as %s",
-                image_ref,
-                fallback_repository.name,
-                candidate_ref,
-            )
-            return candidate_ref, digest, None
-
-    if resolution_notes:
-        return image_ref, None, "; ".join(resolution_notes[:3])
-    return image_ref, None, "No matching image candidate could be resolved in the same registry or configured fallback repositories"
-
-
 def _resolve_repository_tag_image_digest(tag, image_ref, registry):
     from .utils.registry import get_image_digest
 
@@ -2457,8 +2368,9 @@ def process_all_tags():
                             continue
 
                     for image_ref in image_refs:
-                        resolved_image_ref, image_digest, resolution_error = _resolve_helm_image_location(
+                        resolved_image_ref, image_digest, _resolved_artifact_ref, resolution_error = _resolve_helm_image_location(
                             repository,
+                            repo_tag,
                             registry,
                             image_ref,
                         )
@@ -3544,8 +3456,14 @@ SCAN_REPOSITORY_TAGS_SOFT_LIMIT = 3540
 # When latest_only: max images to consider; pick one tag per image by highest version number
 SCAN_LATEST_ONLY_MAX_IMAGES = 500
 
-# Regex to extract leading semantic version (v1.2.3 or 1.2.3 or 2.0)
-_VERSION_PREFIX_RE = re.compile(r'^v?(\d+(?:\.\d+)*)', re.IGNORECASE)
+# Regex to extract a leading semantic version. Requires either a "v" prefix
+# (v1, v1.2, v1.2.3) or a dotted numeric form (1.2, 1.2.3). A bare number
+# with no dot and no "v" prefix (e.g. a build number, commit-distance or
+# timestamp like "6820093") is deliberately NOT matched here, since such
+# tags previously sorted as a huge "major version" and beat real semver
+# tags like "6.0.4".
+_VERSION_PREFIX_RE = re.compile(r'^v(\d+(?:\.\d+)*)', re.IGNORECASE)
+_DOTTED_VERSION_PREFIX_RE = re.compile(r'^(\d+\.\d+(?:\.\d+)*)')
 
 
 def _version_sort_key(tag: str):
@@ -3558,7 +3476,7 @@ def _version_sort_key(tag: str):
         return (0,)
     if tag.lower() == 'latest':
         return (999999,)  # prefer when no version-like tags exist
-    m = _VERSION_PREFIX_RE.match(tag)
+    m = _VERSION_PREFIX_RE.match(tag) or _DOTTED_VERSION_PREFIX_RE.match(tag)
     if m:
         parts = [int(x) for x in m.group(1).split('.')]
         return tuple(parts)
@@ -3566,10 +3484,21 @@ def _version_sort_key(tag: str):
 
 
 def _pick_latest_tag_by_version(tags):
-    """Given a list of tag names, return the one considered 'latest' by version number."""
+    """
+    Given a list of tag names, return the one considered 'latest'.
+
+    Double sort, as tags can lie about themselves:
+    1) Primary key: parsed semantic version (_version_sort_key), so a real
+       version like "6.0.4" always outranks a non-version-looking tag.
+    2) Secondary key (tie-break only): position in `tags`. Callers pass tags
+       from the registry's chronological listing (e.g. ACR's
+       orderby=timedesc), newest first, so the earliest position wins ties -
+       i.e. the most recently pushed tag is preferred when versions are
+       equal or equally unparseable.
+    """
     if not tags:
         return None
-    return max(tags, key=_version_sort_key)
+    return max(enumerate(tags), key=lambda pair: (_version_sort_key(pair[1]), -pair[0]))[1]
 
 
 @celery_app.task(
@@ -3992,8 +3921,9 @@ def process_single_tag(tag_uuid: str):
                     )
 
             for image_ref in image_refs:
-                resolved_image_ref, image_digest, resolution_error = _resolve_helm_image_location(
+                resolved_image_ref, image_digest, _resolved_artifact_ref, resolution_error = _resolve_helm_image_location(
                     repository,
+                    tag,
                     registry,
                     image_ref,
                 )
@@ -4011,14 +3941,14 @@ def process_single_tag(tag_uuid: str):
                 image, created = _get_or_create_canonical_image(
                     name=resolved_image_ref,
                     digest=image_digest,
-                    artifact_reference=artifact_ref or resolved_name,
+                    artifact_reference=artifact_ref,
                 )
                 resolved_image_ids.append(image.pk)
                 logger.info(
                     "%s Helm image %s as %s with digest %s",
                     'Created' if created else 'Linked',
                     image_ref,
-                    resolved_name,
+                    resolved_image_ref,
                     image_digest,
                 )
 
@@ -4027,16 +3957,8 @@ def process_single_tag(tag_uuid: str):
                 return _helm_processing_error_result(
                     (
                         f"No resolvable child images found for Helm tag {tag.tag}. "
-                        f"Unresolved refs: {', '.join(item['image_ref'] for item in unresolved_image_refs) or 'none'}"
+                        f"Unresolved refs: {', '.join(unresolved_image_refs) or 'none'}"
                     )
-                )
-                image.repository_tags.add(tag)
-                resolved_image_ids.append(image.pk)
-                logger.info(
-                    "%s Helm image %s with digest %s",
-                    'Created' if created else 'Linked',
-                    resolved_image_ref,
-                    image_digest,
                 )
 
             if unresolved_image_refs and not resolved_image_ids:
