@@ -2262,7 +2262,7 @@ class RepositoryTagViewSet(BaseViewSet):
 
     def get_queryset(self):
         qs = super().get_queryset()
-        if self.action == 'retrieve':
+        if self.action in ('list', 'retrieve'):
             qs = _build_repository_tag_detail_queryset(qs)
         return qs
 
@@ -3798,12 +3798,7 @@ class VulnerabilityViewSet(BaseViewSet):
         Get all component versions that contain this vulnerability.
         """
         vulnerability = self.get_object()
-        
-        # Debug logging
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.info(f"Fetching components for vulnerability: {vulnerability.vulnerability_id}")
-        
+
         # Get component versions that have this vulnerability with proper ordering and annotations
         component_versions = ComponentVersion.objects.filter(
             vulnerabilities=vulnerability
@@ -3813,12 +3808,7 @@ class VulnerabilityViewSet(BaseViewSet):
         ).order_by(
             'component__name', 'version', 'created_at'
         )
-        
-        # Debug logging
-        logger.info(f"Found {component_versions.count()} component versions")
-        for cv in component_versions:
-            logger.info(f"Component: {cv.component.name} {cv.version}")
-        
+
         # Apply pagination
         paginator = self.pagination_class()
         page = paginator.paginate_queryset(component_versions, request)
@@ -4637,24 +4627,34 @@ class ReportGeneratorView(APIView):
                 'Vulnerability ID', 'Vulnerability Severity', 'Fixed In'
             ])
 
-            for image in images:
-                findings_qs = ComponentVersionVulnerability.objects.filter(
-                    component_version__images=image
-                ).select_related(
-                    'component_version',
-                    'component_version__component',
-                    'vulnerability'
-                )
-                if findings_qs.exists():
-                    for cvv in findings_qs:
+            image_list = list(images)
+            findings_by_image_id = defaultdict(list)
+            findings_rows = ComponentVersionVulnerability.objects.filter(
+                component_version__images__in=image_list
+            ).values(
+                'component_version__images__id',
+                'component_version__component__name',
+                'component_version__component__type',
+                'component_version__version',
+                'vulnerability__vulnerability_id',
+                'vulnerability__severity',
+                'fix',
+            )
+            for row in findings_rows:
+                findings_by_image_id[row['component_version__images__id']].append(row)
+
+            for image in image_list:
+                rows = findings_by_image_id.get(image.pk)
+                if rows:
+                    for row in rows:
                         ws.append([
                             image.name,
-                            cvv.component_version.component.name,
-                            cvv.component_version.component.type,
-                            cvv.component_version.version,
-                            cvv.vulnerability.vulnerability_id,
-                            cvv.vulnerability.severity,
-                            cvv.fix or 'No fix metadata'
+                            row['component_version__component__name'],
+                            row['component_version__component__type'],
+                            row['component_version__version'],
+                            row['vulnerability__vulnerability_id'],
+                            row['vulnerability__severity'],
+                            row['fix'] or 'No fix metadata'
                         ])
                 else:
                     ws.append([
@@ -4717,10 +4717,10 @@ class ComponentMatrixView(APIView):
         from django.db.models import Max, Prefetch, Subquery, OuterRef
 
         if comparison_type == 'repository':
-            tags = RepositoryTag.objects.filter(
+            tags = list(RepositoryTag.objects.filter(
                 repository__uuid__in=[rt['repo_uuid'] for rt in repo_tags],
                 tag__in=[rt['tag'] for rt in repo_tags]
-            ).select_related('repository').order_by('repository__uuid', '-tag')
+            ).select_related('repository').order_by('repository__uuid', '-tag'))
 
             tag_mapping = {
                 f"{tag.repository.uuid}:{tag.tag}": tag
@@ -4731,6 +4731,7 @@ class ComponentMatrixView(APIView):
             component_set = set()
             image_components = {}
             seen_col_labels = set()
+            col_label_by_tag_pk = {}
             for repo_tag in repo_tags:
                 repo_uuid = repo_tag['repo_uuid']
                 tag_name = repo_tag['tag']
@@ -4748,17 +4749,34 @@ class ComponentMatrixView(APIView):
                     'label': col_label,
                     'type': 'repository'
                 })
-                images_for_tag = Image.objects.filter(repository_tags=tag, sbom_data__isnull=False).order_by('-updated_at')
                 image_components[col_label] = {}
-                for image in images_for_tag:
-                    cvs = image.component_versions.all()
-                    for cv in cvs:
+                col_label_by_tag_pk[tag.pk] = col_label
+
+            # Single query for all images across every selected tag, with component
+            # versions (and their vulnerability links) prefetched instead of queried
+            # per image/per component version.
+            images_for_tags = Image.objects.filter(
+                repository_tags__pk__in=col_label_by_tag_pk.keys(),
+                sbom_data__isnull=False,
+            ).prefetch_related(
+                'repository_tags',
+                'component_versions',
+                'component_versions__component',
+                'component_versions__componentversionvulnerability_set',
+            ).order_by('-updated_at').distinct()
+
+            for image in images_for_tags:
+                for image_tag in image.repository_tags.all():
+                    col_label = col_label_by_tag_pk.get(image_tag.pk)
+                    if not col_label:
+                        continue
+                    for cv in image.component_versions.all():
                         cname = cv.component.name
                         component_set.add(cname)
                         if cname not in image_components[col_label]:
                             image_components[col_label][cname] = {
                                 'version': cv.version,
-                                'has_vuln': cv.componentversionvulnerability_set.exists(),
+                                'has_vuln': bool(cv.componentversionvulnerability_set.all()),
                                 'latest_version': cv.latest_version
                             }
 
@@ -4777,7 +4795,7 @@ class ComponentMatrixView(APIView):
             columns = []
             component_set = set()
             image_components = {}
-            
+
             for image in images:
                 col_label = image.name
                 columns.append({
@@ -4786,17 +4804,17 @@ class ComponentMatrixView(APIView):
                     'label': col_label,
                     'type': 'image'
                 })
-                
+
                 # Get all component versions for this image with their vulnerabilities
                 cvs = image.component_versions.all()
                 image_components[col_label] = {}
-                
+
                 for cv in cvs:
                     cname = cv.component.name
                     component_set.add(cname)
                     image_components[col_label][cname] = {
                         'version': cv.version,
-                        'has_vuln': cv.componentversionvulnerability_set.exists(),
+                        'has_vuln': bool(cv.componentversionvulnerability_set.all()),
                         'latest_version': cv.latest_version
                     }
 
