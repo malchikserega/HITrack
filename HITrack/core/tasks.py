@@ -35,6 +35,10 @@ logger = logging.getLogger(__name__)
 # Remove debug logging in production
 DEBUG_LOGGING = os.getenv('DEBUG_LOGGING', 'False').lower() == 'true'
 
+# SBOM task: docker pull + Syft/Grype often exceeds global CELERY_TASK_SOFT_TIME_LIMIT (420s)
+GENERATE_SBOM_SOFT_TIME_LIMIT = int(os.getenv("HITRACK_SBOM_SOFT_TIME_LIMIT", "3600"))
+GENERATE_SBOM_TIME_LIMIT = int(os.getenv("HITRACK_SBOM_TIME_LIMIT", "4200"))
+
 DOCKER_IMAGE_REGEX = re.compile(r'^[a-zA-Z0-9._/-]+(:[a-zA-Z0-9._-]+)?$')
 _LINEAGE_SOURCE_PRIORITY = {
     'unknown': 0,
@@ -813,6 +817,143 @@ def _normalize_image_digest(digest):
     return normalized
 
 
+_REGISTRY_LOOKUP_CACHE_TTL = 300
+
+
+def _registry_host(registry):
+    if not registry or not getattr(registry, 'api_url', None):
+        return None
+    raw = str(registry.api_url).strip()
+    if not raw:
+        return None
+    if '://' not in raw:
+        raw = f"https://{raw}"
+    parsed = urlparse(raw)
+    return (parsed.netloc or parsed.path or '').strip().lower() or None
+
+
+def _parse_image_reference(image_ref):
+    reference = (image_ref or '').strip()
+    if not reference:
+        return None
+
+    digest = None
+    if '@' in reference:
+        reference, raw_digest = reference.split('@', 1)
+        digest = _normalize_image_digest(raw_digest)
+
+    host = None
+    repository = reference
+    if '/' in reference:
+        first_segment, remainder = reference.split('/', 1)
+        if '.' in first_segment or ':' in first_segment or first_segment == 'localhost':
+            host = first_segment.lower()
+            repository = remainder
+
+    tag = None
+    last_slash = repository.rfind('/')
+    last_colon = repository.rfind(':')
+    if last_colon > last_slash:
+        tag = repository[last_colon + 1:].strip() or None
+        repository = repository[:last_colon]
+
+    repository = repository.strip('/')
+    if not repository:
+        return None
+
+    return {
+        "host": host,
+        "repository": repository,
+        "tag": tag,
+        "digest": digest,
+    }
+
+
+def _compose_image_reference(host, repository, tag=None, digest=None):
+    base = f"{host}/{repository}".strip('/')
+    if digest:
+        normalized = _normalize_image_digest(digest)
+        return f"{base}@{normalized}" if normalized else base
+    if tag:
+        return f"{base}:{tag}"
+    return base
+
+
+def _get_cached_registry_repository_names(registry):
+    from django.core.cache import cache
+    from .utils.registry import get_repositories
+
+    if not registry:
+        return set()
+
+    cache_key = f"registry-repositories:{registry.pk}"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return set(cached)
+
+    names = set()
+    last_repo = None
+    while True:
+        repositories, last_repo = get_repositories(registry, page_size=200, last_repo=last_repo)
+        for repository_info in repositories:
+            if repository_info and repository_info[0]:
+                names.add(repository_info[0])
+        if not last_repo:
+            break
+
+    cache.set(cache_key, sorted(names), _REGISTRY_LOOKUP_CACHE_TTL)
+    return names
+
+
+def _get_cached_registry_tags(registry, repository_name, limit=200):
+    from django.core.cache import cache
+    from .utils.registry import get_tags
+
+    if not registry or not repository_name:
+        return []
+
+    cache_key = f"registry-tags:{registry.pk}:{repository_name}:{limit}"
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return list(cached)
+
+    tags = list(get_tags(registry, repository_name, limit=limit))
+    cache.set(cache_key, tags, _REGISTRY_LOOKUP_CACHE_TTL)
+    return tags
+
+
+def _derive_same_registry_repo_candidates(repository, parsed_ref):
+    candidates = []
+    repo_path = parsed_ref.get("repository")
+    if repo_path:
+        candidates.append(repo_path)
+
+    if repo_path and repo_path.startswith("helm/"):
+        candidates.append(repo_path.removeprefix("helm/"))
+
+    repository_name = (getattr(repository, 'name', '') or '').strip('/')
+    base_repo = repository_name.removeprefix("helm/") if repository_name.startswith("helm/") else repository_name
+    base_leaf = base_repo.split('/')[-1] if base_repo else None
+    repo_leaf = repo_path.split('/')[-1] if repo_path else None
+
+    if base_repo and repo_leaf:
+        candidates.extend([
+            f"{base_repo}/{repo_leaf}",
+            f"{base_repo}-{repo_leaf}",
+        ])
+
+    if base_leaf and repo_leaf and base_leaf != base_repo:
+        candidates.extend([
+            f"{base_leaf}/{repo_leaf}",
+            f"{base_leaf}-{repo_leaf}",
+        ])
+
+    if repo_path and repo_leaf and '/' not in repo_path and base_repo:
+        candidates.append(f"{base_repo}/{repo_path}")
+
+    return _dedupe_preserve_order(candidates)
+
+
 def _resolve_repository_tag_image_digest(tag, image_ref, registry):
     from .utils.registry import get_image_digest
 
@@ -983,6 +1124,31 @@ def _resolve_helm_image_location(repository, repo_tag, registry, image_ref):
             existing_image.artifact_reference or existing_image.name,
             None,
         )
+
+    if registry:
+        try:
+            original_digest = _normalize_image_digest(
+                get_image_digest(registry, image_ref)
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to resolve Helm child image digest for original ref %s: %s",
+                image_ref,
+                exc,
+            )
+            original_digest = None
+        if original_digest:
+            resolved_pull_ref = (
+                to_docker_pull_ref(image_ref)
+                if "/artifactory/" in image_ref
+                else image_ref
+            )
+            return (
+                resolved_pull_ref,
+                original_digest,
+                resolved_pull_ref,
+                None,
+            )
 
     candidate_refs = _derive_same_registry_image_candidates(repository, registry, image_ref)
 
@@ -1618,7 +1784,13 @@ def _sync_repository_tag_processing_statuses(tag_ids):
 
     return resolved_statuses
 
-@celery_app.task(bind=True, max_retries=1, name="Generate SBOM and Create Components")
+@celery_app.task(
+    bind=True,
+    max_retries=1,
+    name="Generate SBOM and Create Components",
+    soft_time_limit=GENERATE_SBOM_SOFT_TIME_LIMIT,
+    time_limit=GENERATE_SBOM_TIME_LIMIT,
+)
 def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="docker"):
     """
     Generate SBOM data for an image using Syft.
@@ -2195,46 +2367,64 @@ def process_all_tags():
                             repo_tag.save(update_fields=['processing_status', 'updated_at'])
                             continue
 
-                    resolved_image_ids = []
-                    unresolved_refs = []
-                    for image_ref in _dedupe_preserve_order(image_refs):
-                        resolved_name, image_digest, artifact_ref, resolution_error = _resolve_helm_image_location(
+                    for image_ref in image_refs:
+                        resolved_image_ref, image_digest, _resolved_artifact_ref, resolution_error = _resolve_helm_image_location(
                             repository,
                             repo_tag,
                             registry,
                             image_ref,
                         )
-                        if not resolved_name:
-                            unresolved_refs.append((image_ref, resolution_error))
+                        if resolution_error:
                             logger.error(
-                                "Failed to resolve Helm child image %s for %s:%s: %s",
-                                image_ref,
+                                "Failed Helm image resolution for %s:%s -> %s: %s",
                                 repository.name,
                                 repo_tag.tag,
+                                image_ref,
                                 resolution_error,
                             )
-                            continue
-
-                        image, created = _get_or_create_canonical_image(
-                            name=resolved_name,
-                            digest=image_digest,
-                            artifact_reference=artifact_ref or resolved_name,
-                        )
-                        resolved_image_ids.append(image.pk)
-                        logger.info(
-                            "%s Helm image %s as %s with digest %s",
-                            'Created' if created else 'Linked',
-                            image_ref,
-                            resolved_name,
-                            image_digest,
-                        )
-
-                    if repository.repository_type == 'helm':
-                        _reconcile_helm_tag_images(repo_tag, resolved_image_ids)
-                        if not resolved_image_ids and (unresolved_refs or image_refs):
                             repo_tag.processing_status = 'error'
                             repo_tag.save(update_fields=['processing_status', 'updated_at'])
                             continue
+                        # Create or get image with proper digest
+                        artifact_ref = f"{repository.url}:{repo_tag.tag}"
+                        if image_digest:
+                            image = Image.objects.filter(name=resolved_image_ref, digest=image_digest).first()
+                            if image:
+                                created = False
+                            else:
+                                existing_image = Image.objects.filter(name=resolved_image_ref).exclude(digest=image_digest).first()
+                                if existing_image:
+                                    image = Image.objects.create(
+                                        name=resolved_image_ref,
+                                        digest=image_digest,
+                                        artifact_reference=artifact_ref
+                                    )
+                                    created = True
+                                else:
+                                    image = Image.objects.create(
+                                        name=resolved_image_ref,
+                                        digest=image_digest,
+                                        artifact_reference=artifact_ref
+                                    )
+                                    created = True
+                        else:
+                            image = Image.objects.filter(name=resolved_image_ref).first()
+                            if image:
+                                created = False
+                            else:
+                                image = Image.objects.create(
+                                    name=resolved_image_ref,
+                                    digest=None,
+                                    artifact_reference=artifact_ref
+                                )
+                                created = True
+                        image.repository_tags.add(repo_tag)
+                        logger.info(
+                            "%s Helm image %s with digest %s",
+                            'Created' if created else 'Linked',
+                            resolved_image_ref,
+                            image_digest,
+                        )
 
                 processed_tags.append(repo_tag.tag)
 
@@ -3266,8 +3456,14 @@ SCAN_REPOSITORY_TAGS_SOFT_LIMIT = 3540
 # When latest_only: max images to consider; pick one tag per image by highest version number
 SCAN_LATEST_ONLY_MAX_IMAGES = 500
 
-# Regex to extract leading semantic version (v1.2.3 or 1.2.3 or 2.0)
-_VERSION_PREFIX_RE = re.compile(r'^v?(\d+(?:\.\d+)*)', re.IGNORECASE)
+# Regex to extract a leading semantic version. Requires either a "v" prefix
+# (v1, v1.2, v1.2.3) or a dotted numeric form (1.2, 1.2.3). A bare number
+# with no dot and no "v" prefix (e.g. a build number, commit-distance or
+# timestamp like "6820093") is deliberately NOT matched here, since such
+# tags previously sorted as a huge "major version" and beat real semver
+# tags like "6.0.4".
+_VERSION_PREFIX_RE = re.compile(r'^v(\d+(?:\.\d+)*)', re.IGNORECASE)
+_DOTTED_VERSION_PREFIX_RE = re.compile(r'^(\d+\.\d+(?:\.\d+)*)')
 
 
 def _version_sort_key(tag: str):
@@ -3280,7 +3476,7 @@ def _version_sort_key(tag: str):
         return (0,)
     if tag.lower() == 'latest':
         return (999999,)  # prefer when no version-like tags exist
-    m = _VERSION_PREFIX_RE.match(tag)
+    m = _VERSION_PREFIX_RE.match(tag) or _DOTTED_VERSION_PREFIX_RE.match(tag)
     if m:
         parts = [int(x) for x in m.group(1).split('.')]
         return tuple(parts)
@@ -3288,10 +3484,21 @@ def _version_sort_key(tag: str):
 
 
 def _pick_latest_tag_by_version(tags):
-    """Given a list of tag names, return the one considered 'latest' by version number."""
+    """
+    Given a list of tag names, return the one considered 'latest'.
+
+    Double sort, as tags can lie about themselves:
+    1) Primary key: parsed semantic version (_version_sort_key), so a real
+       version like "6.0.4" always outranks a non-version-looking tag.
+    2) Secondary key (tie-break only): position in `tags`. Callers pass tags
+       from the registry's chronological listing (e.g. ACR's
+       orderby=timedesc), newest first, so the earliest position wins ties -
+       i.e. the most recently pushed tag is preferred when versions are
+       equal or equally unparseable.
+    """
     if not tags:
         return None
-    return max(tags, key=_version_sort_key)
+    return max(enumerate(tags), key=lambda pair: (_version_sort_key(pair[1]), -pair[0]))[1]
 
 
 @celery_app.task(
@@ -3616,6 +3823,7 @@ def process_single_tag(tag_uuid: str):
         tag.save()
         repository = tag.repository
         registry = repository.container_registry
+        unresolved_image_refs = []
         logger.info(f"Processing tag {tag.tag} from repository {repository.name}")
 
         def _helm_processing_error_result(message: str):
@@ -3662,6 +3870,8 @@ def process_single_tag(tag_uuid: str):
             # For Helm charts: native Helm (Artifactory index.yaml) or OCI manifest (Docker/ACR)
             image_refs = []
             chart_digest = None
+            unresolved_image_refs = []
+            resolved_image_ids = []
 
             if repository.repository_type == 'helm' and registry.provider == 'jfrog':
                 # Native Helm repo: do not call get_manifest (Helm repos don't expose Docker API).
@@ -3710,40 +3920,35 @@ def process_single_tag(tag_uuid: str):
                         f"Manifest for {repository.name}:{tag.tag} is not recognized as a Helm chart"
                     )
 
-            resolved_image_ids = []
-            unresolved_image_refs = []
-            for image_ref in _dedupe_preserve_order(image_refs):
-                resolved_name, image_digest, artifact_ref, resolution_error = _resolve_helm_image_location(
+            for image_ref in image_refs:
+                resolved_image_ref, image_digest, _resolved_artifact_ref, resolution_error = _resolve_helm_image_location(
                     repository,
                     tag,
                     registry,
                     image_ref,
                 )
-                if not resolved_name:
-                    unresolved_image_refs.append({
-                        'image_ref': image_ref,
-                        'error': resolution_error,
-                    })
+                if resolution_error:
+                    unresolved_image_refs.append(f"{image_ref}: {resolution_error}")
                     logger.error(
-                        "Failed to resolve Helm child image %s for %s:%s: %s",
-                        image_ref,
+                        "Failed Helm image resolution for %s:%s -> %s: %s",
                         repository.name,
                         tag.tag,
+                        image_ref,
                         resolution_error,
                     )
                     continue
-
+                artifact_ref = f"{repository.url}:{tag.tag}"
                 image, created = _get_or_create_canonical_image(
-                    name=resolved_name,
+                    name=resolved_image_ref,
                     digest=image_digest,
-                    artifact_reference=artifact_ref or resolved_name,
+                    artifact_reference=artifact_ref,
                 )
                 resolved_image_ids.append(image.pk)
                 logger.info(
                     "%s Helm image %s as %s with digest %s",
                     'Created' if created else 'Linked',
                     image_ref,
-                    resolved_name,
+                    resolved_image_ref,
                     image_digest,
                 )
 
@@ -3752,12 +3957,18 @@ def process_single_tag(tag_uuid: str):
                 return _helm_processing_error_result(
                     (
                         f"No resolvable child images found for Helm tag {tag.tag}. "
-                        f"Unresolved refs: {', '.join(item['image_ref'] for item in unresolved_image_refs) or 'none'}"
+                        f"Unresolved refs: {', '.join(unresolved_image_refs) or 'none'}"
                     )
                 )
 
+            if unresolved_image_refs and not resolved_image_ids:
+                return _helm_processing_error_result("; ".join(unresolved_image_refs[:3]))
+
         # Trigger SBOM scan for all images linked to this tag
-        images = tag.images.all()
+        if repository.repository_type == 'helm':
+            images = tag.images.filter(pk__in=resolved_image_ids) if resolved_image_ids else tag.images.none()
+        else:
+            images = tag.images.all()
         started = 0
         repaired_tag_ids = set()
         for image in images:
@@ -3786,6 +3997,32 @@ def process_single_tag(tag_uuid: str):
         total_images_linked = images.count()
         images_pending_before = images.filter(scan_status='pending').count()
         images_in_process_before = images.filter(scan_status='in_process').count()
+
+        if unresolved_image_refs:
+            tag.processing_status = 'error'
+            tag.save(update_fields=['processing_status', 'updated_at'])
+            return {
+                "status": "error",
+                "task_name": "Process Single Tag",
+                "tag_uuid": str(tag_uuid),
+                "repository": repository.name,
+                "repository_uuid": str(repository.uuid),
+                "tag": tag.tag,
+                "tag_digest": tag.digest,
+                "repository_type": repository.repository_type,
+                "error": "; ".join(unresolved_image_refs[:3]),
+                "error_type": "HelmImageResolutionError",
+                "summary": {
+                    "total_images_linked": total_images_linked,
+                    "images_scanned": started,
+                    "images_pending_before": images_pending_before,
+                    "images_in_process_before": images_in_process_before,
+                    "sbom_scans_triggered": started,
+                    "tag_processing_status": tag.processing_status,
+                },
+                "message": f"Helm image resolution failed for one or more images in tag {tag.tag}",
+                "timestamp": timezone.now().isoformat(),
+            }
 
         if total_images_linked == 0:
             tag.processing_status = 'success'
@@ -4183,26 +4420,54 @@ def backfill_image_sbom_security_metadata(batch_size: int = 100):
 @celery_app.task(name="Delete Old Repository Tags")
 def delete_old_repository_tags(days: int = 1):
     """
-    Delete all RepositoryTag objects older than `days` days.
+    Delete all RepositoryTag objects older than `days` days, along with any
+    Image records that become orphaned as a result (i.e. images linked only
+    to tags being deleted, not shared with any tag that is kept).
     """
-    from .models import RepositoryTag
+    from django.db.models import Exists, OuterRef
+    from .models import RepositoryTag, Image
+
     cutoff = timezone.now() - timedelta(days=days)
-    deleted_count, _ = RepositoryTag.objects.filter(created_at__lt=cutoff).delete()
+    tag_ids = list(
+        RepositoryTag.objects.filter(created_at__lt=cutoff).values_list('pk', flat=True)
+    )
+
+    deleted_image_count = 0
+    if tag_ids:
+        kept_tag_exists = RepositoryTag.objects.filter(images=OuterRef('pk')).exclude(pk__in=tag_ids)
+        orphaned_image_ids = list(
+            Image.objects.filter(repository_tags__pk__in=tag_ids)
+            .annotate(has_kept_tag=Exists(kept_tag_exists))
+            .filter(has_kept_tag=False)
+            .values_list('pk', flat=True)
+            .distinct()
+        )
+        if orphaned_image_ids:
+            deleted_image_count, _ = Image.objects.filter(pk__in=orphaned_image_ids).delete()
+
+    deleted_count = len(tag_ids)
+    if tag_ids:
+        RepositoryTag.objects.filter(pk__in=tag_ids).delete()
+
     # Calculate cleanup statistics
     cutoff_date_formatted = cutoff.strftime("%Y-%m-%d")
     space_saved_estimate = deleted_count * 0.1  # Rough estimate: 0.1 KB per tag record
-    
+
     return {
         "status": "success",
         "task_name": "Delete Old Repository Tags",
         "summary": {
             "deleted_count": deleted_count,
+            "deleted_image_count": deleted_image_count,
             "cutoff_days": days,
             "cutoff_date": cutoff_date_formatted,
             "space_saved_kb": round(space_saved_estimate, 2),
             "cleanup_type": "old_repository_tags"
         },
-        "message": f"Cleanup completed: {deleted_count} old repository tags removed",
+        "message": (
+            f"Cleanup completed: {deleted_count} old repository tags removed, "
+            f"{deleted_image_count} orphaned images removed"
+        ),
         "details": {
             "cutoff_criteria": f"Tags older than {days} days",
             "cutoff_timestamp": cutoff.isoformat(),

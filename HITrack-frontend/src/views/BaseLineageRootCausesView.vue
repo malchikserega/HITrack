@@ -85,6 +85,7 @@
             :loading="loading"
             item-value="key"
             class="root-causes-table"
+            v-model:sort-by="sortBy"
             @update:options="onTableOptionsUpdate"
           >
             <template #header.lineage_label>
@@ -574,6 +575,18 @@ const includeUnknown = ref(false)
 const lastOptionsKey = ref('')
 const PREFETCH_PREVIEW_LIMIT = 4
 const SECTION_PAGE_SIZE = 20
+
+const normalizeBaseLineageSort = (items?: { key: string; order?: 'asc' | 'desc' }[]) =>
+  (items && items.length ? items : [{ key: 'weighted_risk_score', order: 'desc' }]).map((item) => ({
+    key: String(item.key || 'weighted_risk_score'),
+    order: item.order === 'asc' ? 'asc' as const : 'desc' as const,
+  }))
+
+const areBaseLineageSortEqual = (
+  left: { key: string; order?: 'asc' | 'desc' }[],
+  right: { key: string; order?: 'asc' | 'desc' }[],
+) => JSON.stringify(normalizeBaseLineageSort(left)) === JSON.stringify(normalizeBaseLineageSort(right))
+
 const hasPreviewContent = (item: {
   repositories_preview?: unknown[]
   components_preview?: unknown[]
@@ -749,6 +762,12 @@ const buildOptionsKey = () => JSON.stringify({
   includeUnknown: includeUnknown.value,
 })
 
+const resetExpandedState = () => {
+  expandedIds.value = []
+  previewLoadingKeys.value = []
+  sectionStates.value = {}
+}
+
 const fetchItems = async () => {
   loading.value = true
   try {
@@ -763,6 +782,12 @@ const fetchItems = async () => {
         include_unknown: includeUnknown.value ? 1 : 0,
       },
     })
+    const results = response.data.results || []
+    totalItems.value = response.data.count || 0
+    if (!results.length && totalItems.value > 0 && page.value > 1) {
+      page.value = 1
+      return
+    }
     items.value = (response.data.results || []).map((item) => ({
       ...item,
       repositories_preview: item.repositories_preview || [],
@@ -771,7 +796,6 @@ const fetchItems = async () => {
       preview_status: hasPreviewContent(item) ? 'ready' as PreviewStatus : 'idle' as PreviewStatus,
     }))
     items.value.forEach((item) => syncSectionStateFromItem(item, true))
-    totalItems.value = response.data.count || 0
     const optionsKey = buildOptionsKey()
     void prefetchVisiblePreviews(optionsKey)
   } finally {
@@ -795,10 +819,7 @@ const onTableOptionsUpdate = (options: {
 }) => {
   const nextPage = options.page || 1
   const nextItemsPerPage = options.itemsPerPage || 25
-  const nextSortBy: { key: string; order: 'asc' | 'desc' }[] = (options.sortBy || []).map((item) => ({
-    key: item.key,
-    order: item.order === 'asc' ? 'asc' : 'desc',
-  }))
+  const nextSortBy = normalizeBaseLineageSort(options.sortBy)
 
   const nextKey = JSON.stringify({
     page: nextPage,
@@ -814,19 +835,29 @@ const onTableOptionsUpdate = (options: {
     return
   }
 
-  page.value = nextPage
+  const itemsPerPageChanged = itemsPerPage.value !== nextItemsPerPage
+  const sortChanged = !areBaseLineageSortEqual(sortBy.value, nextSortBy)
+  const pageChanged = page.value !== nextPage
+
+  if (itemsPerPageChanged || sortChanged || pageChanged) {
+    resetExpandedState()
+  }
+
   itemsPerPage.value = nextItemsPerPage
-  sortBy.value = nextSortBy.length ? nextSortBy : [{ key: 'weighted_risk_score', order: 'desc' }]
+  page.value = itemsPerPageChanged || sortChanged ? 1 : nextPage
+  sortBy.value = nextSortBy
 }
 
 const applySearch = async () => {
   appliedSearch.value = search.value.trim()
   page.value = 1
+  resetExpandedState()
   await refreshIfNeeded()
 }
 
 watch([scope, fixability, includeUnknown], async () => {
   page.value = 1
+  resetExpandedState()
   await refreshIfNeeded()
 })
 

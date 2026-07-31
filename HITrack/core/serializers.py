@@ -857,7 +857,10 @@ class ImageComparisonVariantSerializer(serializers.ModelSerializer):
     def _extract_logical_name(self, name: str | None) -> str:
         if not name:
             return ''
-        return name.rsplit('/', 1)[-1]
+        basename = name.rsplit('/', 1)[-1].split('@', 1)[0]
+        if ':' in basename:
+            return basename.rsplit(':', 1)[0]
+        return basename
 
     def _extract_registry_host(self, name: str | None) -> str:
         if not name or '/' not in name:
@@ -1555,6 +1558,10 @@ class ImageDropdownSerializer(serializers.ModelSerializer):
         fields = ['uuid', 'name', 'has_sbom']
 
     def get_has_sbom(self, obj):
+        if hasattr(obj, 'has_sbom'):
+            return obj.has_sbom
+        if 'sbom_data' not in obj.__dict__:
+            return Image.objects.filter(pk=obj.pk, sbom_data__isnull=False).exists()
         return bool(obj.sbom_data)
 
 
