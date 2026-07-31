@@ -2696,18 +2696,22 @@ def parse_sbom_and_create_components(image_uuid: str, scan_run_uuid: str | None 
                     )
                 existing_versions = refreshed_versions
 
-                # Link image to component versions
+                # Link image to component versions in one query.  `images.add()` in
+                # this loop used to emit one INSERT per SBOM artifact.
                 image_version_pks = set(image.component_versions.values_list('pk', flat=True))
-                links_created = 0
+                through_model = ComponentVersion.images.through
+                links_to_create = []
                 for identity, data in component_data.items():
-                    component = existing_components[identity]
                     for version, version_data in data['versions'].items():
                         version_key = f"{identity}:{version}"
                         version_obj = existing_versions[version_key]
                         if version_obj.pk not in image_version_pks:
-                            version_obj.images.add(image)
+                            links_to_create.append(
+                                through_model(componentversion_id=version_obj.pk, image_id=image.pk)
+                            )
                             image_version_pks.add(version_obj.pk)
-                            links_created += 1
+                if links_to_create:
+                    through_model.objects.bulk_create(links_to_create, ignore_conflicts=True)
 
                 lineage_update_fields = _apply_image_lineage_fields(
                     image,
