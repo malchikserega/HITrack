@@ -1,4 +1,5 @@
 from django.db import models
+from django.conf import settings
 import uuid
 
 class ContainerRegistry(models.Model):
@@ -196,10 +197,58 @@ class Image(models.Model):
         return f"{self.name}"
 
 
+class ScanRun(models.Model):
+    """Durable, idempotent record of one image scan pipeline execution."""
+    STATUS_CHOICES = [
+        ('queued', 'Queued'), ('running', 'Running'), ('success', 'Success'),
+        ('failed', 'Failed'), ('cancelled', 'Cancelled'),
+    ]
+    uuid = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    image = models.ForeignKey(Image, on_delete=models.CASCADE, related_name='scan_runs')
+    idempotency_key = models.CharField(max_length=255, unique=True)
+    scanner_version = models.CharField(max_length=128, blank=True, default='')
+    policy_version = models.CharField(max_length=128, blank=True, default='')
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default='queued')
+    celery_task_id = models.CharField(max_length=255, blank=True, default='')
+    attempt_count = models.PositiveIntegerField(default=0)
+    lease_expires_at = models.DateTimeField(null=True, blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    error_message = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['image', 'status', '-created_at'], name='core_scanrun_image_status_idx'),
+            models.Index(fields=['status', 'lease_expires_at'], name='core_scanrun_status_lease_idx'),
+        ]
+
+
+class ScanArtifact(models.Model):
+    """Metadata for raw scanner payloads stored outside the operational tables."""
+    KIND_CHOICES = [('sbom', 'SBOM'), ('grype', 'Grype')]
+    uuid = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    image = models.ForeignKey(Image, on_delete=models.CASCADE, related_name='scan_artifacts')
+    scan_run = models.ForeignKey(ScanRun, on_delete=models.SET_NULL, null=True, blank=True, related_name='artifacts')
+    kind = models.CharField(max_length=16, choices=KIND_CHOICES)
+    storage_key = models.CharField(max_length=1024)
+    checksum = models.CharField(max_length=128, blank=True, default='')
+    size_bytes = models.BigIntegerField(default=0)
+    scanner_version = models.CharField(max_length=128, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['image', 'kind', 'checksum'], name='unique_image_artifact_checksum')]
+        indexes = [models.Index(fields=['image', 'kind', '-created_at'], name='core_artifact_image_kind_idx')]
+
+
 class Component(models.Model):
     uuid = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=255)
     type = models.CharField(max_length=50, default='unknown')
+    # A normalized PURL without its version.  Legacy rows use an empty value.
+    identity = models.CharField(max_length=512, blank=True, default='', db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -228,6 +277,7 @@ class ComponentVersion(models.Model):
 
     class Meta:
         unique_together = ['version', 'component']
+
 
     def __str__(self):
         return f"{self.component.name} {self.version}"
@@ -588,6 +638,23 @@ class ComponentVersionVulnerability(models.Model):
 
     def __str__(self):
         return f"{self.component_version} <-> {self.vulnerability}"
+
+
+class AuditEvent(models.Model):
+    """Append-only audit trail for security-sensitive operations."""
+    uuid = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    actor = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name='hitrack_audit_events')
+    action = models.CharField(max_length=128)
+    target_type = models.CharField(max_length=128, blank=True, default='')
+    target_id = models.CharField(max_length=128, blank=True, default='')
+    details = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['actor', '-created_at'], name='core_audit_actor_date_idx'),
+            models.Index(fields=['action', '-created_at'], name='core_audit_action_date_idx'),
+        ]
 
 
 class Release(models.Model):

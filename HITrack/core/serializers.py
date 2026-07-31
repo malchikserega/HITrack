@@ -398,7 +398,7 @@ class ComponentDetailOptimizedSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = Component
-        fields = ['uuid', 'name', 'type', 'total_images', 'versions_count', 'created_at', 'updated_at']
+        fields = ['uuid', 'name', 'type', 'identity', 'total_images', 'versions_count', 'created_at', 'updated_at']
         read_only_fields = ['created_at', 'updated_at', 'uuid']
     
     @extend_schema_field(serializers.IntegerField())
@@ -546,7 +546,7 @@ class ComponentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Component
         fields = [
-            'uuid', 'name', 'type',
+            'uuid', 'name', 'type', 'identity',
             'versions', 'created_at', 'updated_at'
         ]
         read_only_fields = ['created_at', 'updated_at', 'uuid']
@@ -1392,7 +1392,7 @@ class RepositoryListSerializer(serializers.ModelSerializer):
 class ComponentShortSerializer(serializers.ModelSerializer):
     class Meta:
         model = Component
-        fields = ['uuid', 'name', 'type']
+        fields = ['uuid', 'name', 'type', 'identity']
         read_only_fields = ['uuid']
 
 

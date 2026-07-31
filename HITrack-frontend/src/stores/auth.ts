@@ -26,8 +26,8 @@ interface ApiError {
 
 export const useAuthStore = defineStore('auth', {
   state: (): AuthState => ({
-    token: localStorage.getItem('token') || null,
-    refreshToken: localStorage.getItem('refreshToken') || null,
+    token: sessionStorage.getItem('token') || null,
+    refreshToken: null,
     user: null
   }),
 
@@ -44,18 +44,16 @@ export const useAuthStore = defineStore('auth', {
           password
         })
 
-        const { access, refresh } = response.data
+        const { access } = response.data
         
         this.token = access
-        this.refreshToken = refresh
+        sessionStorage.setItem('token', access)
         this.user = {
           id: 0,
           username: username,
           email: ''
         }
 
-        localStorage.setItem('token', access)
-        localStorage.setItem('refreshToken', refresh)
         
         // Update axios default headers
         api.defaults.headers.common['Authorization'] = `Bearer ${access}`
@@ -69,10 +67,7 @@ export const useAuthStore = defineStore('auth', {
     },
 
     async checkAuth(): Promise<boolean> {
-      if (!this.token) {
-        this.logout()
-        return false
-      }
+      if (!this.token) return this.refreshAuth()
 
       try {
         await api.post('auth/token/verify/', {
@@ -80,29 +75,22 @@ export const useAuthStore = defineStore('auth', {
         })
         return true
       } catch (error) {
-        return this.refreshToken ? await this.refreshAuth() : false
+        return await this.refreshAuth()
       }
     },
 
     async refreshAuth(): Promise<boolean> {
-      if (!this.refreshToken) {
-        this.logout()
-        return false
-      }
-
       try {
-        const response = await api.post<LoginResponse>('auth/token/refresh/', {
-          refresh: this.refreshToken
-        })
+        const response = await api.post<LoginResponse>('auth/token/refresh/')
 
         const { access } = response.data
         
         this.token = access
+        sessionStorage.setItem('token', access)
         if (this.user) {
           this.user = { ...this.user }
         }
 
-        localStorage.setItem('token', access)
         
         // Update axios default headers
         api.defaults.headers.common['Authorization'] = `Bearer ${access}`
@@ -118,11 +106,10 @@ export const useAuthStore = defineStore('auth', {
       this.token = null
       this.refreshToken = null
       this.user = null
-      localStorage.removeItem('token')
-      localStorage.removeItem('refreshToken')
+      sessionStorage.removeItem('token')
       
       // Clear axios default headers
       delete api.defaults.headers.common['Authorization']
     }
   }
-}) 
+})

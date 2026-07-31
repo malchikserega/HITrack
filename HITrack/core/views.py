@@ -56,6 +56,8 @@ from .utils.analytics import (
     build_vulnerability_detail_analytics,
     get_fixability_category_from_priority,
 )
+from .models import AuditEvent
+from .permissions import IsOperatorOrReadOnly, IsSecurityAdmin
 
 logger = logging.getLogger(__name__)
 
@@ -1844,12 +1846,24 @@ def _build_release_repository_tag_payload(tags):
     return serialized_tags, summary
 
 class BaseViewSet(viewsets.ModelViewSet):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsOperatorOrReadOnly]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     ordering_fields = ['created_at', 'updated_at']
     ordering = ['-created_at']  # Default ordering
     lookup_field = 'uuid'
     pagination_class = CustomPageNumberPagination
+
+    def finalize_response(self, request, response, *args, **kwargs):
+        response = super().finalize_response(request, response, *args, **kwargs)
+        if request.method not in ('GET', 'HEAD', 'OPTIONS') and response.status_code < 400:
+            AuditEvent.objects.create(
+                actor=request.user if request.user.is_authenticated else None,
+                action=f'{self.basename or self.__class__.__name__}.{getattr(self, "action", request.method)}',
+                target_type=self.__class__.__name__,
+                target_id=str(kwargs.get(self.lookup_field, '')),
+                details={'method': request.method, 'status_code': response.status_code},
+            )
+        return response
 
 class RepositoryViewSet(BaseViewSet):
     queryset = Repository.objects.all()
@@ -4476,6 +4490,7 @@ class StatsViewSet(viewsets.ViewSet):
         return Response(payload)
 
 class JobViewSet(viewsets.ViewSet):
+    permission_classes = [IsOperatorOrReadOnly]
     permission_classes = [IsAuthenticated]
     serializer_class = JobAddRepositoriesResponseSerializer
 
@@ -4866,8 +4881,8 @@ class TestViewSet(viewsets.ViewSet):
     """
     Simple test viewset to check if imports work
     """
-    permission_classes = [IsAuthenticated]
-    
+    permission_classes = [IsSecurityAdmin]
+
     @action(detail=False, methods=['get'])
     def test(self, request):
         """Simple test endpoint"""
@@ -5179,6 +5194,7 @@ class TaskManagementViewSet(BaseViewSet):
             )
 
 class PeriodicTaskViewSet(viewsets.ReadOnlyModelViewSet):
+    permission_classes = [IsSecurityAdmin]
     """
     ViewSet for managing periodic tasks
     """
@@ -5233,7 +5249,7 @@ class TestTaskViewSet(viewsets.ViewSet):
     """
     ViewSet for testing tasks
     """
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsSecurityAdmin]
     
     @action(detail=False, methods=['post'])
     def run_test_task(self, request):
