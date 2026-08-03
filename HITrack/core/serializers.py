@@ -215,7 +215,7 @@ class VulnerabilityDetailsSerializer(serializers.ModelSerializer):
             'cisa_kev_notes', 'cisa_kev_cwes', 
             'exploit_db_available', 'exploit_db_verified', 'exploit_db_count', 
             'exploit_db_verified_count', 'exploit_db_working_count', 'exploit_db_links',
-            'last_updated', 'data_source',
+            'last_updated', 'last_attempted_at', 'last_successful_at', 'enrichment_status', 'enrichment_error', 'data_source',
             'epss_score', 'epss_percentile', 'epss_date', 'epss_data_source', 'epss_last_updated'
         ]
         read_only_fields = ['uuid', 'last_updated']
@@ -398,7 +398,7 @@ class ComponentDetailOptimizedSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = Component
-        fields = ['uuid', 'name', 'type', 'total_images', 'versions_count', 'created_at', 'updated_at']
+        fields = ['uuid', 'name', 'type', 'identity', 'total_images', 'versions_count', 'created_at', 'updated_at']
         read_only_fields = ['created_at', 'updated_at', 'uuid']
     
     @extend_schema_field(serializers.IntegerField())
@@ -546,7 +546,7 @@ class ComponentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Component
         fields = [
-            'uuid', 'name', 'type',
+            'uuid', 'name', 'type', 'identity',
             'versions', 'created_at', 'updated_at'
         ]
         read_only_fields = ['created_at', 'updated_at', 'uuid']
@@ -1392,7 +1392,7 @@ class RepositoryListSerializer(serializers.ModelSerializer):
 class ComponentShortSerializer(serializers.ModelSerializer):
     class Meta:
         model = Component
-        fields = ['uuid', 'name', 'type']
+        fields = ['uuid', 'name', 'type', 'identity']
         read_only_fields = ['uuid']
 
 

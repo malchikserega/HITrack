@@ -798,6 +798,24 @@ def _build_vulnerability_data_sources(cve_details, exploit_info):
     return _dedupe_preserve_order(data_sources)
 
 
+def _has_usable_vulnerability_enrichment(cve_details, exploit_info):
+    """Do not mark a CVE fresh merely because a source returned an empty payload."""
+    if cve_details and any(
+        value not in (None, '', [], {}) and key not in {'_detail_sources'}
+        for key, value in cve_details.items()
+    ):
+        return True
+    if not exploit_info:
+        return False
+    meaningful_fields = (
+        'cisa_kev_known_exploited', 'exploit_available', 'exploit_public',
+        'exploit_verified', 'exploit_db_available', 'exploit_db_verified',
+    )
+    return any(exploit_info.get(field) is True for field in meaningful_fields) or bool(
+        exploit_info.get('exploit_links') or exploit_info.get('exploit_db_links')
+    )
+
+
 def _normalize_image_digest(digest):
     if not digest:
         return None
@@ -1791,7 +1809,7 @@ def _sync_repository_tag_processing_statuses(tag_ids):
     soft_time_limit=GENERATE_SBOM_SOFT_TIME_LIMIT,
     time_limit=GENERATE_SBOM_TIME_LIMIT,
 )
-def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="docker"):
+def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="docker", scan_run_uuid: str | None = None):
     """
     Generate SBOM data for an image using Syft.
     This task can be retried up to 1 times if it fails.
@@ -1813,8 +1831,14 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
             'component_versions__vulnerabilities'
         ).get(uuid=image_uuid)
         
-        # Check if already in process
-        if image.scan_status == 'in_process':
+        # A durable lease makes retries and duplicate Celery deliveries idempotent.
+        from .services.scans import claim_scan, queue_scan
+        if scan_run_uuid:
+            scan_run, claimed = claim_scan(scan_run_uuid)
+        else:
+            scan_run, created = queue_scan(image)
+            claimed = created and claim_scan(scan_run.uuid)[1]
+        if not claimed:
             logger.warning(f"Image {image_uuid} is already being scanned")
             return {
                 "status": "skipped", 
@@ -1943,6 +1967,10 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
             # Read and save SBOM data
             with open(temp_file_path, 'r') as f:
                 image.sbom_data = json.load(f)
+            # Keep an immutable raw copy through Django storage. Existing JSON fields
+            # remain a backwards-compatible read cache during the migration period.
+            from .services.scans import store_raw_artifact
+            store_raw_artifact(image, 'sbom', image.sbom_data, scan_run=scan_run)
             # Reset stale Grype data so the follow-up vulnerability scan is always rerun.
             image.grype_data = None
             image.scan_status = 'in_process'
@@ -1962,7 +1990,7 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
             logger.info(f"Successfully generated SBOM for image {image_uuid}")
 
             # Schedule SBOM parsing
-            parse_sbom_and_create_components.delay(str(image_uuid))
+            parse_sbom_and_create_components.delay(str(image_uuid), str(scan_run.uuid))
             logger.info(f"Scheduled SBOM parsing for image {image_uuid}")
 
             return {
@@ -2003,6 +2031,9 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
             "timestamp": timezone.now().isoformat()
         }
     except Exception as e:
+        if 'scan_run' in locals():
+            from .services.scans import finish_scan
+            finish_scan(scan_run.uuid, error=str(e))
         error_msg = f"Error generating SBOM for image {image_uuid}: {str(e)}"
         logger.error(error_msg)
         
@@ -2463,12 +2494,13 @@ def process_all_tags():
     }
 
 @celery_app.task(name="Parse SBOM and Create Components")
-def parse_sbom_and_create_components(image_uuid: str):
+def parse_sbom_and_create_components(image_uuid: str, scan_run_uuid: str | None = None):
     """
     Parse SBOM data from an image and create corresponding components and component versions.
     This task should be called after SBOM generation is complete.
     """
     from .models import Image, Component, ComponentVersion
+    from .services.purl import component_identity
     from django.db import transaction
     from django.db.models import Q
     from collections import defaultdict
@@ -2545,15 +2577,17 @@ def parse_sbom_and_create_components(image_uuid: str):
                     skipped_artifacts += 1
                     continue
 
-                if name not in component_data:
-                    component_data[name] = {
+                identity = component_identity(purl, component_type, name)
+                if identity not in component_data:
+                    component_data[identity] = {
                         'name': name,
                         'type': component_type,
+                        'identity': identity,
                         'versions': {},
                         'purl': purl
                     }
 
-                component_data[name]['versions'][version] = {
+                component_data[identity]['versions'][version] = {
                     'purl': purl,
                     'cpes': cpes
                 }
@@ -2565,9 +2599,7 @@ def parse_sbom_and_create_components(image_uuid: str):
 
             # Get existing components
             existing_components = {
-                c.name: c for c in Component.objects.filter(
-                    name__in=component_data.keys()
-                )
+                c.identity: c for c in Component.objects.filter(identity__in=component_data.keys())
             }
             logger.info(f"Found {len(existing_components)} existing components in batch {current_batch}")
 
@@ -2578,9 +2610,9 @@ def parse_sbom_and_create_components(image_uuid: str):
             component_versions_to_update = []
 
             # Prepare components for creation/update
-            for name, data in component_data.items():
-                if name in existing_components:
-                    component = existing_components[name]
+            for identity, data in component_data.items():
+                if identity in existing_components:
+                    component = existing_components[identity]
                     # Update component if needed
                     if data['type'] != 'unknown' and component.type == 'unknown':
                         component.type = data['type']
@@ -2588,8 +2620,7 @@ def parse_sbom_and_create_components(image_uuid: str):
                 else:
                     # Create new component
                     components_to_create.append(Component(
-                        name=name,
-                        type=data['type']
+                        name=data['name'], type=data['type'], identity=identity,
                     ))
 
             logger.info(f"Prepared {len(components_to_create)} components for creation and {len(components_to_update)} for update in batch {current_batch}")
@@ -2601,7 +2632,7 @@ def parse_sbom_and_create_components(image_uuid: str):
                     components_created += len(created_components)
                     logger.info(f"Created {len(created_components)} new components in batch {current_batch}")
                     # Add new components to existing_components dict
-                    existing_components.update({c.name: c for c in created_components})
+                    existing_components.update({c.identity: c for c in created_components})
 
                 if components_to_update:
                     Component.objects.bulk_update(
@@ -2617,7 +2648,7 @@ def parse_sbom_and_create_components(image_uuid: str):
                     for version in data['versions'].keys()
                 }
                 existing_versions = {
-                    f"{cv.component.name}:{cv.version}": cv
+                    f"{cv.component.identity}:{cv.version}": cv
                     for cv in ComponentVersion.objects.filter(
                         component_id__in=[component.pk for component in existing_components.values()],
                         version__in=batch_versions,
@@ -2626,10 +2657,10 @@ def parse_sbom_and_create_components(image_uuid: str):
                 logger.info(f"Found {len(existing_versions)} existing component versions in batch {current_batch}")
 
                 # Prepare component versions
-                for name, data in component_data.items():
-                    component = existing_components[name]
+                for identity, data in component_data.items():
+                    component = existing_components[identity]
                     for version, version_data in data['versions'].items():
-                        version_key = f"{name}:{version}"
+                        version_key = f"{identity}:{version}"
                         if version_key not in existing_versions:
                             component_versions_to_create.append(ComponentVersion(
                                 component=component,
@@ -2670,7 +2701,7 @@ def parse_sbom_and_create_components(image_uuid: str):
                     )
 
                 refreshed_versions = {
-                    f"{cv.component.name}:{cv.version}": cv
+                    f"{cv.component.identity}:{cv.version}": cv
                     for cv in ComponentVersion.objects.filter(
                         component_id__in=[component.pk for component in existing_components.values()],
                         version__in=batch_versions,
@@ -2683,18 +2714,22 @@ def parse_sbom_and_create_components(image_uuid: str):
                     )
                 existing_versions = refreshed_versions
 
-                # Link image to component versions
+                # Link image to component versions in one query.  `images.add()` in
+                # this loop used to emit one INSERT per SBOM artifact.
                 image_version_pks = set(image.component_versions.values_list('pk', flat=True))
-                links_created = 0
-                for name, data in component_data.items():
-                    component = existing_components[name]
+                through_model = ComponentVersion.images.through
+                links_to_create = []
+                for identity, data in component_data.items():
                     for version, version_data in data['versions'].items():
-                        version_key = f"{name}:{version}"
+                        version_key = f"{identity}:{version}"
                         version_obj = existing_versions[version_key]
                         if version_obj.pk not in image_version_pks:
-                            version_obj.images.add(image)
+                            links_to_create.append(
+                                through_model(componentversion_id=version_obj.pk, image_id=image.pk)
+                            )
                             image_version_pks.add(version_obj.pk)
-                            links_created += 1
+                if links_to_create:
+                    through_model.objects.bulk_create(links_to_create, ignore_conflicts=True)
 
                 lineage_update_fields = _apply_image_lineage_fields(
                     image,
@@ -2728,7 +2763,7 @@ def parse_sbom_and_create_components(image_uuid: str):
         logger.info(f"- Component versions created: {versions_created}")
 
         # Schedule Grype scan after successful SBOM processing
-        scan_image_with_grype.delay(str(image_uuid))
+        scan_image_with_grype.delay(str(image_uuid), scan_run_uuid)
         logger.info(f"Scheduled Grype scan for image {image_uuid}")
 
         return {
@@ -2765,6 +2800,9 @@ def parse_sbom_and_create_components(image_uuid: str):
             "timestamp": timezone.now().isoformat()
         }
     except Exception as e:
+        if scan_run_uuid:
+            from .services.scans import finish_scan
+            finish_scan(scan_run_uuid, error=str(e))
         logger.error(f"Error parsing SBOM for image {image_uuid}: {str(e)}")
         try:
             image = Image.objects.get(uuid=image_uuid)
@@ -2888,12 +2926,13 @@ def update_components_latest_versions(image_uuid: str):
         }
 
 @celery_app.task(name="Process Grype Scan Results")
-def process_grype_scan_results(image_uuid: str, scan_results: dict):
+def process_grype_scan_results(image_uuid: str, scan_results: dict, scan_run_uuid: str | None = None):
     """
     Process Grype scan results for an image and update the database with vulnerability information.
     Optimized for bulk operations and safe parallel execution.
     """
     from .models import Image, Component, ComponentVersion, Vulnerability, ComponentVersionVulnerability, VulnerabilityDetails, ComponentLocation
+    from .services.purl import component_identity
     from django.db import IntegrityError
     import logging
 
@@ -3018,10 +3057,12 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
 
             if component_name and component_version:
                 # Get or create component (safe for parallel)
-                component, _ = Component.objects.get_or_create(
-                    name=component_name,
-                    defaults={'type': component_type}
-                )
+                identity = component_identity(purl, component_type, component_name)
+                component = Component.objects.filter(identity=identity).order_by('created_at').first()
+                if component is None:
+                    component = Component.objects.create(
+                        identity=identity, name=component_name, type=component_type,
+                    )
                 # Update type if needed
                 if component.type == 'unknown' and component_type != 'unknown':
                     component.type = component_type
@@ -3100,6 +3141,11 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
         image.scan_status = 'success'
         image.grype_data = scan_results
         image.save(update_fields=['scan_status', 'grype_data', *eol_update_fields, 'updated_at'])
+        if scan_run_uuid:
+            from .services.scans import finish_scan, store_raw_artifact
+            from .models import ScanRun
+            store_raw_artifact(image, 'grype', scan_results, scan_run=ScanRun.objects.get(pk=scan_run_uuid))
+            finish_scan(scan_run_uuid)
         related_tag_ids = _propagate_image_completion_to_equivalent_images(image)
         _sync_repository_tag_processing_statuses(related_tag_ids)
         logger.info(f"Successfully processed Grype scan results for image {image_uuid}")
@@ -3136,6 +3182,9 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
             "error": f"Image with UUID {image_uuid} not found"
         }
     except Exception as e:
+        if scan_run_uuid:
+            from .services.scans import finish_scan
+            finish_scan(scan_run_uuid, error=str(e))
         error_msg = f"Error processing Grype scan results for image {image_uuid}: {str(e)}"
         logger.error(error_msg)
         
@@ -3157,7 +3206,7 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict):
         }
 
 @celery_app.task(bind=True, max_retries=1, name="Scan Image with Grype")
-def scan_image_with_grype(self, image_uuid: str):
+def scan_image_with_grype(self, image_uuid: str, scan_run_uuid: str | None = None):
     """
     Scan an image's SBOM with Grype and save the results.
     This task should be called after SBOM generation is complete.
@@ -3232,7 +3281,7 @@ def scan_image_with_grype(self, image_uuid: str):
             logger.info(f"Saved Grype results for image {image_uuid}")
 
             # Process Grype results (this will set status to 'success' when done)
-            process_grype_scan_results.delay(str(image_uuid), grype_results)
+            process_grype_scan_results.delay(str(image_uuid), grype_results, scan_run_uuid)
             
             logger.info(f"Successfully scanned image {image_uuid} with Grype")
             return {
@@ -3254,6 +3303,9 @@ def scan_image_with_grype(self, image_uuid: str):
             "error": f"Image with UUID {image_uuid} not found"
         }
     except Exception as e:
+        if scan_run_uuid:
+            from .services.scans import finish_scan
+            finish_scan(scan_run_uuid, error=str(e))
         error_msg = f"Error scanning image {image_uuid} with Grype: {str(e)}"
         logger.error(error_msg)
         
@@ -4482,7 +4534,7 @@ def delete_old_repository_tags(days: int = 1):
     }
 
 @celery_app.task(name="Update Vulnerability Details")
-def update_vulnerability_details(vulnerability_uuid: str):
+def update_vulnerability_details(vulnerability_uuid: str, force: bool = False):
     """
     Update detailed information for a specific vulnerability.
     This task can be triggered manually or as part of a batch update.
@@ -4518,9 +4570,14 @@ def update_vulnerability_details(vulnerability_uuid: str):
         # Skip if already updated recently (within 24 hours)
         try:
             existing_details = vulnerability.details
-            if (
-                existing_details.last_updated and
-                (timezone.now() - existing_details.last_updated) < timedelta(hours=VULNERABILITY_DETAILS_FRESHNESS_HOURS)
+            successful_at = existing_details.last_successful_at
+            # Existing rows predate enrichment_status. Treat their previous timestamp as
+            # successful once, but never use a failed attempt as a freshness marker.
+            if successful_at is None and existing_details.enrichment_status == 'never':
+                successful_at = existing_details.last_updated
+            if not force and (
+                successful_at and
+                (timezone.now() - successful_at) < timedelta(hours=VULNERABILITY_DETAILS_FRESHNESS_HOURS)
             ):
                 logger.info(f"Skipping {vulnerability.vulnerability_id} - updated recently")
                 return {
@@ -4531,8 +4588,8 @@ def update_vulnerability_details(vulnerability_uuid: str):
                     "reason": "updated recently",
                     "message": f"Vulnerability {vulnerability.vulnerability_id} was updated recently (within 24 hours)",
                     "details": {
-                        "last_updated": existing_details.last_updated.isoformat() if existing_details.last_updated else None,
-                        "hours_since_update": (timezone.now() - existing_details.last_updated).total_seconds() / 3600 if existing_details.last_updated else None
+                        "last_successful_at": successful_at.isoformat(),
+                        "hours_since_update": (timezone.now() - successful_at).total_seconds() / 3600
                     },
                     "suggestion": "Skip update as data is still fresh",
                     "timestamp": timezone.now().isoformat()
@@ -4543,7 +4600,10 @@ def update_vulnerability_details(vulnerability_uuid: str):
         # Collect data from external sources
         cve_details, exploit_info = collect_vulnerability_data(vulnerability.vulnerability_id)
         now = timezone.now()
-        data_sources = _build_vulnerability_data_sources(cve_details, exploit_info)
+        enrichment_succeeded = _has_usable_vulnerability_enrichment(cve_details, exploit_info)
+        # Empty default exploit payloads mean "no source response", not "clear all prior signals".
+        exploit_info_to_apply = exploit_info if enrichment_succeeded else None
+        data_sources = _build_vulnerability_data_sources(cve_details, exploit_info_to_apply)
         
         # Use transaction to ensure atomicity
         with transaction.atomic():
@@ -4562,15 +4622,20 @@ def update_vulnerability_details(vulnerability_uuid: str):
                         setattr(details, field, value)
 
             # Update exploit information if available
-            if exploit_info:
-                for field, value in exploit_info.items():
+            if exploit_info_to_apply:
+                for field, value in exploit_info_to_apply.items():
                     if value is not None and hasattr(details, field):
                         setattr(details, field, value)
 
-            details.data_source = ' + '.join(data_sources) if data_sources else 'manual'
-
-            # Always update the last_updated timestamp
-            details.last_updated = now
+            details.last_attempted_at = now
+            if enrichment_succeeded:
+                details.data_source = ' + '.join(data_sources) if data_sources else details.data_source
+                details.last_successful_at = now
+                details.enrichment_status = 'success'
+                details.enrichment_error = ''
+            else:
+                details.enrichment_status = 'failed'
+                details.enrichment_error = 'External sources returned no usable enrichment data'
             details.save()
 
             if details.epss_score is not None and vulnerability.epss != details.epss_score:
@@ -4600,12 +4665,17 @@ def update_vulnerability_details(vulnerability_uuid: str):
                 "data_sources_used": data_sources_count,
                 "fields_updated": fields_updated,
                 "cve_details_available": cve_details is not None,
-                "exploit_info_available": exploit_info is not None
+                "exploit_info_available": exploit_info is not None,
+                "enrichment_succeeded": enrichment_succeeded,
             },
             "data_sources": data_sources if data_sources else [],
             "processing_time": processing_time,
             "processing_time_formatted": f"{processing_time:.2f} seconds",
-            "message": f"Vulnerability {vulnerability.vulnerability_id} details updated successfully",
+            "message": (
+                f"Vulnerability {vulnerability.vulnerability_id} details updated successfully"
+                if enrichment_succeeded else
+                f"Vulnerability {vulnerability.vulnerability_id} was queried, but no usable external data was returned"
+            ),
             "details": {
                 "cve_details_fields": list(cve_details.keys()) if cve_details else [],
                 "exploit_info_fields": list(exploit_info.keys()) if exploit_info else [],
@@ -4647,7 +4717,7 @@ def update_all_vulnerability_details():
         cutoff_time = timezone.now() - timedelta(hours=VULNERABILITY_DETAILS_FRESHNESS_HOURS)
         vulnerabilities = list(
             Vulnerability.objects.exclude(
-                details__last_updated__gte=cutoff_time
+                details__last_successful_at__gte=cutoff_time
             ).only('uuid', 'vulnerability_id', 'vulnerability_type')
         )
         eligible_vulnerabilities = [
@@ -4765,7 +4835,8 @@ def update_critical_vulnerability_details():
         # Also include vulnerabilities updated more than 7 days ago
         week_ago = timezone.now() - timedelta(days=7)
         old_vulns = Vulnerability.objects.filter(
-            details__last_updated__lt=week_ago
+            Q(details__last_successful_at__lt=week_ago) |
+            Q(details__last_successful_at__isnull=True)
         )
         
         # Combine and deduplicate
@@ -4998,6 +5069,7 @@ def update_vulnerability_details_bulk(vulnerability_uuids: List[str], batch_size
         processed_count = 0
         success_count = 0
         error_count = 0
+        no_data_count = 0
         
         # Process in batches
         for i in range(0, total_count, batch_size):
@@ -5036,42 +5108,62 @@ def update_vulnerability_details_bulk(vulnerability_uuids: List[str], batch_size
                 # Update database with transaction for atomicity
                 with transaction.atomic():
                     details_to_update = []
-                    update_fields_set = {'data_source', 'last_updated'}
+                    update_fields_set = {
+                        'data_source', 'last_updated', 'last_attempted_at',
+                        'last_successful_at', 'enrichment_status', 'enrichment_error',
+                    }
                     vulnerabilities_to_update = []
                     vulnerability_update_fields = {'epss', 'updated_at'}
                     now = timezone.now()
 
                     for vulnerability in batch_vulnerabilities:
                         try:
-                            cve_details, exploit_info = bulk_data.get(vulnerability.vulnerability_id, (None, None))
+                            cve_details, exploit_info = bulk_data.get(
+                                str(vulnerability.vulnerability_id).upper(), (None, None)
+                            )
                             details = details_by_vulnerability_id.get(vulnerability.pk)
                             if details is None:
                                 raise ValueError(
                                     f"Missing VulnerabilityDetails row for {vulnerability.vulnerability_id}"
                                 )
 
+                            enrichment_succeeded = _has_usable_vulnerability_enrichment(
+                                cve_details, exploit_info,
+                            )
+                            exploit_info_to_apply = exploit_info if enrichment_succeeded else None
                             if cve_details:
                                 for field, value in cve_details.items():
                                     if value is not None and hasattr(details, field):
                                         setattr(details, field, value)
                                         update_fields_set.add(field)
                             
-                            if exploit_info:
-                                for field, value in exploit_info.items():
+                            if exploit_info_to_apply:
+                                for field, value in exploit_info_to_apply.items():
                                     if value is not None and hasattr(details, field):
                                         setattr(details, field, value)
                                         update_fields_set.add(field)
 
-                            data_sources = _build_vulnerability_data_sources(cve_details, exploit_info)
-                            details.data_source = ' + '.join(data_sources) if data_sources else 'manual'
+                            data_sources = _build_vulnerability_data_sources(cve_details, exploit_info_to_apply)
+                            details.last_attempted_at = now
                             details.last_updated = now
+                            if enrichment_succeeded:
+                                details.data_source = ' + '.join(data_sources) if data_sources else details.data_source
+                                details.last_successful_at = now
+                                details.enrichment_status = 'success'
+                                details.enrichment_error = ''
+                            else:
+                                details.enrichment_status = 'failed'
+                                details.enrichment_error = 'External sources returned no usable enrichment data'
                             details_to_update.append(details)
 
                             if details.epss_score is not None and vulnerability.epss != details.epss_score:
                                 vulnerability.epss = details.epss_score
                                 vulnerability.updated_at = now
                                 vulnerabilities_to_update.append(vulnerability)
-                            success_count += 1
+                            if enrichment_succeeded:
+                                success_count += 1
+                            else:
+                                no_data_count += 1
                             
                         except Exception as e:
                             logger.error(f"Error updating vulnerability {vulnerability.vulnerability_id}: {str(e)}")
@@ -5112,6 +5204,7 @@ def update_vulnerability_details_bulk(vulnerability_uuids: List[str], batch_size
                 'processed_count': processed_count,
                 'success_count': success_count,
                 'error_count': error_count,
+                'no_data_count': no_data_count,
                 'skipped_count': skipped_count,
                 'success_rate': f"{success_rate:.1f}%",
                 'error_rate': f"{error_rate:.1f}%",

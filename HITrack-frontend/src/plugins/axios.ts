@@ -20,6 +20,7 @@ interface CustomAxiosRequestConfig extends InternalAxiosRequestConfig {
 
 const api: AxiosInstance = axios.create({
   baseURL: import.meta.env.VITE_API_URL || 'http://localhost:8000',
+  withCredentials: true,
   headers: {
     'Content-Type': 'application/json'
   }
@@ -50,23 +51,14 @@ api.interceptors.response.use(
       originalRequest._retry = true
 
       try {
-        const refreshToken = localStorage.getItem('refreshToken')
-        if (!refreshToken) {
-          throw new Error('No refresh token available')
-        }
-
-        const response = await api.post('auth/token/refresh/', {
-          refresh: refreshToken
-        })
+        const response = await api.post('auth/token/refresh/')
 
         const { access } = response.data
-        localStorage.setItem('token', access)
 
         originalRequest.headers.Authorization = `Bearer ${access}`
         return api(originalRequest)
       } catch (refreshError) {
-        localStorage.removeItem('token')
-        localStorage.removeItem('refreshToken')
+        sessionStorage.removeItem('token')
         router.push('/login')
         return Promise.reject(refreshError)
       }
@@ -83,4 +75,4 @@ api.interceptors.response.use(
   }
 )
 
-export default api 
+export default api
