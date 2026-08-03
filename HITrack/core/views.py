@@ -3697,12 +3697,14 @@ class VulnerabilityViewSet(BaseViewSet):
         vulnerability = self.get_object()
         
         # Trigger the update task
-        task = update_vulnerability_details.delay(str(vulnerability.uuid))
+        force = str(request.data.get('force', '')).lower() in {'1', 'true', 'yes'}
+        task = update_vulnerability_details.delay(str(vulnerability.uuid), force=force)
         
         return Response({
             'status': 'task_started',
             'task_id': task.id,
             'vulnerability_id': vulnerability.vulnerability_id,
+            'force': force,
             'message': 'Vulnerability details update started'
         })
 

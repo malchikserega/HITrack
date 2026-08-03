@@ -594,6 +594,10 @@ class VulnerabilityDetails(models.Model):
     
     # Additional metadata
     last_updated = models.DateTimeField(auto_now=True, help_text='When this record was last updated')
+    last_attempted_at = models.DateTimeField(null=True, blank=True, help_text='Most recent external enrichment attempt')
+    last_successful_at = models.DateTimeField(null=True, blank=True, help_text='Most recent enrichment that returned usable data')
+    enrichment_status = models.CharField(max_length=32, default='never', help_text='never, success, partial, or failed')
+    enrichment_error = models.TextField(blank=True, default='', help_text='Most recent enrichment error; cleared after success')
     data_source = models.CharField(max_length=100, default='manual', help_text='Source of this information')
     
     # EPSS information from FIRST API
@@ -611,6 +615,7 @@ class VulnerabilityDetails(models.Model):
             models.Index(fields=['exploit_available']),
             models.Index(fields=['cisa_kev_known_exploited']),
             models.Index(fields=['cisa_kev_ransomware_use']),
+            models.Index(fields=['enrichment_status', 'last_successful_at'], name='core_vulnd_enrich_status_idx'),
         ]
     
     def __str__(self):

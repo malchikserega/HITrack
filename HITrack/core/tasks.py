@@ -798,6 +798,24 @@ def _build_vulnerability_data_sources(cve_details, exploit_info):
     return _dedupe_preserve_order(data_sources)
 
 
+def _has_usable_vulnerability_enrichment(cve_details, exploit_info):
+    """Do not mark a CVE fresh merely because a source returned an empty payload."""
+    if cve_details and any(
+        value not in (None, '', [], {}) and key not in {'_detail_sources'}
+        for key, value in cve_details.items()
+    ):
+        return True
+    if not exploit_info:
+        return False
+    meaningful_fields = (
+        'cisa_kev_known_exploited', 'exploit_available', 'exploit_public',
+        'exploit_verified', 'exploit_db_available', 'exploit_db_verified',
+    )
+    return any(exploit_info.get(field) is True for field in meaningful_fields) or bool(
+        exploit_info.get('exploit_links') or exploit_info.get('exploit_db_links')
+    )
+
+
 def _normalize_image_digest(digest):
     if not digest:
         return None
@@ -4516,7 +4534,7 @@ def delete_old_repository_tags(days: int = 1):
     }
 
 @celery_app.task(name="Update Vulnerability Details")
-def update_vulnerability_details(vulnerability_uuid: str):
+def update_vulnerability_details(vulnerability_uuid: str, force: bool = False):
     """
     Update detailed information for a specific vulnerability.
     This task can be triggered manually or as part of a batch update.
@@ -4552,9 +4570,14 @@ def update_vulnerability_details(vulnerability_uuid: str):
         # Skip if already updated recently (within 24 hours)
         try:
             existing_details = vulnerability.details
-            if (
-                existing_details.last_updated and
-                (timezone.now() - existing_details.last_updated) < timedelta(hours=VULNERABILITY_DETAILS_FRESHNESS_HOURS)
+            successful_at = existing_details.last_successful_at
+            # Existing rows predate enrichment_status. Treat their previous timestamp as
+            # successful once, but never use a failed attempt as a freshness marker.
+            if successful_at is None and existing_details.enrichment_status == 'never':
+                successful_at = existing_details.last_updated
+            if not force and (
+                successful_at and
+                (timezone.now() - successful_at) < timedelta(hours=VULNERABILITY_DETAILS_FRESHNESS_HOURS)
             ):
                 logger.info(f"Skipping {vulnerability.vulnerability_id} - updated recently")
                 return {
@@ -4565,8 +4588,8 @@ def update_vulnerability_details(vulnerability_uuid: str):
                     "reason": "updated recently",
                     "message": f"Vulnerability {vulnerability.vulnerability_id} was updated recently (within 24 hours)",
                     "details": {
-                        "last_updated": existing_details.last_updated.isoformat() if existing_details.last_updated else None,
-                        "hours_since_update": (timezone.now() - existing_details.last_updated).total_seconds() / 3600 if existing_details.last_updated else None
+                        "last_successful_at": successful_at.isoformat(),
+                        "hours_since_update": (timezone.now() - successful_at).total_seconds() / 3600
                     },
                     "suggestion": "Skip update as data is still fresh",
                     "timestamp": timezone.now().isoformat()
@@ -4577,7 +4600,10 @@ def update_vulnerability_details(vulnerability_uuid: str):
         # Collect data from external sources
         cve_details, exploit_info = collect_vulnerability_data(vulnerability.vulnerability_id)
         now = timezone.now()
-        data_sources = _build_vulnerability_data_sources(cve_details, exploit_info)
+        enrichment_succeeded = _has_usable_vulnerability_enrichment(cve_details, exploit_info)
+        # Empty default exploit payloads mean "no source response", not "clear all prior signals".
+        exploit_info_to_apply = exploit_info if enrichment_succeeded else None
+        data_sources = _build_vulnerability_data_sources(cve_details, exploit_info_to_apply)
         
         # Use transaction to ensure atomicity
         with transaction.atomic():
@@ -4596,15 +4622,20 @@ def update_vulnerability_details(vulnerability_uuid: str):
                         setattr(details, field, value)
 
             # Update exploit information if available
-            if exploit_info:
-                for field, value in exploit_info.items():
+            if exploit_info_to_apply:
+                for field, value in exploit_info_to_apply.items():
                     if value is not None and hasattr(details, field):
                         setattr(details, field, value)
 
-            details.data_source = ' + '.join(data_sources) if data_sources else 'manual'
-
-            # Always update the last_updated timestamp
-            details.last_updated = now
+            details.last_attempted_at = now
+            if enrichment_succeeded:
+                details.data_source = ' + '.join(data_sources) if data_sources else details.data_source
+                details.last_successful_at = now
+                details.enrichment_status = 'success'
+                details.enrichment_error = ''
+            else:
+                details.enrichment_status = 'failed'
+                details.enrichment_error = 'External sources returned no usable enrichment data'
             details.save()
 
             if details.epss_score is not None and vulnerability.epss != details.epss_score:
@@ -4634,12 +4665,17 @@ def update_vulnerability_details(vulnerability_uuid: str):
                 "data_sources_used": data_sources_count,
                 "fields_updated": fields_updated,
                 "cve_details_available": cve_details is not None,
-                "exploit_info_available": exploit_info is not None
+                "exploit_info_available": exploit_info is not None,
+                "enrichment_succeeded": enrichment_succeeded,
             },
             "data_sources": data_sources if data_sources else [],
             "processing_time": processing_time,
             "processing_time_formatted": f"{processing_time:.2f} seconds",
-            "message": f"Vulnerability {vulnerability.vulnerability_id} details updated successfully",
+            "message": (
+                f"Vulnerability {vulnerability.vulnerability_id} details updated successfully"
+                if enrichment_succeeded else
+                f"Vulnerability {vulnerability.vulnerability_id} was queried, but no usable external data was returned"
+            ),
             "details": {
                 "cve_details_fields": list(cve_details.keys()) if cve_details else [],
                 "exploit_info_fields": list(exploit_info.keys()) if exploit_info else [],
@@ -4681,7 +4717,7 @@ def update_all_vulnerability_details():
         cutoff_time = timezone.now() - timedelta(hours=VULNERABILITY_DETAILS_FRESHNESS_HOURS)
         vulnerabilities = list(
             Vulnerability.objects.exclude(
-                details__last_updated__gte=cutoff_time
+                details__last_successful_at__gte=cutoff_time
             ).only('uuid', 'vulnerability_id', 'vulnerability_type')
         )
         eligible_vulnerabilities = [
@@ -4799,7 +4835,8 @@ def update_critical_vulnerability_details():
         # Also include vulnerabilities updated more than 7 days ago
         week_ago = timezone.now() - timedelta(days=7)
         old_vulns = Vulnerability.objects.filter(
-            details__last_updated__lt=week_ago
+            Q(details__last_successful_at__lt=week_ago) |
+            Q(details__last_successful_at__isnull=True)
         )
         
         # Combine and deduplicate
@@ -5032,6 +5069,7 @@ def update_vulnerability_details_bulk(vulnerability_uuids: List[str], batch_size
         processed_count = 0
         success_count = 0
         error_count = 0
+        no_data_count = 0
         
         # Process in batches
         for i in range(0, total_count, batch_size):
@@ -5070,42 +5108,62 @@ def update_vulnerability_details_bulk(vulnerability_uuids: List[str], batch_size
                 # Update database with transaction for atomicity
                 with transaction.atomic():
                     details_to_update = []
-                    update_fields_set = {'data_source', 'last_updated'}
+                    update_fields_set = {
+                        'data_source', 'last_updated', 'last_attempted_at',
+                        'last_successful_at', 'enrichment_status', 'enrichment_error',
+                    }
                     vulnerabilities_to_update = []
                     vulnerability_update_fields = {'epss', 'updated_at'}
                     now = timezone.now()
 
                     for vulnerability in batch_vulnerabilities:
                         try:
-                            cve_details, exploit_info = bulk_data.get(vulnerability.vulnerability_id, (None, None))
+                            cve_details, exploit_info = bulk_data.get(
+                                str(vulnerability.vulnerability_id).upper(), (None, None)
+                            )
                             details = details_by_vulnerability_id.get(vulnerability.pk)
                             if details is None:
                                 raise ValueError(
                                     f"Missing VulnerabilityDetails row for {vulnerability.vulnerability_id}"
                                 )
 
+                            enrichment_succeeded = _has_usable_vulnerability_enrichment(
+                                cve_details, exploit_info,
+                            )
+                            exploit_info_to_apply = exploit_info if enrichment_succeeded else None
                             if cve_details:
                                 for field, value in cve_details.items():
                                     if value is not None and hasattr(details, field):
                                         setattr(details, field, value)
                                         update_fields_set.add(field)
                             
-                            if exploit_info:
-                                for field, value in exploit_info.items():
+                            if exploit_info_to_apply:
+                                for field, value in exploit_info_to_apply.items():
                                     if value is not None and hasattr(details, field):
                                         setattr(details, field, value)
                                         update_fields_set.add(field)
 
-                            data_sources = _build_vulnerability_data_sources(cve_details, exploit_info)
-                            details.data_source = ' + '.join(data_sources) if data_sources else 'manual'
+                            data_sources = _build_vulnerability_data_sources(cve_details, exploit_info_to_apply)
+                            details.last_attempted_at = now
                             details.last_updated = now
+                            if enrichment_succeeded:
+                                details.data_source = ' + '.join(data_sources) if data_sources else details.data_source
+                                details.last_successful_at = now
+                                details.enrichment_status = 'success'
+                                details.enrichment_error = ''
+                            else:
+                                details.enrichment_status = 'failed'
+                                details.enrichment_error = 'External sources returned no usable enrichment data'
                             details_to_update.append(details)
 
                             if details.epss_score is not None and vulnerability.epss != details.epss_score:
                                 vulnerability.epss = details.epss_score
                                 vulnerability.updated_at = now
                                 vulnerabilities_to_update.append(vulnerability)
-                            success_count += 1
+                            if enrichment_succeeded:
+                                success_count += 1
+                            else:
+                                no_data_count += 1
                             
                         except Exception as e:
                             logger.error(f"Error updating vulnerability {vulnerability.vulnerability_id}: {str(e)}")
@@ -5146,6 +5204,7 @@ def update_vulnerability_details_bulk(vulnerability_uuids: List[str], batch_size
                 'processed_count': processed_count,
                 'success_count': success_count,
                 'error_count': error_count,
+                'no_data_count': no_data_count,
                 'skipped_count': skipped_count,
                 'success_rate': f"{success_rate:.1f}%",
                 'error_rate': f"{error_rate:.1f}%",
