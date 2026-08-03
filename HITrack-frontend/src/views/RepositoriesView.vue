@@ -565,11 +565,11 @@ const runScan = async (latestOnly: boolean) => {
   const previousStatus = repo.scan_status
   repo.scan_status = 'pending'
   try {
-    await api.post(`repositories/${repo.uuid}/scan_tags/`, { latest_only: latestOnly })
+    const response = await api.post(`repositories/${repo.uuid}/scan_tags/`, { latest_only: latestOnly })
     notificationService.queued(
-      latestOnly
+      response.data.message || (latestOnly
         ? 'Repository latest-tag scan was queued.'
-        : 'Repository scan was queued.'
+        : 'Repository scan was queued.')
     )
     await fetchRepositories()
   } catch (error: any) {

@@ -948,7 +948,7 @@ const onRescanTagImages = async (tag: any) => {
   }
   try {
     const resp = await api.post(`repository-tags/${tag.uuid}/rescan-images/`)
-    notificationService.started(resp.data.message || 'Tag image rescan started.')
+    notificationService.queued(resp.data.message || 'Tag image rescan was queued.')
     fetchTags()
   } catch (e: any) {
     if (e.response?.status === 409) {
