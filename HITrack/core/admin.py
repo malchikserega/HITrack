@@ -2,7 +2,7 @@ from django.contrib import admin
 from django.contrib import messages
 from django.utils import timezone
 from django.db import models
-from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, VulnerabilityDetails, ContainerRegistry, ComponentVersionVulnerability, Release, RepositoryTagRelease, ThreatIntelSnapshot
+from .models import AuditEvent, Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, VulnerabilityDetails, ContainerRegistry, ComponentVersionVulnerability, Release, RepositoryTagRelease, ScanArtifact, ScanRun, ThreatIntelSnapshot
 from .tasks import update_vulnerability_details
 
 
@@ -70,6 +70,36 @@ class ImageAdmin(admin.ModelAdmin):
     search_fields = ('name', 'digest')
     list_filter = ('scan_status',)
     filter_horizontal = ('repository_tags',)
+
+
+@admin.register(ScanRun)
+class ScanRunAdmin(admin.ModelAdmin):
+    list_display = ('image', 'status', 'attempt_count', 'scanner_version', 'started_at', 'finished_at')
+    list_filter = ('status',)
+    search_fields = ('image__name', 'idempotency_key', 'celery_task_id')
+    readonly_fields = ('uuid', 'created_at', 'updated_at')
+
+
+@admin.register(ScanArtifact)
+class ScanArtifactAdmin(admin.ModelAdmin):
+    list_display = ('image', 'kind', 'size_bytes', 'checksum', 'created_at')
+    list_filter = ('kind',)
+    search_fields = ('image__name', 'checksum', 'storage_key')
+    readonly_fields = ('uuid', 'created_at')
+
+
+@admin.register(AuditEvent)
+class AuditEventAdmin(admin.ModelAdmin):
+    list_display = ('created_at', 'actor', 'action', 'target_type', 'target_id')
+    list_filter = ('action', 'target_type')
+    search_fields = ('actor__username', 'action', 'target_id')
+    readonly_fields = ('uuid', 'actor', 'action', 'target_type', 'target_id', 'details', 'created_at')
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(ThreatIntelSnapshot)

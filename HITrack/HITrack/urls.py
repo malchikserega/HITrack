@@ -17,11 +17,8 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import path, include
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
-from rest_framework_simplejwt.views import (
-    TokenObtainPairView,
-    TokenRefreshView,
-    TokenVerifyView,
-)
+from rest_framework_simplejwt.views import TokenVerifyView
+from core.auth import CookieTokenObtainPairView, CookieTokenRefreshView
 from core.views import HasACRRegistryView, ListACRRegistriesView
 
 urlpatterns = [
@@ -29,8 +26,8 @@ urlpatterns = [
     path('api/', include('core.urls')),
     
     # JWT authentication URLs
-    path('api/auth/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
-    path('api/auth/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    path('api/auth/token/', CookieTokenObtainPairView.as_view(), name='token_obtain_pair'),
+    path('api/auth/token/refresh/', CookieTokenRefreshView.as_view(), name='token_refresh'),
     path('api/auth/token/verify/', TokenVerifyView.as_view(), name='token_verify'),
     
     # OpenAPI documentation URLs

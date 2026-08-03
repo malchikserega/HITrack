@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, fixes]
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: hitrack
+          POSTGRES_PASSWORD: hitrack
+          POSTGRES_DB: hitrack
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U hitrack" --health-interval 5s --health-timeout 5s --health-retries 10
+    defaults:
+      run:
+        working-directory: HITrack
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: pip install -r requirements.txt
+      - run: python manage.py check
+        env: {DB_HOST: 127.0.0.1}
+      - run: python manage.py test
+        env: {DB_HOST: 127.0.0.1}
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: HITrack-frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: 22, cache: npm, cache-dependency-path: HITrack-frontend/package-lock.json}
+      - run: npm ci
+      - run: npm run type-check
+      - run: npm run build
