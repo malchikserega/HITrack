@@ -2200,18 +2200,20 @@ class RepositoryViewSet(BaseViewSet):
         if isinstance(latest_only, str):
             latest_only = latest_only.lower() in ('true', '1', 'yes')
         repository.scan_status = 'pending'
-        repository.save()
+        repository.save(update_fields=['scan_status', 'updated_at'])
 
         try:
             from .tasks import scan_repository_tags
-            scan_repository_tags.apply_async(
+            task = scan_repository_tags.apply_async(
                 args=[str(repository.uuid)],
                 kwargs={'latest_only': latest_only},
                 task_name="Scan Repository Tags"
             )
             return Response({
-                'status': 'success',
-                'message': 'Repository tags scan scheduled successfully',
+                'status': 'scheduled',
+                'repository_status': 'pending',
+                'task_id': task.id,
+                'message': 'Repository tag discovery was queued. Tag and image scans will continue in the background.',
                 'latest_only': latest_only,
             })
         except Exception as e:
@@ -2221,6 +2223,21 @@ class RepositoryViewSet(BaseViewSet):
                 {'error': str(e)},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+    @action(detail=False, methods=['post'], url_path='scan-all-tags')
+    def scan_all_tags(self, request):
+        """Queue a latest-tag discovery run for every active repository."""
+        from .tasks import periodic_repository_scan
+
+        task = periodic_repository_scan.delay()
+        return Response({
+            'status': 'scheduled',
+            'task_id': task.id,
+            'message': (
+                'Latest-tag discovery was queued for active repositories. '
+                'Repositories already being scanned will be skipped.'
+            ),
+        })
 
     @action(detail=True, methods=['get'], url_path='paginated-tags')
     def paginated_tags(self, request, uuid=None):
@@ -2322,14 +2339,24 @@ class RepositoryTagViewSet(BaseViewSet):
             )
         
         tag.processing_status = 'pending'
-        tag.save()
+        tag.save(update_fields=['processing_status', 'updated_at'])
         
         try:
             from .tasks import process_single_tag
-            process_single_tag.apply_async(args=[str(tag.uuid)], task_name="Process Single Tag")
+            task = process_single_tag.apply_async(
+                args=[str(tag.uuid)],
+                task_name="Process Single Tag",
+            )
             return Response({
-                'status': 'success',
-                'message': 'Tag processing scheduled successfully'
+                # Processing this tag only discovers/links images and schedules
+                # SBOM scans.  The task itself can finish before those scans do.
+                'status': 'scheduled',
+                'tag_status': 'pending',
+                'task_id': task.id,
+                'message': (
+                    'Tag processing was queued. Image discovery will run first; '
+                    'SBOM scans, if needed, will continue in the background.'
+                ),
             })
         except Exception as e:
             tag.processing_status = 'error'
@@ -2350,6 +2377,7 @@ class RepositoryTagViewSet(BaseViewSet):
                 status=status.HTTP_409_CONFLICT
             )
         started = 0
+        child_task_ids = []
         from .tasks import generate_sbom_and_create_components
         for image in images:
             if image.scan_status != 'in_process':
@@ -2357,20 +2385,26 @@ class RepositoryTagViewSet(BaseViewSet):
                 image.save()
                 repo_tag = image.repository_tags.first()
                 art_type = repo_tag.repository.repository_type if repo_tag else 'docker'
-                generate_sbom_and_create_components.apply_async(
+                task = generate_sbom_and_create_components.apply_async(
                     kwargs={
                         'image_uuid': str(image.uuid),
                         'art_type': art_type
                     },
                     task_name="Generate SBOM and Create Components"
                 )
+                child_task_ids.append(task.id)
                 started += 1
         if started:
             tag.processing_status = 'in_process'
             tag.save(update_fields=['processing_status', 'updated_at'])
         return Response({
-            'status': 'success',
-            'message': f'Rescan started for {started} images',
+            'status': 'scheduled' if started else 'nothing_to_scan',
+            'tag_status': tag.processing_status,
+            'task_ids': child_task_ids,
+            'message': (
+                f'Rescan was queued for {started} image(s).'
+                if started else 'This tag has no images to rescan.'
+            ),
             'count': started
         })
 
@@ -2407,12 +2441,14 @@ class RepositoryTagViewSet(BaseViewSet):
             )
         
         started = 0
+        child_task_ids = []
         from .tasks import scan_image_with_grype
         for image in available_images:
             # Set status to pending to prevent duplicate scans
             image.scan_status = 'pending'
             image.save()
-            scan_image_with_grype.delay(str(image.uuid))
+            task = scan_image_with_grype.delay(str(image.uuid))
+            child_task_ids.append(task.id)
             started += 1
 
         if started:
@@ -2424,7 +2460,9 @@ class RepositoryTagViewSet(BaseViewSet):
             message += f' ({skipped_images.count()} images skipped - already in process)'
         
         return Response({
-            'status': 'success',
+            'status': 'scheduled',
+            'tag_status': tag.processing_status,
+            'task_ids': child_task_ids,
             'message': message,
             'count': started,
             'skipped_count': skipped_images.count(),
@@ -2711,10 +2749,11 @@ class ImageViewSet(BaseViewSet):
         image = self.get_object()
         try:
             from .tasks import update_components_latest_versions
-            update_components_latest_versions.delay(str(image.uuid))
+            task = update_components_latest_versions.delay(str(image.uuid))
             return Response({
-                'status': 'success',
-                'message': 'Latest versions update scheduled successfully'
+                'status': 'scheduled',
+                'task_id': task.id,
+                'message': 'Latest-version lookup was queued and will run in the background.'
             })
         except Exception as e:
             return Response(
@@ -2849,13 +2888,15 @@ class ImageViewSet(BaseViewSet):
             else:
                 art_type = 'docker'  # fallback default
             from .tasks import generate_sbom_and_create_components
-            generate_sbom_and_create_components.delay(
+            task = generate_sbom_and_create_components.delay(
                 image_uuid=str(image.uuid),
                 art_type=art_type
             )
             return Response({
-                'status': 'success',
-                'message': 'SBOM generation scheduled successfully'
+                'status': 'scheduled',
+                'image_status': 'pending',
+                'task_id': task.id,
+                'message': 'SBOM generation was queued. Component and vulnerability analysis will follow.'
             })
         except Exception as e:
             image.scan_status = 'error'
@@ -2963,8 +3004,13 @@ class ImageViewSet(BaseViewSet):
             image.scan_status = 'pending'
             image.save(update_fields=['scan_status', 'updated_at'])
             from .tasks import scan_image_with_grype
-            scan_image_with_grype.delay(str(image.uuid))
-            return Response({'status': 'success', 'message': 'Grype scan scheduled successfully'})
+            task = scan_image_with_grype.delay(str(image.uuid))
+            return Response({
+                'status': 'scheduled',
+                'image_status': 'pending',
+                'task_id': task.id,
+                'message': 'Grype vulnerability analysis was queued.',
+            })
         except Exception as e:
             image.scan_status = 'error'
             image.save(update_fields=['scan_status', 'updated_at'])

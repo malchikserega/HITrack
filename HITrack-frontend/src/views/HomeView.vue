@@ -868,10 +868,13 @@ const viewAllRootCauses = () => {
 const scanAllRepositories = async () => {
   scanning.value = true
   try {
-    // This would be implemented based on your API
-    notificationService.started('Repository scan started.')
-  } catch (error) {
-    notificationService.error('Failed to initiate scan')
+    const response = await api.post('repositories/scan-all-tags/')
+    notificationService.queued(
+      response.data.message || 'Repository discovery was queued for active repositories.'
+    )
+  } catch (error: any) {
+    const message = error.response?.data?.error || 'Failed to start repository discovery'
+    notificationService.error(message)
   } finally {
     scanning.value = false
   }

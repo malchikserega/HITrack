@@ -632,8 +632,8 @@ const onRescan = async (img: Image) => {
   const previousStatus = img.scan_status
   img.scan_status = 'pending'
   try {
-    await api.post(`images/${img.uuid}/rescan/`)
-    notificationService.queued('Image rescan was queued.')
+    const response = await api.post(`images/${img.uuid}/rescan/`)
+    notificationService.queued(response.data.message || 'Image rescan was queued.')
     await fetchImages()
   } catch (error: any) {
     img.scan_status = previousStatus
@@ -648,8 +648,8 @@ const onRescan = async (img: Image) => {
 
 const onUpdateLatestVersions = async (item: Image) => {
   try {
-    await api.post(`images/${item.uuid}/update_latest_versions/`)
-    notificationService.started('Latest version lookup started.')
+    const response = await api.post(`images/${item.uuid}/update_latest_versions/`)
+    notificationService.queued(response.data.message || 'Latest version lookup was queued.')
     await fetchImages()
   } catch (error: any) {
     notificationService.error(error.response?.data?.error || 'Failed to update latest versions')
@@ -665,8 +665,8 @@ const onRescanGrype = async (image: Image) => {
   const previousStatus = image.scan_status
   image.scan_status = 'pending'
   try {
-    await api.post(`images/${image.uuid}/rescan-grype/`)
-    notificationService.queued('Grype scan was queued.')
+    const response = await api.post(`images/${image.uuid}/rescan-grype/`)
+    notificationService.queued(response.data.message || 'Grype scan was queued.')
     fetchImages()
   } catch (e: any) {
     image.scan_status = previousStatus

@@ -483,8 +483,8 @@ const copyDigest = (digest: string) => {
 
 const onRescan = async (image: Image) => {
   try {
-    await api.post(`images/${image.uuid}/rescan/`)
-    notificationService.queued('Image rescan was queued.')
+    const response = await api.post(`images/${image.uuid}/rescan/`)
+    notificationService.queued(response.data.message || 'Image rescan was queued.')
     await fetchImages()
   } catch (error: any) {
     if (error.response?.status === 409) {
@@ -498,8 +498,8 @@ const onRescan = async (image: Image) => {
 const onRescanGrype = async (image: Image) => {
   if (!image.uuid) return
   try {
-    await api.post(`images/${image.uuid}/rescan-grype/`)
-    notificationService.queued('Grype scan was queued.')
+    const response = await api.post(`images/${image.uuid}/rescan-grype/`)
+    notificationService.queued(response.data.message || 'Grype scan was queued.')
     fetchImages()
   } catch (e: any) {
     const msg = e?.response?.data?.error || 'Failed to schedule Grype scan'
