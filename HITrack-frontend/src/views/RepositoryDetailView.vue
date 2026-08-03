@@ -902,7 +902,9 @@ const isActionDisabled = (item: any, action: 'process' | 'rescan') => {
 }
 
 const getActionTooltip = (item: any, action: 'process' | 'rescan') => {
-  const baseMessage = action === 'process' ? 'Process tag' : 'Rescan all images for this tag'
+  const baseMessage = action === 'process'
+    ? 'Discover tag images and queue missing SBOM scans'
+    : 'Rescan all images for this tag'
   if (['in_process', 'pending'].includes(item.processing_status)) {
     return `${baseMessage} (Tag is already queued for processing)`
   }
@@ -921,8 +923,10 @@ const onProcessTag = async (tag: any) => {
   const previousStatus = tag.processing_status
   tag.processing_status = 'pending'
   try {
-    await api.post(`repository-tags/${tag.uuid}/process/`)
-    notificationService.queued('Tag processing was queued.')
+    const response = await api.post(`repository-tags/${tag.uuid}/process/`)
+    notificationService.queued(
+      response.data.message || 'Tag processing was queued; image scans will continue in the background.'
+    )
     await fetchTags()
   } catch (error: any) {
     tag.processing_status = previousStatus
@@ -1008,9 +1012,9 @@ const onReanalyzeSbom = async (tag: any) => {
 
 const getProcessingStatusTooltip = (status: string) => {
   const statusMap: { [key: string]: string } = {
-    'pending': 'Processing pending',
-    'in_process': 'Processing in progress',
-    'success': 'Processing completed',
+    'pending': 'Queued: discovering images',
+    'in_process': 'Scans in progress',
+    'success': 'Scan complete',
     'error': 'Processing failed',
     'none': 'Start processing'
   }

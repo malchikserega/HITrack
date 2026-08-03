@@ -2322,14 +2322,24 @@ class RepositoryTagViewSet(BaseViewSet):
             )
         
         tag.processing_status = 'pending'
-        tag.save()
+        tag.save(update_fields=['processing_status', 'updated_at'])
         
         try:
             from .tasks import process_single_tag
-            process_single_tag.apply_async(args=[str(tag.uuid)], task_name="Process Single Tag")
+            task = process_single_tag.apply_async(
+                args=[str(tag.uuid)],
+                task_name="Process Single Tag",
+            )
             return Response({
-                'status': 'success',
-                'message': 'Tag processing scheduled successfully'
+                # Processing this tag only discovers/links images and schedules
+                # SBOM scans.  The task itself can finish before those scans do.
+                'status': 'scheduled',
+                'tag_status': 'pending',
+                'task_id': task.id,
+                'message': (
+                    'Tag processing was queued. Image discovery will run first; '
+                    'SBOM scans, if needed, will continue in the background.'
+                ),
             })
         except Exception as e:
             tag.processing_status = 'error'

@@ -4022,33 +4022,41 @@ def process_single_tag(tag_uuid: str):
         else:
             images = tag.images.all()
         started = 0
+        child_task_ids = []
+        skipped_completed = 0
+        skipped_in_progress = 0
+        repaired_completed = 0
         repaired_tag_ids = set()
         for image in images:
             if image.scan_status in ['in_process', 'pending'] and _has_completed_image_payload(image):
                 image.scan_status = 'success'
                 image.save(update_fields=['scan_status', 'updated_at'])
                 repaired_tag_ids.update(_propagate_image_completion_to_equivalent_images(image))
+                repaired_completed += 1
                 continue
             if image.scan_status == 'in_process':
+                skipped_in_progress += 1
                 continue
             if _has_completed_image_scan(image):
+                skipped_completed += 1
                 continue
 
             image.scan_status = 'pending'
             image.save(update_fields=['scan_status', 'updated_at'])
             repo_tag = image.repository_tags.first()
             art_type = repo_tag.repository.repository_type if repo_tag else 'docker'
-            generate_sbom_and_create_components.delay(
+            child_task = generate_sbom_and_create_components.delay(
                 image_uuid=str(image.uuid),
                 art_type=art_type
             )
+            child_task_ids.append(child_task.id)
             started += 1
         logger.info(f"Triggered SBOM scan for {started} images for tag {tag.tag}")
 
         # Calculate summary statistics
         total_images_linked = images.count()
-        images_pending_before = images.filter(scan_status='pending').count()
-        images_in_process_before = images.filter(scan_status='in_process').count()
+        images_pending_after = images.filter(scan_status='pending').count()
+        images_in_process_after = images.filter(scan_status='in_process').count()
 
         if unresolved_image_refs:
             tag.processing_status = 'error'
@@ -4066,12 +4074,16 @@ def process_single_tag(tag_uuid: str):
                 "error_type": "HelmImageResolutionError",
                 "summary": {
                     "total_images_linked": total_images_linked,
-                    "images_scanned": started,
-                    "images_pending_before": images_pending_before,
-                    "images_in_process_before": images_in_process_before,
+                    "images_scheduled": started,
+                    "images_pending_after": images_pending_after,
+                    "images_in_process_after": images_in_process_after,
+                    "images_already_scanned": skipped_completed,
+                    "images_repaired_from_completed_payload": repaired_completed,
+                    "images_already_in_progress": skipped_in_progress,
                     "sbom_scans_triggered": started,
                     "tag_processing_status": tag.processing_status,
                 },
+                "child_task_ids": child_task_ids,
                 "message": f"Helm image resolution failed for one or more images in tag {tag.tag}",
                 "timestamp": timezone.now().isoformat(),
             }
@@ -4089,8 +4101,32 @@ def process_single_tag(tag_uuid: str):
             )
             tag.processing_status = synced_statuses.get(str(tag.pk), tag.processing_status)
         
+        processing_outcome = "scheduled" if started else "already_scanned"
+        if total_images_linked == 0:
+            processing_outcome = "completed"
+        elif skipped_in_progress:
+            processing_outcome = "in_progress"
+
+        if started:
+            message = (
+                f"Discovered {total_images_linked} image(s) for tag {tag.tag}; "
+                f"queued SBOM scans for {started}."
+            )
+        elif total_images_linked == 0:
+            message = f"Tag {tag.tag} has no images to scan."
+        elif skipped_in_progress:
+            message = (
+                f"No new SBOM scan was queued for tag {tag.tag}; "
+                f"{skipped_in_progress} image(s) are already being scanned."
+            )
+        else:
+            message = (
+                f"All {total_images_linked} image(s) for tag {tag.tag} are already scanned. "
+                "Use Rescan all images to force a new scan."
+            )
+
         return {
-            "status": "success",
+            "status": processing_outcome,
             "task_name": "Process Single Tag",
             "tag_uuid": str(tag_uuid),
             "repository": tag.repository.name,
@@ -4100,12 +4136,16 @@ def process_single_tag(tag_uuid: str):
             "repository_type": repository.repository_type,
             "summary": {
                 "total_images_linked": total_images_linked,
-                "images_scanned": started,
-                "images_pending_before": images_pending_before,
-                "images_in_process_before": images_in_process_before,
+                "images_scheduled": started,
+                "images_pending_after": images_pending_after,
+                "images_in_process_after": images_in_process_after,
+                "images_already_scanned": skipped_completed,
+                "images_repaired_from_completed_payload": repaired_completed,
+                "images_already_in_progress": skipped_in_progress,
                 "sbom_scans_triggered": started,
                 "tag_processing_status": tag.processing_status
             },
+            "child_task_ids": child_task_ids,
             "processing_details": {
                 "repository_type": repository.repository_type,
                 "registry_provider": repository.container_registry.provider if repository.container_registry else None,
@@ -4115,9 +4155,13 @@ def process_single_tag(tag_uuid: str):
             "sbom_scanning": {
                 "scans_triggered": started,
                 "art_type_used": repository.repository_type if repository.repository_type != 'none' else 'docker',
-                "next_steps": ["SBOM generation in progress", "Component analysis will follow"]
+                "next_steps": (
+                    ["SBOM generation is running", "Component analysis will follow"]
+                    if started else
+                    ["No new SBOM scan was queued", "Use Rescan all images to force a new scan"]
+                )
             },
-            "message": f"Tag {tag.tag} from repository {repository.name} processed successfully",
+            "message": message,
             "timestamp": timezone.now().isoformat()
         }
 
