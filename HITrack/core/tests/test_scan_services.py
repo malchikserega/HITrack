@@ -1,9 +1,31 @@
-from django.test import TestCase
+from unittest.mock import Mock, patch
+
+from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from core.models import Image, ScanRun
 from core.services.purl import component_identity
 from core.services.scans import claim_scan, queue_scan
+from core.tasks import _is_image_available_locally
+
+
+class LocalDockerImageTests(SimpleTestCase):
+    @patch('core.tasks.subprocess.run')
+    def test_detects_image_that_exists_in_local_docker(self, run):
+        run.return_value = Mock(returncode=0)
+
+        self.assertTrue(_is_image_available_locally('my-service:dev'))
+        run.assert_called_once_with(
+            ['docker', 'image', 'inspect', 'my-service:dev'],
+            capture_output=True,
+            check=False,
+        )
+
+    @patch('core.tasks.subprocess.run')
+    def test_missing_local_image_uses_registry_fallback(self, run):
+        run.return_value = Mock(returncode=1)
+
+        self.assertFalse(_is_image_available_locally('my-service:dev'))
 
 
 class ScanRunServiceTests(TestCase):
