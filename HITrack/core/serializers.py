@@ -563,6 +563,10 @@ class ImageSerializer(serializers.ModelSerializer):
     fixable_severity_counts = serializers.SerializerMethodField()
     unique_severity_counts = serializers.SerializerMethodField()
     fixable_unique_severity_counts = serializers.SerializerMethodField()
+    fully_fixable_findings = serializers.SerializerMethodField()
+    fully_fixable_unique_findings = serializers.SerializerMethodField()
+    fully_fixable_severity_counts = serializers.SerializerMethodField()
+    fully_fixable_unique_severity_counts = serializers.SerializerMethodField()
     has_sbom = serializers.SerializerMethodField()
     has_grype = serializers.SerializerMethodField()
     repository_info = serializers.SerializerMethodField()
@@ -577,6 +581,8 @@ class ImageSerializer(serializers.ModelSerializer):
             'fully_fixable_components_count',
             'fixable_findings', 'fixable_unique_findings', 'fixable_severity_counts',
             'unique_severity_counts', 'fixable_unique_severity_counts',
+            'fully_fixable_findings', 'fully_fixable_unique_findings',
+            'fully_fixable_severity_counts', 'fully_fixable_unique_severity_counts',
             'has_sbom', 'has_grype',
             'repository_info', 'created_at', 'updated_at'
         ]
@@ -602,48 +608,66 @@ class ImageSerializer(serializers.ModelSerializer):
         if components_count is None:
             components_count = obj.component_versions.count()
 
-        unique_vuln_ids = set()
-        fixable_unique_ids = set()
-        unique_severity_by_vuln = {}
-        fixable_unique_severity_by_vuln = {}
-        all_severities = []
-        fully_fixable_by_component = defaultdict(list)
-        fixable_findings = 0
-
-        for component_version_id, fixable, vulnerability_uuid, severity in cvv_rows:
-            normalized_severity = (severity or 'UNKNOWN').upper()
-            all_severities.append(normalized_severity)
-            fully_fixable_by_component[component_version_id].append(bool(fixable))
-
-            if vulnerability_uuid:
-                unique_vuln_ids.add(vulnerability_uuid)
-                unique_severity_by_vuln.setdefault(vulnerability_uuid, normalized_severity)
-                if fixable:
-                    fixable_unique_ids.add(vulnerability_uuid)
-                    fixable_unique_severity_by_vuln.setdefault(vulnerability_uuid, normalized_severity)
-
-            if fixable:
-                fixable_findings += 1
-
         all_sevs = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN']
-        severity_counts = Counter(all_severities)
-        unique_severity_counts = Counter(unique_severity_by_vuln.values())
-        fixable_unique_severity_counts = Counter(fixable_unique_severity_by_vuln.values())
+
+        def summarize(rows):
+            """Count findings and vulnerabilities without double-counting CVEs."""
+            severity_counts = Counter()
+            unique_severity_by_vulnerability = {}
+            for _component_version_id, _fixable, vulnerability_uuid, severity in rows:
+                normalized_severity = (severity or 'UNKNOWN').upper()
+                severity_counts[normalized_severity] += 1
+                if vulnerability_uuid:
+                    # Severity lives on Vulnerability, so repeated findings always
+                    # resolve to the same severity. Keep a single occurrence.
+                    unique_severity_by_vulnerability.setdefault(
+                        vulnerability_uuid,
+                        normalized_severity,
+                    )
+            unique_severity_counts = Counter(unique_severity_by_vulnerability.values())
+            return {
+                'findings': len(rows),
+                'unique_findings': len(unique_severity_by_vulnerability),
+                'severity_counts': {sev: severity_counts.get(sev, 0) for sev in all_sevs},
+                'unique_severity_counts': {
+                    sev: unique_severity_counts.get(sev, 0) for sev in all_sevs
+                },
+            }
+
+        rows_by_component = defaultdict(list)
+        for row in cvv_rows:
+            rows_by_component[row[0]].append(row)
+
+        fully_fixable_component_ids = {
+            component_version_id
+            for component_version_id, rows in rows_by_component.items()
+            # A component is fully fixable only if it has findings and each
+            # finding has a fix. A component without findings is not included.
+            if rows and all(bool(row[1]) for row in rows)
+        }
+        fully_fixable_rows = [
+            row for row in cvv_rows if row[0] in fully_fixable_component_ids
+        ]
+        individually_fixable_rows = [row for row in cvv_rows if bool(row[1])]
+
+        all_summary = summarize(cvv_rows)
+        individually_fixable_summary = summarize(individually_fixable_rows)
+        fully_fixable_summary = summarize(fully_fixable_rows)
 
         summary = {
-            'findings': len(cvv_rows),
-            'unique_findings': len(unique_vuln_ids),
-            'severity_counts': {sev: severity_counts.get(sev, 0) for sev in all_sevs},
+            **all_summary,
             'components_count': components_count,
-            'fully_fixable_components_count': sum(
-                1 for fixable_flags in fully_fixable_by_component.values()
-                if fixable_flags and all(fixable_flags)
-            ),
-            'fixable_findings': fixable_findings,
-            'fixable_unique_findings': len(fixable_unique_ids),
-            'fixable_severity_counts': {sev: fixable_unique_severity_counts.get(sev, 0) for sev in all_sevs},
-            'unique_severity_counts': {sev: unique_severity_counts.get(sev, 0) for sev in all_sevs},
-            'fixable_unique_severity_counts': {sev: fixable_unique_severity_counts.get(sev, 0) for sev in all_sevs},
+            'fully_fixable_components_count': len(fully_fixable_component_ids),
+            # Preserve these original fields for API clients that need
+            # individually fixable findings, rather than whole components.
+            'fixable_findings': individually_fixable_summary['findings'],
+            'fixable_unique_findings': individually_fixable_summary['unique_findings'],
+            'fixable_severity_counts': individually_fixable_summary['severity_counts'],
+            'fixable_unique_severity_counts': individually_fixable_summary['unique_severity_counts'],
+            'fully_fixable_findings': fully_fixable_summary['findings'],
+            'fully_fixable_unique_findings': fully_fixable_summary['unique_findings'],
+            'fully_fixable_severity_counts': fully_fixable_summary['severity_counts'],
+            'fully_fixable_unique_severity_counts': fully_fixable_summary['unique_severity_counts'],
         }
         obj._image_summary_cache = summary
         return summary
@@ -687,6 +711,22 @@ class ImageSerializer(serializers.ModelSerializer):
     @extend_schema_field(serializers.DictField(child=serializers.IntegerField()))
     def get_fixable_unique_severity_counts(self, obj):
         return self._get_summary(obj)['fixable_unique_severity_counts']
+
+    @extend_schema_field(serializers.IntegerField())
+    def get_fully_fixable_findings(self, obj):
+        return self._get_summary(obj)['fully_fixable_findings']
+
+    @extend_schema_field(serializers.IntegerField())
+    def get_fully_fixable_unique_findings(self, obj):
+        return self._get_summary(obj)['fully_fixable_unique_findings']
+
+    @extend_schema_field(serializers.DictField(child=serializers.IntegerField()))
+    def get_fully_fixable_severity_counts(self, obj):
+        return self._get_summary(obj)['fully_fixable_severity_counts']
+
+    @extend_schema_field(serializers.DictField(child=serializers.IntegerField()))
+    def get_fully_fixable_unique_severity_counts(self, obj):
+        return self._get_summary(obj)['fully_fixable_unique_severity_counts']
 
     @extend_schema_field(serializers.BooleanField())
     def get_has_sbom(self, obj):

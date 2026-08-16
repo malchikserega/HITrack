@@ -178,6 +178,10 @@ export interface Image extends BaseEntity {
   fixable_severity_counts: { [key: string]: number }
   unique_severity_counts: { [key: string]: number }
   fixable_unique_severity_counts: { [key: string]: number }
+  fully_fixable_findings: number
+  fully_fixable_unique_findings: number
+  fully_fixable_severity_counts: { [key: string]: number }
+  fully_fixable_unique_severity_counts: { [key: string]: number }
   repository_info?: {
     repository_name: string
     repository_uuid: string

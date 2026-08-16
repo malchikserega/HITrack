@@ -362,6 +362,10 @@ const editedItem = ref<Image>({
   fixable_severity_counts: {},
   unique_severity_counts: {},
   fixable_unique_severity_counts: {},
+  fully_fixable_findings: 0,
+  fully_fixable_unique_findings: 0,
+  fully_fixable_severity_counts: {},
+  fully_fixable_unique_severity_counts: {},
   created_at: '',
   updated_at: ''
 })
@@ -409,6 +413,10 @@ const defaultItem = {
   fixable_severity_counts: {},
   unique_severity_counts: {},
   fixable_unique_severity_counts: {},
+  fully_fixable_findings: 0,
+  fully_fixable_unique_findings: 0,
+  fully_fixable_severity_counts: {},
+  fully_fixable_unique_severity_counts: {},
   created_at: '',
   updated_at: ''
 }
@@ -533,6 +541,10 @@ const openDialog = (title: string, item?: Image) => {
       fixable_severity_counts: item.fixable_severity_counts,
       unique_severity_counts: item.unique_severity_counts,
       fixable_unique_severity_counts: item.fixable_unique_severity_counts,
+      fully_fixable_findings: item.fully_fixable_findings,
+      fully_fixable_unique_findings: item.fully_fixable_unique_findings,
+      fully_fixable_severity_counts: item.fully_fixable_severity_counts,
+      fully_fixable_unique_severity_counts: item.fully_fixable_unique_severity_counts,
       created_at: item.created_at,
       updated_at: item.updated_at
     }

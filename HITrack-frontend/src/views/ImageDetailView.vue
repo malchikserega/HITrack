@@ -135,7 +135,7 @@
                     color="success"
                     hide-details
                     class="switch-fixable-findings"
-                    :label="'🔧 Only fully fixable components'"
+                    :label="'Summary: only fully fixable components'"
                     density="compact"
                     style="min-width: 260px;"
                   />
@@ -752,11 +752,11 @@ const pieChartData = computed(() => {
   // Select data for PieChart
   let counts: number[]
   if (showUniqueFindings.value && showFixableOnly.value) {
-    counts = severityOrder.map(sev => image.value?.fixable_unique_severity_counts?.[sev] || 0)
+    counts = severityOrder.map(sev => image.value?.fully_fixable_unique_severity_counts?.[sev] || 0)
   } else if (showUniqueFindings.value) {
     counts = severityOrder.map(sev => image.value?.unique_severity_counts?.[sev] || 0)
   } else if (showFixableOnly.value) {
-    counts = severityOrder.map(sev => image.value?.fixable_severity_counts?.[sev] || 0)
+    counts = severityOrder.map(sev => image.value?.fully_fixable_severity_counts?.[sev] || 0)
   } else {
     counts = severityOrder.map(sev => image.value?.severity_counts?.[sev] || 0)
   }
@@ -765,7 +765,7 @@ const pieChartData = computed(() => {
     datasets: [
       {
         label: showFixableOnly.value
-          ? (showUniqueFindings.value ? 'Fixable Unique Vulnerabilities by Severity' : 'Fixable Vulnerabilities by Severity')
+          ? (showUniqueFindings.value ? 'Fully Fixable Unique Vulnerabilities by Severity' : 'Fully Fixable Vulnerabilities by Severity')
           : (showUniqueFindings.value ? 'Unique Vulnerabilities by Severity' : 'Vulnerabilities by Severity'),
         data: counts.map((v, i) => legendVisible.value[i] ? v : 0),
         backgroundColor: severityColors
@@ -991,7 +991,9 @@ watch([image, showUniqueFindings, showFixableOnly], ([img, unique, fixable], [ol
     // Number of vulnerabilities
     let findingsValue = 0
     if (fixable) {
-      findingsValue = unique ? (img.fixable_unique_findings || 0) : (img.fixable_findings || 0)
+      findingsValue = unique
+        ? (img.fully_fixable_unique_findings || 0)
+        : (img.fully_fixable_findings || 0)
     } else {
       findingsValue = unique ? (img.unique_findings || 0) : (img.findings || 0)
     }
