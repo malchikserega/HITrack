@@ -17,6 +17,7 @@ export const SEVERITY_COLORS = {
   'HIGH': 'warning',
   'MEDIUM': 'orange',
   'LOW': 'info',
+  'NEGLIGIBLE': 'blue-grey',
   'UNKNOWN': 'grey'
 } as const
 
@@ -128,4 +129,4 @@ export const getEpssSourceDisplay = (source: string): string => {
     default:
       return source
   }
-} 
+}

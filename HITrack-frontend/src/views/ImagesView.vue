@@ -269,10 +269,20 @@
               <v-col cols="12">
                 <v-text-field
                   v-model="editedItem.digest"
-                  label="Digest"
+                  label="Digest (optional)"
                   variant="outlined"
-                  :rules="[rules.required]"
                 ></v-text-field>
+              </v-col>
+              <v-col v-if="!editedItem.uuid" cols="12">
+                <v-checkbox
+                  v-model="scanAfterCreate"
+                  color="primary"
+                  label="Scan now (local Docker first, registry fallback)"
+                  hide-details
+                />
+                <div class="text-caption text-medium-emphasis mt-1">
+                  HITrack will use an image in this machine's Docker daemon before trying to pull it.
+                </div>
               </v-col>
             </v-row>
           </v-card-text>
@@ -317,6 +327,7 @@ const saving = ref(false)
 const deleting = ref(false)
 const dialog = ref(false)
 const dialogDelete = ref(false)
+const scanAfterCreate = ref(true)
 const search = ref('')
 const page = ref(1)
 const itemsPerPage = ref(10)
@@ -351,6 +362,10 @@ const editedItem = ref<Image>({
   fixable_severity_counts: {},
   unique_severity_counts: {},
   fixable_unique_severity_counts: {},
+  fully_fixable_findings: 0,
+  fully_fixable_unique_findings: 0,
+  fully_fixable_severity_counts: {},
+  fully_fixable_unique_severity_counts: {},
   created_at: '',
   updated_at: ''
 })
@@ -398,6 +413,10 @@ const defaultItem = {
   fixable_severity_counts: {},
   unique_severity_counts: {},
   fixable_unique_severity_counts: {},
+  fully_fixable_findings: 0,
+  fully_fixable_unique_findings: 0,
+  fully_fixable_severity_counts: {},
+  fully_fixable_unique_severity_counts: {},
   created_at: '',
   updated_at: ''
 }
@@ -522,6 +541,10 @@ const openDialog = (title: string, item?: Image) => {
       fixable_severity_counts: item.fixable_severity_counts,
       unique_severity_counts: item.unique_severity_counts,
       fixable_unique_severity_counts: item.fixable_unique_severity_counts,
+      fully_fixable_findings: item.fully_fixable_findings,
+      fully_fixable_unique_findings: item.fully_fixable_unique_findings,
+      fully_fixable_severity_counts: item.fully_fixable_severity_counts,
+      fully_fixable_unique_severity_counts: item.fully_fixable_unique_severity_counts,
       created_at: item.created_at,
       updated_at: item.updated_at
     }
@@ -533,6 +556,7 @@ const openDialog = (title: string, item?: Image) => {
 
 const closeDialog = () => {
   dialog.value = false
+  scanAfterCreate.value = true
   editedItem.value = Object.assign({}, defaultItem)
 }
 
@@ -567,8 +591,15 @@ const save = async () => {
       await api.put(`images/${editedItem.value.uuid}/`, data)
       notificationService.success('Image updated successfully')
     } else {
-      await api.post('images/', data)
-      notificationService.success('Image created successfully')
+      const response = await api.post<Image>('images/', data)
+      if (scanAfterCreate.value) {
+        const scanResponse = await api.post(`images/${response.data.uuid}/rescan/`)
+        notificationService.queued(
+          scanResponse.data.message || 'Image was created and its scan was queued.'
+        )
+      } else {
+        notificationService.success('Image created successfully')
+      }
     }
     await fetchImages()
     closeDialog()

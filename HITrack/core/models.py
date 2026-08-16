@@ -356,6 +356,7 @@ class Vulnerability(models.Model):
             ('HIGH', 'High'),
             ('MEDIUM', 'Medium'),
             ('LOW', 'Low'),
+            ('NEGLIGIBLE', 'Negligible'),
             ('UNKNOWN', 'Unknown')
         ]
     )
