@@ -108,6 +108,9 @@
                   </div>
                 </div>
                 <div class="circle-label mt-2">Severity</div>
+                <div class="text-caption text-medium-emphasis mt-1">
+                  Showing {{ visiblePieTotal }} of {{ selectedFindingsTotal }}
+                </div>
               </v-col>
               <v-col cols="12" md="4" class="d-flex flex-column align-center justify-center">
                 <div class="circle-info mx-4">
@@ -148,7 +151,9 @@
                   <div v-for="(label, i) in pieChartData.labels" :key="label" class="legend-row"
                     @click="onLegendClick(i)">
                     <span class="legend-color" :style="{ background: pieChartData.datasets[0].backgroundColor[i] }"></span>
-                    <span class="legend-label" :class="{ 'legend-label--strikethrough': !legendVisible[i] }">{{ label }}</span>
+                    <span class="legend-label" :class="{ 'legend-label--strikethrough': !legendVisible[i] }">
+                      {{ label }}: {{ selectedSeverityCounts[i] }}
+                    </span>
                   </div>
                 </div>
               </v-col>
@@ -650,6 +655,8 @@ const error = ref('')
 
 const animatedFindings = ref(0)
 const animatedComponents = ref(0)
+let findingsAnimationFrame: number | null = null
+let componentsAnimationFrame: number | null = null
 
 const showUniqueFindings = ref(false)
 const showFixableOnly = ref(false)
@@ -742,24 +749,31 @@ const getFixStatusIcon = (vulnerability: Vulnerability) => {
   }
 }
 
-const pieChartData = computed(() => {
-  if (!image.value) {
-    return {
-      labels: severityLabels,
-      datasets: [{ label: 'Vulnerabilities by Severity', data: [0,0,0,0,0], backgroundColor: severityColors }]
-    }
-  }
-  // Select data for PieChart
-  let counts: number[]
+const selectedSeverityCounts = computed((): number[] => {
+  if (!image.value) return [0, 0, 0, 0, 0]
   if (showUniqueFindings.value && showFixableOnly.value) {
-    counts = severityOrder.map(sev => image.value?.fully_fixable_unique_severity_counts?.[sev] || 0)
+    return severityOrder.map(sev => image.value?.fully_fixable_unique_severity_counts?.[sev] || 0)
   } else if (showUniqueFindings.value) {
-    counts = severityOrder.map(sev => image.value?.unique_severity_counts?.[sev] || 0)
+    return severityOrder.map(sev => image.value?.unique_severity_counts?.[sev] || 0)
   } else if (showFixableOnly.value) {
-    counts = severityOrder.map(sev => image.value?.fully_fixable_severity_counts?.[sev] || 0)
-  } else {
-    counts = severityOrder.map(sev => image.value?.severity_counts?.[sev] || 0)
+    return severityOrder.map(sev => image.value?.fully_fixable_severity_counts?.[sev] || 0)
   }
+  return severityOrder.map(sev => image.value?.severity_counts?.[sev] || 0)
+})
+
+const selectedFindingsTotal = computed(() =>
+  selectedSeverityCounts.value.reduce((total, count) => total + count, 0)
+)
+
+const visiblePieTotal = computed(() =>
+  selectedSeverityCounts.value.reduce(
+    (total, count, index) => total + (legendVisible.value[index] ? count : 0),
+    0,
+  )
+)
+
+const pieChartData = computed(() => {
+  const counts = selectedSeverityCounts.value
   return {
     labels: severityLabels,
     datasets: [
@@ -969,20 +983,45 @@ function onLegendClick(i: number) {
   legendVisible.value[i] = !legendVisible.value[i]
 }
 
-function animateNumber(targetRef: any, targetValue: number, duration = 900) {
-  const start = 0
+function animateNumber(
+  targetRef: { value: number },
+  targetValue: number,
+  counter: 'findings' | 'components',
+  duration = 900,
+) {
+  const activeFrame = counter === 'findings' ? findingsAnimationFrame : componentsAnimationFrame
+  if (activeFrame !== null) {
+    cancelAnimationFrame(activeFrame)
+  }
+
+  const start = targetRef.value || 0
   const startTime = performance.now()
   function animate(currentTime: number) {
     const elapsed = currentTime - startTime
     const progress = Math.min(elapsed / duration, 1)
     targetRef.value = Math.floor(progress * (targetValue - start) + start)
     if (progress < 1) {
-      requestAnimationFrame(animate)
+      const nextFrame = requestAnimationFrame(animate)
+      if (counter === 'findings') {
+        findingsAnimationFrame = nextFrame
+      } else {
+        componentsAnimationFrame = nextFrame
+      }
     } else {
       targetRef.value = targetValue
+      if (counter === 'findings') {
+        findingsAnimationFrame = null
+      } else {
+        componentsAnimationFrame = null
+      }
     }
   }
-  requestAnimationFrame(animate)
+  const nextFrame = requestAnimationFrame(animate)
+  if (counter === 'findings') {
+    findingsAnimationFrame = nextFrame
+  } else {
+    componentsAnimationFrame = nextFrame
+  }
 }
 
 // Animate findings when image, showUniqueFindings, or showFixableOnly changes
@@ -997,11 +1036,16 @@ watch([image, showUniqueFindings, showFixableOnly], ([img, unique, fixable], [ol
     } else {
       findingsValue = unique ? (img.unique_findings || 0) : (img.findings || 0)
     }
-    animateNumber(animatedFindings, findingsValue)
+    animateNumber(animatedFindings, findingsValue, 'findings')
     // Number of components
     let componentsValue = fixable ? (img.fully_fixable_components_count || 0) : (img.components_count || 0)
-    animateNumber(animatedComponents, componentsValue)
+    animateNumber(animatedComponents, componentsValue, 'components')
   }
+})
+
+watch([showUniqueFindings, showFixableOnly], () => {
+  // A new metric scope should start with all chart segments visible.
+  legendVisible.value = [true, true, true, true, true]
 })
 
 const pieChartOptions = {

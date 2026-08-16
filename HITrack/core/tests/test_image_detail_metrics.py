@@ -53,6 +53,8 @@ class ImageDetailMetricsTests(TestCase):
         self.assertEqual(data['unique_findings'], 3)
         self.assertEqual(data['severity_counts']['CRITICAL'], 2)
         self.assertEqual(data['unique_severity_counts']['CRITICAL'], 1)
+        self.assertEqual(sum(data['severity_counts'].values()), data['findings'])
+        self.assertEqual(sum(data['unique_severity_counts'].values()), data['unique_findings'])
 
     def test_fully_fixable_summary_excludes_partially_fixable_components(self):
         data = ImageSerializer(self.image).data
@@ -63,6 +65,14 @@ class ImageDetailMetricsTests(TestCase):
         self.assertEqual(data['fully_fixable_severity_counts']['CRITICAL'], 1)
         self.assertEqual(data['fully_fixable_severity_counts']['HIGH'], 1)
         self.assertEqual(data['fully_fixable_severity_counts']['MEDIUM'], 0)
+        self.assertEqual(
+            sum(data['fully_fixable_severity_counts'].values()),
+            data['fully_fixable_findings'],
+        )
+        self.assertEqual(
+            sum(data['fully_fixable_unique_severity_counts'].values()),
+            data['fully_fixable_unique_findings'],
+        )
 
         # The legacy individually-fixable metric stays available and correctly
         # includes the fixable CVE from the partially-fixable component.
