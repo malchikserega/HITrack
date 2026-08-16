@@ -679,16 +679,17 @@ const grypeCopyLoading = ref(false)
 const activeTab = ref('components')
 
 // PieChart legend filtering logic
-const severityOrder = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN']
-const severityLabels = ['Critical', 'High', 'Medium', 'Low', 'Info|Unknown']
+const severityOrder = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'NEGLIGIBLE', 'UNKNOWN']
+const severityLabels = ['Critical', 'High', 'Medium', 'Low', 'Negligible', 'Unknown']
 const severityColors = [
   '#FF6384', // CRITICAL
   '#FF9F40', // HIGH
   '#FFCD56', // MEDIUM
   '#4BC0C0', // LOW
+  '#B0BEC5', // NEGLIGIBLE
   '#36A2EB'  // UNKNOWN
 ]
-const legendVisible = ref([true, true, true, true, true])
+const legendVisible = ref(severityOrder.map(() => true))
 
 // Color utilities imported from utils/colors.ts
 
@@ -750,7 +751,7 @@ const getFixStatusIcon = (vulnerability: Vulnerability) => {
 }
 
 const selectedSeverityCounts = computed((): number[] => {
-  if (!image.value) return [0, 0, 0, 0, 0]
+  if (!image.value) return [0, 0, 0, 0, 0, 0]
   if (showUniqueFindings.value && showFixableOnly.value) {
     return severityOrder.map(sev => image.value?.fully_fixable_unique_severity_counts?.[sev] || 0)
   } else if (showUniqueFindings.value) {
@@ -1045,7 +1046,7 @@ watch([image, showUniqueFindings, showFixableOnly], ([img, unique, fixable], [ol
 
 watch([showUniqueFindings, showFixableOnly], () => {
   // A new metric scope should start with all chart segments visible.
-  legendVisible.value = [true, true, true, true, true]
+  legendVisible.value = severityOrder.map(() => true)
 })
 
 const pieChartOptions = {

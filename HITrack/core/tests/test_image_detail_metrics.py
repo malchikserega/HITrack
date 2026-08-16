@@ -78,3 +78,26 @@ class ImageDetailMetricsTests(TestCase):
         # includes the fixable CVE from the partially-fixable component.
         self.assertEqual(data['fixable_findings'], 3)
         self.assertEqual(data['fixable_unique_findings'], 2)
+
+    def test_negligible_and_unrecognized_severities_are_not_lost_from_chart_counts(self):
+        component = Component.objects.create(name='component-c', type='deb')
+        version = ComponentVersion.objects.create(component=component, version='3.0')
+        version.images.add(self.image)
+        negligible = Vulnerability.objects.create(
+            vulnerability_id='CVE-2024-0004', severity='NEGLIGIBLE',
+        )
+        legacy_info = Vulnerability.objects.create(
+            vulnerability_id='CVE-2024-0005', severity='INFO',
+        )
+        ComponentVersionVulnerability.objects.create(
+            component_version=version, vulnerability=negligible, fixable=True,
+        )
+        ComponentVersionVulnerability.objects.create(
+            component_version=version, vulnerability=legacy_info, fixable=True,
+        )
+
+        data = ImageSerializer(self.image).data
+
+        self.assertEqual(data['severity_counts']['NEGLIGIBLE'], 1)
+        self.assertEqual(data['severity_counts']['UNKNOWN'], 1)
+        self.assertEqual(sum(data['severity_counts'].values()), data['findings'])

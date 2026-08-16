@@ -608,7 +608,7 @@ class ImageSerializer(serializers.ModelSerializer):
         if components_count is None:
             components_count = obj.component_versions.count()
 
-        all_sevs = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN']
+        all_sevs = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'NEGLIGIBLE', 'UNKNOWN']
 
         def summarize(rows):
             """Count findings and vulnerabilities without double-counting CVEs."""
@@ -616,6 +616,12 @@ class ImageSerializer(serializers.ModelSerializer):
             unique_severity_by_vulnerability = {}
             for _component_version_id, _fixable, vulnerability_uuid, severity in rows:
                 normalized_severity = (severity or 'UNKNOWN').upper()
+                # Grype reports NEGLIGIBLE in addition to the usual four
+                # severities. Historical data can also contain other labels;
+                # fold those into UNKNOWN instead of silently dropping them
+                # from the chart while retaining them in the total.
+                if normalized_severity not in all_sevs:
+                    normalized_severity = 'UNKNOWN'
                 severity_counts[normalized_severity] += 1
                 if vulnerability_uuid:
                     # Severity lives on Vulnerability, so repeated findings always

@@ -3023,6 +3023,8 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict, scan_run_uui
             vulnerability_data = match.get('vulnerability', {})
             vuln_id = vulnerability_data.get('id', '')
             severity = vulnerability_data.get('severity', 'UNKNOWN').upper()
+            if severity not in {'CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'NEGLIGIBLE', 'UNKNOWN'}:
+                severity = 'UNKNOWN'
             description = vulnerability_data.get('description', '')
             vuln_type = 'CVE'
             if vuln_id.startswith('GHSA-'):
