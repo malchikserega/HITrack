@@ -55,6 +55,16 @@ def is_safe_image_ref(image_ref: str) -> bool:
     return bool(DOCKER_IMAGE_REGEX.match(image_ref)) and len(image_ref) < 200
 
 
+def _is_image_available_locally(image_ref: str) -> bool:
+    """Return whether this exact reference already exists in the worker's Docker daemon."""
+    result = subprocess.run(
+        ["docker", "image", "inspect", image_ref],
+        capture_output=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
 def _apply_image_lineage_fields(image, component_version_purls=None):
     from .utils.lineage import derive_image_lineage, image_lineage_to_update_fields
 
@@ -1869,70 +1879,75 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
             if registry:
                 token = get_bearer_token(registry)
 
-        # Try to pull image
-        try:
-            logger.info(f"Pulling image {image_ref}")
-            subprocess.run(["docker", "pull", image_ref], capture_output=True, check=True)
-        except subprocess.CalledProcessError as e:
-            if token and registry:
-                # Try with registry authentication
-                registry_host = image_ref.split('/')[0]
-                logger.info(f"First pull failed, trying with registry authentication for {registry_host}")
-                # Artifactory uses username/password; ACR uses token with special username
-                if getattr(registry, 'provider', None) == 'jfrog':
-                    login_process = subprocess.Popen(
-                        ["docker", "login", registry_host, "-u", registry.login, "--password-stdin"],
-                        stdin=subprocess.PIPE,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        text=True
-                    )
-                    _, stderr = login_process.communicate(input=registry.password)
-                else:
-                    login_process = subprocess.Popen(
-                        ["docker", "login", registry_host, "-u", "00000000-0000-0000-0000-000000000000", "--password-stdin"],
-                        stdin=subprocess.PIPE,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        text=True
-                    )
-                    _, stderr = login_process.communicate(input=token)
-                
-                # Check if login failed
-                if login_process.returncode != 0:
-                    # Check if it's a keychain error (credentials already exist) - this is not critical
-                    is_keychain_error = (
-                        "already exists in the keychain" in stderr or
-                        "error storing credentials" in stderr or
-                        "exit status 1" in stderr
-                    )
-                    
-                    if is_keychain_error:
-                        # Credentials might already be stored, try to pull anyway
-                        logger.warning(f"Keychain error during login (credentials may already exist): {stderr}")
-                        logger.info(f"Attempting to pull image {image_ref} anyway (credentials may already be valid)")
+        # Prefer the image already present in the worker's Docker daemon. This
+        # permits scanning images built locally without publishing them first.
+        # Only images downloaded by this task are cleaned up afterwards.
+        image_source = 'local' if _is_image_available_locally(image_ref) else 'registry'
+        downloaded_by_task = False
+
+        if image_source == 'local':
+            logger.info("Using locally available image %s", image_ref)
+        else:
+            try:
+                logger.info(f"Local image not found; pulling image {image_ref}")
+                subprocess.run(["docker", "pull", image_ref], capture_output=True, check=True)
+                downloaded_by_task = True
+            except subprocess.CalledProcessError:
+                if token and registry:
+                    # Try with registry authentication
+                    registry_host = image_ref.split('/')[0]
+                    logger.info(f"First pull failed, trying with registry authentication for {registry_host}")
+                    # Artifactory uses username/password; ACR uses token with special username
+                    if getattr(registry, 'provider', None) == 'jfrog':
+                        login_process = subprocess.Popen(
+                            ["docker", "login", registry_host, "-u", registry.login, "--password-stdin"],
+                            stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            text=True
+                        )
+                        _, stderr = login_process.communicate(input=registry.password)
                     else:
-                        # Real login error
-                        logger.error(f"Failed to login to registry {registry_host}: {stderr}")
+                        login_process = subprocess.Popen(
+                            ["docker", "login", registry_host, "-u", "00000000-0000-0000-0000-000000000000", "--password-stdin"],
+                            stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            text=True
+                        )
+                        _, stderr = login_process.communicate(input=token)
+
+                    # Check if login failed
+                    if login_process.returncode != 0:
+                        # Credentials might already be stored, so retry the pull once.
+                        is_keychain_error = (
+                            "already exists in the keychain" in stderr or
+                            "error storing credentials" in stderr or
+                            "exit status 1" in stderr
+                        )
+                        if is_keychain_error:
+                            logger.warning(f"Keychain error during login (credentials may already exist): {stderr}")
+                            logger.info(f"Attempting to pull image {image_ref} anyway (credentials may already be valid)")
+                        else:
+                            logger.error(f"Failed to login to registry {registry_host}: {stderr}")
+                            image.scan_status = 'error'
+                            image.save()
+                            raise
+
+                    logger.info(f"Retrying pull for {image_ref}")
+                    try:
+                        subprocess.run(["docker", "pull", image_ref], capture_output=True, check=True)
+                        downloaded_by_task = True
+                    except subprocess.CalledProcessError:
+                        logger.error(f"Failed to pull image {image_ref} even after login attempt")
                         image.scan_status = 'error'
                         image.save()
                         raise
-                
-                # Retry pull after login (or if keychain error occurred, try anyway)
-                logger.info(f"Retrying pull for {image_ref}")
-                try:
-                    subprocess.run(["docker", "pull", image_ref], capture_output=True, check=True)
-                except subprocess.CalledProcessError as pull_error:
-                    # If pull still fails after login attempt, it's a real error
-                    logger.error(f"Failed to pull image {image_ref} even after login attempt")
+                else:
+                    logger.error(f"Failed to pull image {image_ref} and no registry credentials available")
                     image.scan_status = 'error'
                     image.save()
                     raise
-            else:
-                logger.error(f"Failed to pull image {image_ref} and no registry credentials available")
-                image.scan_status = 'error'
-                image.save()
-                raise
 
         # Get image SHA if not already set
         if not image.digest:
@@ -2000,6 +2015,7 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
                 "image_name": image_ref,
                 "digest": image.digest,
                 "art_type": art_type,
+                "image_source": image_source,
                 "sbom_generated": True,
                 "sbom_parsing_scheduled": True,
                 "message": f"SBOM successfully generated for image {image_ref}",
@@ -2009,11 +2025,12 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
 
         finally:
             # Clean up
-            try:
-                logger.info(f"Removing image {image_ref}")
-                subprocess.run(["docker", "rmi", image_ref], capture_output=True)
-            except Exception as e:
-                logger.warning(f"Failed to remove image {image_ref}: {str(e)}")
+            if downloaded_by_task:
+                try:
+                    logger.info(f"Removing image downloaded by task {image_ref}")
+                    subprocess.run(["docker", "rmi", image_ref], capture_output=True)
+                except Exception as e:
+                    logger.warning(f"Failed to remove downloaded image {image_ref}: {str(e)}")
             
             if os.path.exists(temp_file_path):
                 os.unlink(temp_file_path)
@@ -3006,6 +3023,8 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict, scan_run_uui
             vulnerability_data = match.get('vulnerability', {})
             vuln_id = vulnerability_data.get('id', '')
             severity = vulnerability_data.get('severity', 'UNKNOWN').upper()
+            if severity not in {'CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'NEGLIGIBLE', 'UNKNOWN'}:
+                severity = 'UNKNOWN'
             description = vulnerability_data.get('description', '')
             vuln_type = 'CVE'
             if vuln_id.startswith('GHSA-'):
