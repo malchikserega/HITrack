@@ -201,6 +201,19 @@ const onReleaseChange = (releaseUuid: string | null) => {
   selectedImages.value = []
 }
 
+const getReportErrorMessage = async (error: any, fallback: string) => {
+  const payload = error?.response?.data
+  if (payload instanceof Blob) {
+    try {
+      const parsed = JSON.parse(await payload.text())
+      return parsed.error || parsed.detail || fallback
+    } catch {
+      return fallback
+    }
+  }
+  return payload?.error || payload?.detail || fallback
+}
+
 const generateReleaseReport = async () => {
   if (!selectedRelease.value) return
 
@@ -233,8 +246,8 @@ const generateReleaseReport = async () => {
     window.URL.revokeObjectURL(url)
 
     notificationService.success('Release report generated successfully')
-  } catch (error) {
-    notificationService.error('Failed to generate release report')
+  } catch (error: any) {
+    notificationService.error(await getReportErrorMessage(error, 'Failed to generate release report'))
   } finally {
     generatingReleaseReport.value = false
   }
@@ -299,8 +312,8 @@ const generateReport = async () => {
     window.URL.revokeObjectURL(url)
 
     notificationService.success('Report generated successfully')
-  } catch (error) {
-    notificationService.error('Failed to generate report')
+  } catch (error: any) {
+    notificationService.error(await getReportErrorMessage(error, 'Failed to generate report'))
   } finally {
     generating.value = false
   }
@@ -444,4 +457,4 @@ onMounted(() => {
 :deep(.v-input__details) {
   display: none !important;
 }
-</style> 
+</style>

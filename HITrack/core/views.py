@@ -4695,7 +4695,9 @@ class ReportGeneratorView(APIView):
             findings_rows = ComponentVersionVulnerability.objects.filter(
                 component_version__images__in=image_list
             ).values(
-                'component_version__images__id',
+                # Image uses UUID as its primary key, so ``__id`` is not a
+                # valid relation lookup and makes every non-empty report fail.
+                'component_version__images__uuid',
                 'component_version__component__name',
                 'component_version__component__type',
                 'component_version__version',
@@ -4704,7 +4706,7 @@ class ReportGeneratorView(APIView):
                 'fix',
             )
             for row in findings_rows:
-                findings_by_image_id[row['component_version__images__id']].append(row)
+                findings_by_image_id[row['component_version__images__uuid']].append(row)
 
             for image in image_list:
                 rows = findings_by_image_id.get(image.pk)
