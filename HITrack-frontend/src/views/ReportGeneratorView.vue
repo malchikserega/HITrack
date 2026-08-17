@@ -186,7 +186,10 @@ const pageCount = computed(() => Math.ceil(totalItems.value / itemsPerPage.value
 const fetchReleases = async () => {
   loadingReleases.value = true
   try {
-    const response = await api.get('/releases/with_stats/')
+    // This view only needs a UUID and label. ``with_stats`` aggregates every
+    // release through tags, images and CVEs, which can block the whole page on
+    // larger installations and returns a paginated shape unsuitable for v-select.
+    const response = await api.get('/releases/names/')
     releases.value = response.data
   } catch (error) {
     notificationService.error('Failed to load releases')
