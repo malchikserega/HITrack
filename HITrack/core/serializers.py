@@ -13,11 +13,53 @@ from .utils.analytics import (
     build_vulnerability_detail_analytics,
 )
 from .utils.threat_intel import get_vulnerability_weekly_threat_intel_match
+from .utils.image_vulnerability_summary import build_grype_vulnerability_summary
 # Celery Task Serializers
 from django_celery_results.models import TaskResult
 from django_celery_beat.models import PeriodicTask, IntervalSchedule, CrontabSchedule
 from datetime import datetime
 import json
+
+
+OS_PACKAGE_TYPES = {'deb', 'rpm', 'apk', 'alpm'}
+ECOSYSTEM_ALIASES = {
+    'python': ('python', 'Python'),
+    'pip': ('python', 'Python'),
+    'npm': ('npm', 'Node.js / npm'),
+    'javascript': ('npm', 'Node.js / npm'),
+    'yarn': ('npm', 'Node.js / npm'),
+    'pnpm': ('npm', 'Node.js / npm'),
+    'java-archive': ('java', 'Java'),
+    'maven': ('java', 'Java'),
+    'gradle': ('java', 'Java'),
+    'go-module': ('go', 'Go'),
+    'golang': ('go', 'Go'),
+    'gem': ('ruby', 'Ruby'),
+    'ruby': ('ruby', 'Ruby'),
+    'nuget': ('dotnet', '.NET / NuGet'),
+    'dotnet': ('dotnet', '.NET / NuGet'),
+    'rust': ('rust', 'Rust'),
+    'cargo': ('rust', 'Rust'),
+    'php-composer': ('php', 'PHP / Composer'),
+    'composer': ('php', 'PHP / Composer'),
+    'dart-pub': ('dart', 'Dart / Pub'),
+    'swift': ('swift', 'Swift'),
+    'hackage': ('haskell', 'Haskell'),
+    'hex': ('elixir', 'Elixir / Hex'),
+    'r-package': ('r', 'R'),
+    'wordpress-plugin': ('wordpress', 'WordPress'),
+}
+
+
+def image_vulnerability_ecosystem(component_type):
+    normalized_type = str(component_type or 'unknown').strip().lower() or 'unknown'
+    if normalized_type in OS_PACKAGE_TYPES:
+        return 'os', 'OS packages'
+    if normalized_type in ECOSYSTEM_ALIASES:
+        return ECOSYSTEM_ALIASES[normalized_type]
+    if normalized_type == 'unknown':
+        return 'unknown', 'Unknown / other'
+    return normalized_type, normalized_type.replace('-', ' ').title()
 
 
 def _get_first_repository_tag(obj):
@@ -567,6 +609,7 @@ class ImageSerializer(serializers.ModelSerializer):
     fully_fixable_unique_findings = serializers.SerializerMethodField()
     fully_fixable_severity_counts = serializers.SerializerMethodField()
     fully_fixable_unique_severity_counts = serializers.SerializerMethodField()
+    vulnerability_breakdown = serializers.SerializerMethodField()
     has_sbom = serializers.SerializerMethodField()
     has_grype = serializers.SerializerMethodField()
     repository_info = serializers.SerializerMethodField()
@@ -583,6 +626,7 @@ class ImageSerializer(serializers.ModelSerializer):
             'unique_severity_counts', 'fixable_unique_severity_counts',
             'fully_fixable_findings', 'fully_fixable_unique_findings',
             'fully_fixable_severity_counts', 'fully_fixable_unique_severity_counts',
+            'vulnerability_breakdown',
             'has_sbom', 'has_grype',
             'repository_info', 'created_at', 'updated_at'
         ]
@@ -593,6 +637,28 @@ class ImageSerializer(serializers.ModelSerializer):
         if summary is not None:
             return summary
 
+        components_count = getattr(obj, 'components_count', None)
+        if components_count is None:
+            components_count = obj.component_versions.count()
+
+        stored_summary = getattr(obj, 'vulnerability_summary', None)
+        if isinstance(stored_summary, dict) and stored_summary.get('schema_version') == 1:
+            summary = {**stored_summary, 'components_count': components_count}
+            obj._image_summary_cache = summary
+            return summary
+
+        # Legacy images predate compact summaries. Their raw Grype payload is
+        # authoritative and image-scoped; deriving from global CVV links can
+        # leak findings between images sharing the same component version.
+        grype_data = getattr(obj, 'grype_data', None)
+        if isinstance(grype_data, dict) and isinstance(grype_data.get('matches'), list):
+            summary = {
+                **build_grype_vulnerability_summary(grype_data),
+                'components_count': components_count,
+            }
+            obj._image_summary_cache = summary
+            return summary
+
         cvv_rows = list(
             ComponentVersionVulnerability.objects.filter(
                 component_version__images=obj
@@ -601,12 +667,9 @@ class ImageSerializer(serializers.ModelSerializer):
                 'fixable',
                 'vulnerability__uuid',
                 'vulnerability__severity',
+                'component_version__component__type',
             )
         )
-
-        components_count = getattr(obj, 'components_count', None)
-        if components_count is None:
-            components_count = obj.component_versions.count()
 
         all_sevs = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'NEGLIGIBLE', 'UNKNOWN']
 
@@ -614,7 +677,7 @@ class ImageSerializer(serializers.ModelSerializer):
             """Count findings and vulnerabilities without double-counting CVEs."""
             severity_counts = Counter()
             unique_severity_by_vulnerability = {}
-            for _component_version_id, _fixable, vulnerability_uuid, severity in rows:
+            for _component_version_id, _fixable, vulnerability_uuid, severity, _component_type in rows:
                 normalized_severity = (severity or 'UNKNOWN').upper()
                 # Grype reports NEGLIGIBLE in addition to the usual four
                 # severities. Historical data can also contain other labels;
@@ -660,6 +723,44 @@ class ImageSerializer(serializers.ModelSerializer):
         individually_fixable_summary = summarize(individually_fixable_rows)
         fully_fixable_summary = summarize(fully_fixable_rows)
 
+        rows_by_ecosystem = defaultdict(list)
+        ecosystem_labels = {}
+        ecosystem_component_types = defaultdict(set)
+        for row in cvv_rows:
+            ecosystem_key, ecosystem_label = image_vulnerability_ecosystem(row[4])
+            rows_by_ecosystem[ecosystem_key].append(row)
+            ecosystem_labels[ecosystem_key] = ecosystem_label
+            ecosystem_component_types[ecosystem_key].add(str(row[4] or 'unknown').lower())
+
+        vulnerability_breakdown = []
+        for ecosystem_key, ecosystem_rows in rows_by_ecosystem.items():
+            ecosystem_summary = summarize(ecosystem_rows)
+            ecosystem_component_ids = {row[0] for row in ecosystem_rows}
+            ecosystem_fully_fixable_rows = [
+                row for row in ecosystem_rows if row[0] in fully_fixable_component_ids
+            ]
+            ecosystem_fully_fixable_summary = summarize(ecosystem_fully_fixable_rows)
+            vulnerability_breakdown.append({
+                'key': ecosystem_key,
+                'label': ecosystem_labels[ecosystem_key],
+                'component_types': sorted(ecosystem_component_types[ecosystem_key]),
+                'vulnerable_components_count': len(ecosystem_component_ids),
+                'fully_fixable_components_count': len(
+                    ecosystem_component_ids & fully_fixable_component_ids
+                ),
+                'findings': ecosystem_summary['findings'],
+                'unique_findings': ecosystem_summary['unique_findings'],
+                'severity_counts': ecosystem_summary['severity_counts'],
+                'unique_severity_counts': ecosystem_summary['unique_severity_counts'],
+                'fully_fixable_findings': ecosystem_fully_fixable_summary['findings'],
+                'fully_fixable_unique_findings': ecosystem_fully_fixable_summary['unique_findings'],
+                'fully_fixable_severity_counts': ecosystem_fully_fixable_summary['severity_counts'],
+                'fully_fixable_unique_severity_counts': (
+                    ecosystem_fully_fixable_summary['unique_severity_counts']
+                ),
+            })
+        vulnerability_breakdown.sort(key=lambda item: (-item['findings'], item['label']))
+
         summary = {
             **all_summary,
             'components_count': components_count,
@@ -674,6 +775,7 @@ class ImageSerializer(serializers.ModelSerializer):
             'fully_fixable_unique_findings': fully_fixable_summary['unique_findings'],
             'fully_fixable_severity_counts': fully_fixable_summary['severity_counts'],
             'fully_fixable_unique_severity_counts': fully_fixable_summary['unique_severity_counts'],
+            'vulnerability_breakdown': vulnerability_breakdown,
         }
         obj._image_summary_cache = summary
         return summary
@@ -733,6 +835,10 @@ class ImageSerializer(serializers.ModelSerializer):
     @extend_schema_field(serializers.DictField(child=serializers.IntegerField()))
     def get_fully_fixable_unique_severity_counts(self, obj):
         return self._get_summary(obj)['fully_fixable_unique_severity_counts']
+
+    @extend_schema_field(serializers.ListField(child=serializers.DictField()))
+    def get_vulnerability_breakdown(self, obj):
+        return self._get_summary(obj)['vulnerability_breakdown']
 
     @extend_schema_field(serializers.BooleanField())
     def get_has_sbom(self, obj):

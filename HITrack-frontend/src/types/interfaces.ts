@@ -182,6 +182,7 @@ export interface Image extends BaseEntity {
   fully_fixable_unique_findings: number
   fully_fixable_severity_counts: { [key: string]: number }
   fully_fixable_unique_severity_counts: { [key: string]: number }
+  vulnerability_breakdown: ImageVulnerabilityBreakdown[]
   repository_info?: {
     repository_name: string
     repository_uuid: string
@@ -192,6 +193,22 @@ export interface Image extends BaseEntity {
   updated_at: string
   repository_tags?: RepositoryTag[]
   component_versions?: ComponentVersion[]
+}
+
+export interface ImageVulnerabilityBreakdown {
+  key: string
+  label: string
+  component_types: string[]
+  vulnerable_components_count: number
+  fully_fixable_components_count: number
+  findings: number
+  unique_findings: number
+  severity_counts: Record<string, number>
+  unique_severity_counts: Record<string, number>
+  fully_fixable_findings: number
+  fully_fixable_unique_findings: number
+  fully_fixable_severity_counts: Record<string, number>
+  fully_fixable_unique_severity_counts: Record<string, number>
 }
 
 export interface ImageComparisonVariantTag {

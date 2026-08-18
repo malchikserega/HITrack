@@ -1270,13 +1270,13 @@ def _build_targeted_base_lineage_members_queryset(lineage_label, lineage_source=
 def _build_optimized_image_list_queryset(queryset):
     """Annotate lightweight image summary fields without loading large JSON blobs."""
     return queryset.annotate(
-        findings_count=Count(
-            'component_versions__componentversionvulnerability',
-            distinct=False
+        findings_count=Coalesce(
+            Cast('vulnerability_summary__findings', IntegerField()),
+            Count('component_versions__componentversionvulnerability', distinct=False),
         ),
-        unique_findings_count=Count(
-            'component_versions__componentversionvulnerability__vulnerability',
-            distinct=True
+        unique_findings_count=Coalesce(
+            Cast('vulnerability_summary__unique_findings', IntegerField()),
+            Count('component_versions__componentversionvulnerability__vulnerability', distinct=True),
         ),
         components_count=Count(
             'component_versions',
@@ -1320,6 +1320,7 @@ def _build_lightweight_image_list_queryset(queryset):
         'os_eol_source',
         'os_eol_message',
         'os_eol_checked_at',
+        'vulnerability_summary',
         'created_at',
         'updated_at',
     ).annotate(
@@ -1350,15 +1351,23 @@ def _hydrate_image_list_page_metrics(images):
         .annotate(total=Count('componentversion_id', distinct=True))
     }
 
+    legacy_image_ids = [
+        image.pk
+        for image in images
+        if not (
+            isinstance(image.vulnerability_summary, dict)
+            and image.vulnerability_summary.get('schema_version') == 1
+        )
+    ]
     vulnerability_count_rows = (
         ComponentVersionVulnerability.objects
-        .filter(component_version__images__pk__in=image_ids)
+        .filter(component_version__images__pk__in=legacy_image_ids)
         .values('component_version__images__pk')
         .annotate(
             findings_count=Count('pk'),
             unique_findings_count=Count('vulnerability', distinct=True),
         )
-    )
+    ) if legacy_image_ids else []
     findings_map = {
         row['component_version__images__pk']: row
         for row in vulnerability_count_rows
@@ -1366,9 +1375,14 @@ def _hydrate_image_list_page_metrics(images):
 
     for image in images:
         image.components_count = component_count_map.get(image.pk, 0)
-        counts = findings_map.get(image.pk, {})
-        image.findings_count = counts.get('findings_count', 0)
-        image.unique_findings_count = counts.get('unique_findings_count', 0)
+        summary = image.vulnerability_summary
+        if isinstance(summary, dict) and summary.get('schema_version') == 1:
+            image.findings_count = summary.get('findings', 0)
+            image.unique_findings_count = summary.get('unique_findings', 0)
+        else:
+            counts = findings_map.get(image.pk, {})
+            image.findings_count = counts.get('findings_count', 0)
+            image.unique_findings_count = counts.get('unique_findings_count', 0)
 
     prefetch_related_objects(
         images,

@@ -99,7 +99,7 @@
                     <span class="circle-number">{{ animatedFindings }}</span>
                   </v-progress-circular>
                 </div>
-                <div class="circle-label mt-2">Vulnerabilities</div>
+                <div class="circle-label mt-2">{{ findingsMetricLabel }}</div>
               </v-col>
               <v-col cols="12" md="4" class="d-flex flex-column align-center justify-center">
                 <div class="circle-info mx-4 d-flex flex-column align-center" style="min-width: 220px;">
@@ -158,6 +158,77 @@
                 </div>
               </v-col>
             </v-row>
+
+            <v-alert
+              type="info"
+              variant="tonal"
+              density="compact"
+              class="mb-4 findings-explanation"
+            >
+              A finding is one vulnerability affecting one component version. The same CVE in 10 packages
+              produces 10 findings; enable <b>Unique vulnerabilities</b> to deduplicate by vulnerability ID.
+            </v-alert>
+
+            <v-card class="mb-4 ecosystem-summary-card" variant="outlined">
+              <v-card-title class="font-weight-bold d-flex align-center flex-wrap">
+                <v-icon class="mr-2">mdi-layers-triple-outline</v-icon>
+                Vulnerabilities by ecosystem
+                <v-chip size="small" color="primary" variant="tonal" class="ml-2">Trivy-style summary</v-chip>
+              </v-card-title>
+              <v-card-subtitle class="ecosystem-summary-subtitle">
+                {{ ecosystemMetricLabel }} grouped by package ecosystem from the image SBOM.
+              </v-card-subtitle>
+              <v-card-text>
+                <v-alert
+                  v-if="!vulnerabilityBreakdown.length"
+                  type="info"
+                  variant="tonal"
+                  density="compact"
+                >
+                  No vulnerable package ecosystems were detected for this image.
+                </v-alert>
+                <v-row v-else>
+                  <v-col
+                    v-for="ecosystem in vulnerabilityBreakdown"
+                    :key="ecosystem.key"
+                    cols="12"
+                    sm="6"
+                    lg="4"
+                  >
+                    <v-card class="ecosystem-tile h-100" variant="tonal">
+                      <v-card-text>
+                        <div class="d-flex align-center mb-3">
+                          <v-avatar color="primary" variant="tonal" size="38" class="mr-3">
+                            <v-icon>{{ ecosystemIcon(ecosystem.key) }}</v-icon>
+                          </v-avatar>
+                          <div class="text-subtitle-1 font-weight-bold">{{ ecosystem.label }}</div>
+                        </div>
+                        <div class="ecosystem-total">{{ ecosystemMetricValue(ecosystem) }}</div>
+                        <div class="text-caption text-medium-emphasis mb-3">{{ ecosystemMetricLabel }}</div>
+                        <div class="d-flex flex-wrap ecosystem-chip-list">
+                          <v-chip size="small" variant="outlined">
+                            {{ ecosystemComponentCount(ecosystem) }} affected packages
+                          </v-chip>
+                          <v-chip size="small" color="error" variant="tonal">
+                            Critical {{ ecosystemSeverityCounts(ecosystem).CRITICAL || 0 }}
+                          </v-chip>
+                          <v-chip size="small" color="warning" variant="tonal">
+                            High {{ ecosystemSeverityCounts(ecosystem).HIGH || 0 }}
+                          </v-chip>
+                        </div>
+                        <div class="text-caption text-medium-emphasis mt-3">
+                          Types: {{ ecosystem.component_types.join(', ') }}
+                        </div>
+                      </v-card-text>
+                    </v-card>
+                  </v-col>
+                </v-row>
+                <div v-if="showUniqueFindings && vulnerabilityBreakdown.length" class="text-caption text-medium-emphasis mt-2">
+                  Unique counts are deduplicated within each ecosystem. A vulnerability present in multiple
+                  ecosystems is counted once in each relevant card.
+                </div>
+              </v-card-text>
+            </v-card>
 
             <!-- Analysis Data section -->
             <v-card class="mb-4">
@@ -636,7 +707,7 @@ import api from '../plugins/axios'
 import { notificationService } from '../plugins/notifications'
 import { debounce } from '../utils/debounce'
 import { getComponentTypeColor, getVulnerabilityTypeColor, getSeverityColor, getEpssColor, getEpssSourceColor, getEpssSourceIcon, getEpssSourceDisplay } from '../utils/colors'
-import type { Image, ComponentVersion, PaginatedResponse, Vulnerability } from '../types/interfaces'
+import type { Image, ImageVulnerabilityBreakdown, ComponentVersion, PaginatedResponse, Vulnerability } from '../types/interfaces'
 import PieChart from '../components/PieChart.vue'
 import type { DataTableSortItem } from 'vuetify'
 
@@ -765,6 +836,56 @@ const selectedSeverityCounts = computed((): number[] => {
 const selectedFindingsTotal = computed(() =>
   selectedSeverityCounts.value.reduce((total, count) => total + count, 0)
 )
+
+const findingsMetricLabel = computed(() => {
+  if (showUniqueFindings.value) {
+    return showFixableOnly.value ? 'Fully fixable unique vulnerabilities' : 'Unique vulnerabilities'
+  }
+  return showFixableOnly.value ? 'Findings in fully fixable packages' : 'Findings (package × vulnerability)'
+})
+
+const ecosystemMetricLabel = computed(() => {
+  if (showUniqueFindings.value) {
+    return showFixableOnly.value ? 'fully fixable unique vulnerabilities' : 'unique vulnerabilities'
+  }
+  return showFixableOnly.value ? 'findings in fully fixable packages' : 'findings'
+})
+
+const vulnerabilityBreakdown = computed(() => image.value?.vulnerability_breakdown || [])
+
+const ecosystemMetricValue = (ecosystem: ImageVulnerabilityBreakdown) => {
+  if (showUniqueFindings.value && showFixableOnly.value) return ecosystem.fully_fixable_unique_findings
+  if (showUniqueFindings.value) return ecosystem.unique_findings
+  if (showFixableOnly.value) return ecosystem.fully_fixable_findings
+  return ecosystem.findings
+}
+
+const ecosystemSeverityCounts = (ecosystem: ImageVulnerabilityBreakdown): Record<string, number> => {
+  if (showUniqueFindings.value && showFixableOnly.value) return ecosystem.fully_fixable_unique_severity_counts
+  if (showUniqueFindings.value) return ecosystem.unique_severity_counts
+  if (showFixableOnly.value) return ecosystem.fully_fixable_severity_counts
+  return ecosystem.severity_counts
+}
+
+const ecosystemComponentCount = (ecosystem: ImageVulnerabilityBreakdown) =>
+  showFixableOnly.value
+    ? ecosystem.fully_fixable_components_count
+    : ecosystem.vulnerable_components_count
+
+const ecosystemIcon = (key: string) => {
+  const icons: Record<string, string> = {
+    os: 'mdi-linux',
+    python: 'mdi-language-python',
+    npm: 'mdi-nodejs',
+    java: 'mdi-language-java',
+    go: 'mdi-language-go',
+    ruby: 'mdi-language-ruby',
+    dotnet: 'mdi-dot-net',
+    rust: 'mdi-language-rust',
+    php: 'mdi-language-php',
+  }
+  return icons[key] || 'mdi-package-variant-closed'
+}
 
 const visiblePieTotal = computed(() =>
   selectedSeverityCounts.value.reduce(
@@ -1516,6 +1637,29 @@ onMounted(fetchImage)
 }
 .switch-fixable-findings {
   margin-right: 8px;
+}
+.findings-explanation {
+  max-width: 1050px;
+  margin-left: auto;
+  margin-right: auto;
+}
+.ecosystem-summary-card {
+  border-radius: 12px;
+}
+.ecosystem-summary-subtitle {
+  white-space: normal;
+}
+.ecosystem-tile {
+  border-radius: 10px;
+}
+.ecosystem-total {
+  font-size: 2rem;
+  line-height: 1;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.ecosystem-chip-list {
+  gap: 6px;
 }
 
 /* Breadcrumb styles */
