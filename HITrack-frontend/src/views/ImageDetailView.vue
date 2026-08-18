@@ -219,7 +219,6 @@
               <v-card-title class="font-weight-bold d-flex align-center flex-wrap">
                 <v-icon class="mr-2">mdi-layers-triple-outline</v-icon>
                 Vulnerabilities by ecosystem
-                <v-chip size="small" color="primary" variant="tonal" class="ml-2">Trivy-style summary</v-chip>
               </v-card-title>
               <v-card-subtitle class="ecosystem-summary-subtitle">
                 {{ ecosystemMetricLabel }} grouped by package ecosystem from the image SBOM.
