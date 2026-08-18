@@ -642,7 +642,7 @@ class ImageSerializer(serializers.ModelSerializer):
             components_count = obj.component_versions.count()
 
         stored_summary = getattr(obj, 'vulnerability_summary', None)
-        if isinstance(stored_summary, dict) and stored_summary.get('schema_version') == 1:
+        if isinstance(stored_summary, dict) and stored_summary.get('schema_version') in {1, 2}:
             summary = {**stored_summary, 'components_count': components_count}
             obj._image_summary_cache = summary
             return summary

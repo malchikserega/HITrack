@@ -89,6 +89,7 @@ export interface Vulnerability extends BaseEntity {
   fix_status?: string
   fix_state?: string
   fix_versions?: string[]
+  fix_coverage?: VulnerabilityFixCoverage | null
   details?: VulnerabilityDetails
   has_details: boolean
   exploit_available: boolean
@@ -104,6 +105,14 @@ export interface Vulnerability extends BaseEntity {
   active_images_count?: number
   created_at: string
   updated_at: string
+}
+
+export interface VulnerabilityFixCoverage {
+  findings: number
+  fixable_findings: number
+  affected_components: number
+  fully_fixable_components: number
+  basis: 'grype_fixed_version' | string
 }
 
 export interface VulnerabilityRiskPrioritization {

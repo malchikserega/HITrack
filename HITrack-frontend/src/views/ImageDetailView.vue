@@ -138,7 +138,7 @@
                     color="success"
                     hide-details
                     class="switch-fixable-findings"
-                    :label="'Summary: only fully fixable components'"
+                    :label="'Only packages with a fixed version for every finding'"
                     density="compact"
                     style="min-width: 260px;"
                   />
@@ -167,7 +167,53 @@
             >
               A finding is one vulnerability affecting one component version. The same CVE in 10 packages
               produces 10 findings; enable <b>Unique vulnerabilities</b> to deduplicate by vulnerability ID.
+              “Fixed version” means Grype reports a target version; repository availability is a separate check.
             </v-alert>
+
+            <v-card class="mb-4 fix-overview-card" variant="outlined">
+              <v-card-title class="font-weight-bold d-flex align-center">
+                <v-icon class="mr-2">mdi-shield-check-outline</v-icon>
+                Fix coverage overview
+              </v-card-title>
+              <v-card-subtitle class="fix-overview-subtitle">
+                Based on fixed versions reported by Grype for this exact image scan.
+              </v-card-subtitle>
+              <v-card-text>
+                <v-row>
+                  <v-col cols="12" md="4">
+                    <div class="text-caption text-medium-emphasis">Findings with a reported fixed version</div>
+                    <div class="fix-overview-value">{{ image?.fixable_findings || 0 }} / {{ image?.findings || 0 }}</div>
+                    <v-progress-linear
+                      :model-value="fixableFindingsPercentage"
+                      color="success"
+                      height="8"
+                      rounded
+                      class="mt-2"
+                    />
+                  </v-col>
+                  <v-col cols="12" md="4">
+                    <div class="text-caption text-medium-emphasis">Vulnerable packages fully covered</div>
+                    <div class="fix-overview-value">
+                      {{ image?.fully_fixable_components_count || 0 }} / {{ vulnerableComponentsCount }}
+                    </div>
+                    <v-progress-linear
+                      :model-value="fullyCoveredPackagesPercentage"
+                      color="primary"
+                      height="8"
+                      rounded
+                      class="mt-2"
+                    />
+                  </v-col>
+                  <v-col cols="12" md="4">
+                    <div class="text-caption text-medium-emphasis">Findings without a reported fixed version</div>
+                    <div class="fix-overview-value text-error">{{ findingsWithoutReportedFix }}</div>
+                    <div class="text-caption text-medium-emphasis mt-2">
+                      Includes not-fixed, won’t-fix, version-unknown, and unknown states.
+                    </div>
+                  </v-col>
+                </v-row>
+              </v-card-text>
+            </v-card>
 
             <v-card class="mb-4 ecosystem-summary-card" variant="outlined">
               <v-card-title class="font-weight-bold d-flex align-center flex-wrap">
@@ -583,6 +629,11 @@
                         Found {{ vulnerabilitiesTotal }} result{{ vulnerabilitiesTotal !== 1 ? 's' : '' }}
                       </div>
                     </div>
+                    <v-alert type="info" variant="tonal" density="compact" class="mb-4">
+                      <b>Fix coverage</b> is calculated from this image’s Grype matches. “All” means every
+                      occurrence of the vulnerability has a reported fixed version; “Partial” means only some
+                      affected packages do. A reported version may still be unavailable in your configured repository.
+                    </v-alert>
                     <v-data-table-server
                       :headers="vulnerabilityHeaders"
                       :items="vulnerabilities"
@@ -654,16 +705,28 @@
                         </div>
                       </template>
                       <template v-slot:item.fixable="{ item }">
-                        <v-chip
-                          size="small"
-                          :color="getFixStatusColor(item)"
-                          variant="tonal"
-                        >
-                          <v-icon size="x-small" class="mr-1">
-                            {{ getFixStatusIcon(item) }}
-                          </v-icon>
-                          {{ getFixStatusLabel(item) }}
-                        </v-chip>
+                        <div class="py-1">
+                          <v-tooltip location="top">
+                            <template #activator="{ props }">
+                              <v-chip
+                                v-bind="props"
+                                size="small"
+                                :color="getFixStatusColor(item)"
+                                variant="tonal"
+                              >
+                                <v-icon size="x-small" class="mr-1">
+                                  {{ getFixStatusIcon(item) }}
+                                </v-icon>
+                                {{ getFixStatusLabel(item) }}
+                              </v-chip>
+                            </template>
+                            <span>{{ getFixStatusTooltip(item) }}</span>
+                          </v-tooltip>
+                          <div v-if="item.fix_coverage" class="text-caption text-medium-emphasis mt-1 fix-coverage-detail">
+                            {{ item.fix_coverage.fixable_findings }}/{{ item.fix_coverage.findings }} findings
+                            · {{ item.fix_coverage.fully_fixable_components }}/{{ item.fix_coverage.affected_components }} packages fully covered
+                          </div>
+                        </div>
                       </template>
                       <template v-slot:item.fix="{ item }">
                         <span v-if="item.fix" class="text-caption">{{ item.fix }}</span>
@@ -773,8 +836,12 @@ const getNormalizedFixStatus = (vulnerability: Vulnerability) => {
 
 const getFixStatusLabel = (vulnerability: Vulnerability) => {
   switch (getNormalizedFixStatus(vulnerability)) {
+    case 'available_all':
+      return 'All covered'
+    case 'available_partial':
+      return 'Partial coverage'
     case 'available':
-      return 'Fix Available'
+      return 'Fixed version reported'
     case 'not_in_repo':
       return 'Fix Known, Not In Repo'
     case 'version_unknown':
@@ -783,15 +850,19 @@ const getFixStatusLabel = (vulnerability: Vulnerability) => {
       return 'Not Fixed'
     case 'wont_fix':
       return "Won't Fix"
+    case 'unavailable_mixed':
+      return 'No usable fix'
     default:
-      return vulnerability.fixable ? 'Fix Available' : 'Unknown'
+      return vulnerability.fixable ? 'Fixed version reported' : 'Unknown'
   }
 }
 
 const getFixStatusColor = (vulnerability: Vulnerability) => {
   switch (getNormalizedFixStatus(vulnerability)) {
+    case 'available_all':
     case 'available':
       return 'success'
+    case 'available_partial':
     case 'not_in_repo':
       return 'warning'
     case 'version_unknown':
@@ -806,8 +877,11 @@ const getFixStatusColor = (vulnerability: Vulnerability) => {
 
 const getFixStatusIcon = (vulnerability: Vulnerability) => {
   switch (getNormalizedFixStatus(vulnerability)) {
+    case 'available_all':
     case 'available':
       return 'mdi-check'
+    case 'available_partial':
+      return 'mdi-circle-half-full'
     case 'not_in_repo':
       return 'mdi-clock-outline'
     case 'version_unknown':
@@ -818,6 +892,29 @@ const getFixStatusIcon = (vulnerability: Vulnerability) => {
       return 'mdi-cancel'
     default:
       return 'mdi-help'
+  }
+}
+
+const getFixStatusTooltip = (vulnerability: Vulnerability) => {
+  switch (getNormalizedFixStatus(vulnerability)) {
+    case 'available_all':
+      return 'Grype reports at least one fixed version for every finding of this vulnerability in the image.'
+    case 'available_partial':
+      return 'Only some findings or affected packages have a fixed version reported by Grype.'
+    case 'available':
+      return 'A fixed version was reported. Repository availability has not necessarily been verified.'
+    case 'not_in_repo':
+      return 'A fixed version is known but was not found in the checked package repository.'
+    case 'version_unknown':
+      return 'The scanner reports the vulnerability as fixed but did not provide a target version.'
+    case 'not_fixed':
+      return 'The scanner reports that no fix has been published.'
+    case 'wont_fix':
+      return 'The upstream source reports that this vulnerability will not be fixed.'
+    case 'unavailable_mixed':
+      return 'Affected packages have mixed unavailable states and no fixed version was reported.'
+    default:
+      return 'Fix availability could not be determined from the scanner data.'
   }
 }
 
@@ -852,6 +949,28 @@ const ecosystemMetricLabel = computed(() => {
 })
 
 const vulnerabilityBreakdown = computed(() => image.value?.vulnerability_breakdown || [])
+
+const vulnerableComponentsCount = computed(() =>
+  vulnerabilityBreakdown.value.reduce(
+    (total, ecosystem) => total + ecosystem.vulnerable_components_count,
+    0,
+  )
+)
+
+const fixableFindingsPercentage = computed(() => {
+  const findings = image.value?.findings || 0
+  return findings ? ((image.value?.fixable_findings || 0) / findings) * 100 : 0
+})
+
+const fullyCoveredPackagesPercentage = computed(() =>
+  vulnerableComponentsCount.value
+    ? ((image.value?.fully_fixable_components_count || 0) / vulnerableComponentsCount.value) * 100
+    : 0
+)
+
+const findingsWithoutReportedFix = computed(() =>
+  Math.max(0, (image.value?.findings || 0) - (image.value?.fixable_findings || 0))
+)
 
 const ecosystemMetricValue = (ecosystem: ImageVulnerabilityBreakdown) => {
   if (showUniqueFindings.value && showFixableOnly.value) return ecosystem.fully_fixable_unique_findings
@@ -1365,8 +1484,8 @@ const vulnerabilityHeaders = [
   { title: 'Type', key: 'vulnerability_type', sortable: true },
   { title: 'Severity', key: 'severity', sortable: true },
   { title: 'EPSS', key: 'epss', sortable: true },
-  { title: 'Fixable', key: 'fixable', sortable: true },
-  { title: 'Fix', key: 'fix', sortable: false }
+  { title: 'Fix coverage', key: 'fixable', sortable: true },
+  { title: 'Reported fixed versions', key: 'fix', sortable: false }
 ] as const
 
 const fetchVulnerabilities = async () => {
@@ -1643,6 +1762,19 @@ onMounted(fetchImage)
   margin-left: auto;
   margin-right: auto;
 }
+.fix-overview-card {
+  border-radius: 12px;
+}
+.fix-overview-subtitle {
+  white-space: normal;
+}
+.fix-overview-value {
+  margin-top: 4px;
+  font-size: 1.65rem;
+  line-height: 1.2;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
 .ecosystem-summary-card {
   border-radius: 12px;
 }
@@ -1660,6 +1792,10 @@ onMounted(fetchImage)
 }
 .ecosystem-chip-list {
   gap: 6px;
+}
+.fix-coverage-detail {
+  max-width: 250px;
+  line-height: 1.25;
 }
 
 /* Breadcrumb styles */

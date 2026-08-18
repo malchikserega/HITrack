@@ -1,4 +1,7 @@
+from django.contrib.auth.models import User
 from django.test import TestCase
+from django.urls import reverse
+from rest_framework.test import APIClient
 
 from core.models import (
     Component,
@@ -193,3 +196,44 @@ class ImageDetailMetricsTests(TestCase):
         ).get()
         self.assertEqual(optimized_image.findings_count, 1)
         self.assertEqual(optimized_image.unique_findings_count, 1)
+
+    def test_vulnerability_endpoint_reports_partial_fix_coverage_for_this_image(self):
+        grype_data = {
+            'matches': [
+                {
+                    'artifact': {'id': 'requests', 'type': 'python'},
+                    'vulnerability': {
+                        'id': self.high.vulnerability_id,
+                        'severity': 'High',
+                        'fix': {'state': 'fixed', 'versions': ['2.32.0']},
+                    },
+                },
+                {
+                    'artifact': {'id': 'urllib3', 'type': 'python'},
+                    'vulnerability': {
+                        'id': self.high.vulnerability_id,
+                        'severity': 'High',
+                        'fix': {'state': 'not-fixed', 'versions': []},
+                    },
+                },
+            ],
+        }
+        self.image.grype_data = grype_data
+        self.image.vulnerability_summary = build_grype_vulnerability_summary(grype_data)
+        self.image.save(update_fields=['grype_data', 'vulnerability_summary'])
+        client = APIClient()
+        client.force_authenticate(User.objects.create_user('image-metrics-user'))
+
+        response = client.get(reverse('image-vulnerabilities', args=[self.image.uuid]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['count'], 1)
+        vulnerability = response.data['results'][0]
+        self.assertEqual(vulnerability['vulnerability_id'], self.high.vulnerability_id)
+        self.assertEqual(vulnerability['fix_status'], 'available_partial')
+        self.assertFalse(vulnerability['fixable'])
+        self.assertEqual(vulnerability['fix_versions'], ['2.32.0'])
+        self.assertEqual(vulnerability['fix_coverage']['fixable_findings'], 1)
+        self.assertEqual(vulnerability['fix_coverage']['findings'], 2)
+        self.assertEqual(vulnerability['fix_coverage']['fully_fixable_components'], 1)
+        self.assertEqual(vulnerability['fix_coverage']['affected_components'], 2)
