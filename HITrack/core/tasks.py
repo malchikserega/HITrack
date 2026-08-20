@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import time
+from collections import defaultdict
 from datetime import timedelta
 from urllib.parse import parse_qsl, unquote, urlparse
 
@@ -2091,13 +2092,26 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
             }
 
 @celery_app.task(name="Periodic Repository Scan")
-def periodic_repository_scan():
+def periodic_repository_scan(
+    selection_mode: str | None = None,
+    release_line_depth: int = 1,
+    release_lines_limit: int | None = None,
+    include_prerelease: bool = False,
+    scan_latest_alias: bool = False,
+    tag_candidates_limit: int | None = None,
+    process_existing: bool = True,
+):
     """
-    Queue latest-only scans for all active repositories.
-    Intended to be scheduled via django-celery-beat / Django admin.
+    Queue tag scans for all active repositories.
+
+    With no kwargs this preserves the historical latest_only behaviour.
+    django-celery-beat can opt into latest_per_release_line globally.
     """
     from .models import Repository
-    logger.info("Starting periodic repository scan for active repositories (latest_only=True)")
+    logger.info(
+        "Starting periodic repository scan for active repositories (selection_mode=%s)",
+        selection_mode or 'latest_only',
+    )
     results = []
     active_repositories = Repository.objects.filter(status=True).select_related('container_registry')
     logger.info(f"Found {active_repositories.count()} active repositories")
@@ -2129,12 +2143,24 @@ def periodic_repository_scan():
             repository.scan_status = 'pending'
             repository.save()
 
+            scan_kwargs = {
+                'latest_only': True,
+                'process_existing': process_existing,
+            }
+            # No selection_mode means the task was invoked with its historical
+            # empty kwargs and must retain the exact latest_only behaviour.
+            if selection_mode is not None:
+                scan_kwargs.update({
+                    'selection_mode': selection_mode,
+                    'release_line_depth': release_line_depth,
+                    'release_lines_limit': release_lines_limit,
+                    'include_prerelease': include_prerelease,
+                    'scan_latest_alias': scan_latest_alias,
+                    'tag_candidates_limit': tag_candidates_limit,
+                })
             async_result = scan_repository_tags.apply_async(
                 args=[str(repository.uuid)],
-                kwargs={
-                    'latest_only': True,
-                    'process_existing': True,
-                },
+                kwargs=scan_kwargs,
             )
 
             results.append({
@@ -2143,7 +2169,8 @@ def periodic_repository_scan():
                 "status": "queued",
                 "task_id": async_result.id,
                 "latest_only": True,
-                "process_existing": True,
+                "process_existing": process_existing,
+                "selection_mode": selection_mode or 'latest_only',
             })
 
         except Exception as e:
@@ -3587,6 +3614,122 @@ def _pick_latest_tag_by_version(tags):
     return max(enumerate(tags), key=lambda pair: (_version_sort_key(pair[1]), -pair[0]))[1]
 
 
+_RELEASE_VERSION_RE = re.compile(
+    r'^(?P<v_prefix>v)?(?P<version>\d+(?:\.\d+)+|\d+)(?P<suffix>.*)$',
+    re.IGNORECASE,
+)
+_PRERELEASE_RE = re.compile(
+    r'(?:^|[-_.])(alpha|a|beta|b|rc|pre|preview|dev|snapshot)(?:[-_.]?(\d+))?',
+    re.IGNORECASE,
+)
+
+
+def _parse_release_tag(tag: str):
+    """Parse a release-like tag without treating bare build numbers as versions."""
+    normalized = str(tag or '').strip()
+    match = _RELEASE_VERSION_RE.match(normalized)
+    if not match:
+        return None
+    version_text = match.group('version')
+    # Preserve the historical rule: a bare number is accepted only with a v
+    # prefix. This prevents timestamps/build numbers from becoming majors.
+    if '.' not in version_text and not match.group('v_prefix'):
+        return None
+    version = tuple(int(part) for part in version_text.split('.'))
+    suffix = match.group('suffix') or ''
+    prerelease_match = _PRERELEASE_RE.search(suffix)
+    prerelease = prerelease_match is not None
+    prerelease_rank = 3
+    prerelease_number = 0
+    if prerelease_match:
+        label = prerelease_match.group(1).lower()
+        prerelease_rank = {
+            'alpha': 0, 'a': 0,
+            'beta': 1, 'b': 1,
+            'dev': 0, 'snapshot': 0,
+            'pre': 1, 'preview': 1,
+            'rc': 2,
+        }.get(label, 0)
+        prerelease_number = int(prerelease_match.group(2) or 0)
+    return {
+        'tag': normalized,
+        'version': version,
+        'prerelease': prerelease,
+        'sort_key': (version, prerelease_rank, prerelease_number),
+    }
+
+
+def _select_tags_for_scan(
+    tags,
+    selection_mode='latest_only',
+    release_line_depth=1,
+    release_lines_limit=None,
+    include_prerelease=False,
+    scan_latest_alias=False,
+):
+    """Select registry tags according to a global periodic-scan policy."""
+    tags = [str(tag).strip() for tag in tags if str(tag or '').strip()]
+    if not tags:
+        return []
+    if selection_mode == 'all':
+        return tags
+    if selection_mode == 'latest_only':
+        chosen = _pick_latest_tag_by_version(tags)
+        return [chosen] if chosen else []
+    if selection_mode != 'latest_per_release_line':
+        raise ValueError(
+            'selection_mode must be latest_only, latest_per_release_line, or all'
+        )
+
+    try:
+        depth = int(release_line_depth)
+    except (TypeError, ValueError):
+        depth = 1
+    if depth not in (1, 2, 3):
+        raise ValueError('release_line_depth must be 1, 2, or 3')
+    try:
+        line_limit = int(release_lines_limit) if release_lines_limit is not None else None
+    except (TypeError, ValueError):
+        raise ValueError('release_lines_limit must be an integer or null')
+    if line_limit is not None and line_limit < 1:
+        raise ValueError('release_lines_limit must be at least 1 or null')
+
+    candidates_by_line = defaultdict(list)
+    for position, tag in enumerate(tags):
+        if tag.lower() == 'latest':
+            continue
+        parsed = _parse_release_tag(tag)
+        if not parsed or (parsed['prerelease'] and not include_prerelease):
+            continue
+        padded_version = parsed['version'] + (0,) * max(0, depth - len(parsed['version']))
+        release_line = padded_version[:depth]
+        candidates_by_line[release_line].append((position, parsed))
+
+    release_lines = sorted(candidates_by_line, reverse=True)
+    if line_limit is not None:
+        release_lines = release_lines[:line_limit]
+
+    selected = []
+    for release_line in release_lines:
+        position, parsed = max(
+            candidates_by_line[release_line],
+            key=lambda item: (item[1]['sort_key'], -item[0]),
+        )
+        selected.append(parsed['tag'])
+
+    if scan_latest_alias:
+        latest = next((tag for tag in tags if tag.lower() == 'latest'), None)
+        if latest and latest not in selected:
+            selected.append(latest)
+
+    # Repositories with no version-like tags remain useful: fall back to the
+    # historical selector instead of silently doing nothing.
+    if not selected:
+        chosen = _pick_latest_tag_by_version(tags)
+        return [chosen] if chosen else []
+    return selected
+
+
 @celery_app.task(
     name="Scan Repository Tags",
     time_limit=SCAN_REPOSITORY_TAGS_TIME_LIMIT,
@@ -3596,11 +3739,19 @@ def scan_repository_tags(
     repository_uuid: str,
     latest_only: bool = False,
     process_existing: bool = False,
+    selection_mode: str | None = None,
+    release_line_depth: int = 1,
+    release_lines_limit: int | None = None,
+    include_prerelease: bool = False,
+    scan_latest_alias: bool = False,
+    tag_candidates_limit: int | None = None,
 ):
     """
     Task that scans a single repository for tags.
     For Artifactory repo keys: lists images via catalog, then tags per image.
-    When latest_only=True, only one tag per image is collected (highest version by number).
+    When latest_only=True and selection_mode is omitted, only one tag per image
+    is collected exactly as before. latest_per_release_line selects one tag per
+    configured major/major.minor/major.minor.patch line.
     When process_existing=True, already-known tags discovered by this scan are re-queued
     for the standard processing pipeline as long as they are not already pending/in process.
     """
@@ -3612,10 +3763,22 @@ def scan_repository_tags(
         get_helm_chart_versions,
         is_helm_chart,
     )
+    effective_selection_mode = selection_mode or ('latest_only' if latest_only else 'all')
+    limited_selection = effective_selection_mode != 'all'
+    if tag_candidates_limit is not None:
+        try:
+            tag_candidates_limit = int(tag_candidates_limit)
+        except (TypeError, ValueError):
+            raise ValueError('tag_candidates_limit must be an integer or null')
+        if tag_candidates_limit < 1:
+            raise ValueError('tag_candidates_limit must be at least 1 or null')
+    periodic_candidate_limit = tag_candidates_limit or (
+        500 if effective_selection_mode == 'latest_per_release_line' else 50
+    )
     logger.info(
-        "Starting repository tags scan for repository %s (latest_only=%s, process_existing=%s)",
+        "Starting repository tags scan for repository %s (selection_mode=%s, process_existing=%s)",
         repository_uuid,
-        latest_only,
+        effective_selection_mode,
         process_existing,
     )
     
@@ -3637,6 +3800,16 @@ def scan_repository_tags(
         all_tag_tuples = []  # (tag_name, image_path or None)
         jfrog_new_style = registry.provider == 'jfrog' and repository.repo_key
 
+        def select_tags(tags):
+            return _select_tags_for_scan(
+                tags,
+                selection_mode=effective_selection_mode,
+                release_line_depth=release_line_depth,
+                release_lines_limit=release_lines_limit,
+                include_prerelease=include_prerelease,
+                scan_latest_alias=scan_latest_alias,
+            )
+
         if registry.provider == 'jfrog' and jfrog_new_style:
             # ---- Unified per-component repo (repo_key set) ----
             # repo.name = 'repo_key/image_name'; extract image_name
@@ -3653,25 +3826,33 @@ def scan_repository_tags(
                     return
                 # Filter for this specific chart only
                 helm_entries = [(ver, chart) for ver, chart in helm_entries if chart == image_name]
-                if latest_only and helm_entries:
-                    best_ver = max(helm_entries, key=lambda x: _version_sort_key(x[0]))[0]
-                    helm_entries = [(best_ver, image_name)]
+                if limited_selection and helm_entries:
+                    selected_versions = set(select_tags([version for version, _ in helm_entries]))
+                    helm_entries = [
+                        (version, image_name)
+                        for version, _ in helm_entries
+                        if version in selected_versions
+                    ]
                 all_tag_tuples = [(ver, None) for ver, _chart in helm_entries]
-                logger.info(f"Found {len(all_tag_tuples)} Helm chart versions for {repository.name}" + (" (latest_only)" if latest_only else ""))
+                logger.info(f"Found {len(all_tag_tuples)} Helm chart versions for {repository.name}" + (f" ({effective_selection_mode})" if limited_selection else ""))
             else:
                 # Docker: single image within repo key
                 try:
-                    tags = list(get_tags(registry, rk, limit=100 if not latest_only else 50, image_name=image_name))
+                    tags = list(get_tags(
+                        registry,
+                        rk,
+                        limit=periodic_candidate_limit if limited_selection else 100,
+                        image_name=image_name,
+                    ))
                 except Exception as e:
                     logger.error(f"Failed to get tags for {repository.name}: {e}")
                     repository.scan_status = 'error'
                     repository.save()
                     return
-                if latest_only and tags:
-                    chosen = _pick_latest_tag_by_version(tags)
-                    tags = [chosen]
+                if limited_selection and tags:
+                    tags = select_tags(tags)
                 all_tag_tuples = [(t, None) for t in tags]
-                logger.info(f"Found {len(all_tag_tuples)} tags for {repository.name}" + (" (latest_only)" if latest_only else ""))
+                logger.info(f"Found {len(all_tag_tuples)} tags for {repository.name}" + (f" ({effective_selection_mode})" if limited_selection else ""))
                 if all_tag_tuples and repository.repository_type in ('none', 'Unknown'):
                     repository.repository_type = 'docker'
                     repository.save()
@@ -3686,14 +3867,17 @@ def scan_repository_tags(
                     repository.scan_status = 'error'
                     repository.save()
                     return
-                if latest_only and helm_entries:
-                    by_chart = {}
-                    for ver, chart in helm_entries:
-                        if chart not in by_chart or _version_sort_key(ver) > _version_sort_key(by_chart[chart]):
-                            by_chart[chart] = ver
-                    helm_entries = [(by_chart[c], c) for c in by_chart]
+                if limited_selection and helm_entries:
+                    entries_by_chart = defaultdict(list)
+                    for version, chart in helm_entries:
+                        entries_by_chart[chart].append(version)
+                    helm_entries = [
+                        (version, chart)
+                        for chart, versions in entries_by_chart.items()
+                        for version in select_tags(versions)
+                    ]
                 all_tag_tuples = [(ver, chart) for ver, chart in helm_entries]
-                logger.info(f"Found {len(all_tag_tuples)} Helm chart versions in {repository.name}" + (" (latest_only)" if latest_only else ""))
+                logger.info(f"Found {len(all_tag_tuples)} Helm chart versions in {repository.name}" + (f" ({effective_selection_mode})" if limited_selection else ""))
             else:
                 try:
                     image_names, _ = get_catalog(registry, repository.name, page_size=500)
@@ -3702,18 +3886,21 @@ def scan_repository_tags(
                     repository.scan_status = 'error'
                     repository.save()
                     return
-                if latest_only:
+                if limited_selection:
                     image_names = image_names[:SCAN_LATEST_ONLY_MAX_IMAGES]
-                logger.info(f"Found {len(image_names)} images in Artifactory repo {repository.name}" + (" (latest_only)" if latest_only else ""))
+                logger.info(f"Found {len(image_names)} images in Artifactory repo {repository.name}" + (f" ({effective_selection_mode})" if limited_selection else ""))
                 for img in image_names:
                     try:
-                        tags = list(get_tags(registry, repository.name, limit=100 if not latest_only else 50, image_name=img))
-                        if latest_only and tags:
-                            chosen = _pick_latest_tag_by_version(tags)
-                            all_tag_tuples.append((chosen, img))
-                        else:
-                            for tag_name in tags:
-                                all_tag_tuples.append((tag_name, img))
+                        tags = list(get_tags(
+                            registry,
+                            repository.name,
+                            limit=periodic_candidate_limit if limited_selection else 100,
+                            image_name=img,
+                        ))
+                        if limited_selection and tags:
+                            tags = select_tags(tags)
+                        for tag_name in tags:
+                            all_tag_tuples.append((tag_name, img))
                     except Exception as e:
                         logger.warning(f"Failed to get tags for image {img}: {e}")
                 if all_tag_tuples and repository.repository_type in ('none', 'Unknown'):
@@ -3721,12 +3908,15 @@ def scan_repository_tags(
                     repository.save()
         else:
             # ACR or single-image: tags for this repository name
-            all_tags = list(get_tags(registry, repository.name, limit=500))
-            if latest_only and all_tags:
-                chosen = _pick_latest_tag_by_version(all_tags)
-                all_tags = [chosen]
+            all_tags = list(get_tags(
+                registry,
+                repository.name,
+                limit=tag_candidates_limit or 500,
+            ))
+            if limited_selection and all_tags:
+                all_tags = select_tags(all_tags)
             all_tag_tuples = [(t, None) for t in all_tags]
-            logger.info(f"Found {len(all_tags)} tags for repository {repository.name}" + (" (latest_only)" if latest_only else ""))
+            logger.info(f"Found {len(all_tags)} tags for repository {repository.name}" + (f" ({effective_selection_mode})" if limited_selection else ""))
             if repository.repository_type in ('none', 'Unknown') and all_tags:
                 first_tag = all_tags[0]
                 manifest, _ = get_manifest(registry, repository.name, first_tag)
