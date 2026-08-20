@@ -13,11 +13,53 @@ from .utils.analytics import (
     build_vulnerability_detail_analytics,
 )
 from .utils.threat_intel import get_vulnerability_weekly_threat_intel_match
+from .utils.image_vulnerability_summary import build_grype_vulnerability_summary
 # Celery Task Serializers
 from django_celery_results.models import TaskResult
 from django_celery_beat.models import PeriodicTask, IntervalSchedule, CrontabSchedule
 from datetime import datetime
 import json
+
+
+OS_PACKAGE_TYPES = {'deb', 'rpm', 'apk', 'alpm'}
+ECOSYSTEM_ALIASES = {
+    'python': ('python', 'Python'),
+    'pip': ('python', 'Python'),
+    'npm': ('npm', 'Node.js / npm'),
+    'javascript': ('npm', 'Node.js / npm'),
+    'yarn': ('npm', 'Node.js / npm'),
+    'pnpm': ('npm', 'Node.js / npm'),
+    'java-archive': ('java', 'Java'),
+    'maven': ('java', 'Java'),
+    'gradle': ('java', 'Java'),
+    'go-module': ('go', 'Go'),
+    'golang': ('go', 'Go'),
+    'gem': ('ruby', 'Ruby'),
+    'ruby': ('ruby', 'Ruby'),
+    'nuget': ('dotnet', '.NET / NuGet'),
+    'dotnet': ('dotnet', '.NET / NuGet'),
+    'rust': ('rust', 'Rust'),
+    'cargo': ('rust', 'Rust'),
+    'php-composer': ('php', 'PHP / Composer'),
+    'composer': ('php', 'PHP / Composer'),
+    'dart-pub': ('dart', 'Dart / Pub'),
+    'swift': ('swift', 'Swift'),
+    'hackage': ('haskell', 'Haskell'),
+    'hex': ('elixir', 'Elixir / Hex'),
+    'r-package': ('r', 'R'),
+    'wordpress-plugin': ('wordpress', 'WordPress'),
+}
+
+
+def image_vulnerability_ecosystem(component_type):
+    normalized_type = str(component_type or 'unknown').strip().lower() or 'unknown'
+    if normalized_type in OS_PACKAGE_TYPES:
+        return 'os', 'OS packages'
+    if normalized_type in ECOSYSTEM_ALIASES:
+        return ECOSYSTEM_ALIASES[normalized_type]
+    if normalized_type == 'unknown':
+        return 'unknown', 'Unknown / other'
+    return normalized_type, normalized_type.replace('-', ' ').title()
 
 
 def _get_first_repository_tag(obj):
@@ -593,6 +635,28 @@ class ImageSerializer(serializers.ModelSerializer):
         if summary is not None:
             return summary
 
+        components_count = getattr(obj, 'components_count', None)
+        if components_count is None:
+            components_count = obj.component_versions.count()
+
+        stored_summary = getattr(obj, 'vulnerability_summary', None)
+        if isinstance(stored_summary, dict) and stored_summary.get('schema_version') in {1, 2}:
+            summary = {**stored_summary, 'components_count': components_count}
+            obj._image_summary_cache = summary
+            return summary
+
+        # Legacy images predate compact summaries. Their raw Grype payload is
+        # authoritative and image-scoped; deriving from global CVV links can
+        # leak findings between images sharing the same component version.
+        grype_data = getattr(obj, 'grype_data', None)
+        if isinstance(grype_data, dict) and isinstance(grype_data.get('matches'), list):
+            summary = {
+                **build_grype_vulnerability_summary(grype_data),
+                'components_count': components_count,
+            }
+            obj._image_summary_cache = summary
+            return summary
+
         cvv_rows = list(
             ComponentVersionVulnerability.objects.filter(
                 component_version__images=obj
@@ -601,12 +665,45 @@ class ImageSerializer(serializers.ModelSerializer):
                 'fixable',
                 'vulnerability__uuid',
                 'vulnerability__severity',
+                'component_version__component__type',
             )
         )
 
-        components_count = getattr(obj, 'components_count', None)
-        if components_count is None:
-            components_count = obj.component_versions.count()
+        all_sevs = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'NEGLIGIBLE', 'UNKNOWN']
+
+        def summarize(rows):
+            """Count findings and vulnerabilities without double-counting CVEs."""
+            severity_counts = Counter()
+            unique_severity_by_vulnerability = {}
+            for _component_version_id, _fixable, vulnerability_uuid, severity, _component_type in rows:
+                normalized_severity = (severity or 'UNKNOWN').upper()
+                # Grype reports NEGLIGIBLE in addition to the usual four
+                # severities. Historical data can also contain other labels;
+                # fold those into UNKNOWN instead of silently dropping them
+                # from the chart while retaining them in the total.
+                if normalized_severity not in all_sevs:
+                    normalized_severity = 'UNKNOWN'
+                severity_counts[normalized_severity] += 1
+                if vulnerability_uuid:
+                    # Severity lives on Vulnerability, so repeated findings always
+                    # resolve to the same severity. Keep a single occurrence.
+                    unique_severity_by_vulnerability.setdefault(
+                        vulnerability_uuid,
+                        normalized_severity,
+                    )
+            unique_severity_counts = Counter(unique_severity_by_vulnerability.values())
+            return {
+                'findings': len(rows),
+                'unique_findings': len(unique_severity_by_vulnerability),
+                'severity_counts': {sev: severity_counts.get(sev, 0) for sev in all_sevs},
+                'unique_severity_counts': {
+                    sev: unique_severity_counts.get(sev, 0) for sev in all_sevs
+                },
+            }
+
+        rows_by_component = defaultdict(list)
+        for row in cvv_rows:
+            rows_by_component[row[0]].append(row)
 
         all_sevs = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'NEGLIGIBLE', 'UNKNOWN']
 

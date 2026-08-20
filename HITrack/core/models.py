@@ -156,6 +156,7 @@ class Image(models.Model):
     repository_tags = models.ManyToManyField(RepositoryTag, related_name='images', blank=True)
     sbom_data = models.JSONField(null=True, blank=True)
     grype_data = models.JSONField(null=True, blank=True)
+    vulnerability_summary = models.JSONField(null=True, blank=True)
     scan_status = models.CharField(
         max_length=32,
         choices=[
