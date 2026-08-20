@@ -56,6 +56,7 @@ class RepositoryAdmin(admin.ModelAdmin):
     search_fields = ('name', 'url')
     list_filter = ('status', 'repository_type', 'scan_status')
     raw_id_fields = ('container_registry',)
+    exclude = ('image_fallback_repositories',)
 
 @admin.register(RepositoryTag)
 class RepositoryTagAdmin(admin.ModelAdmin):

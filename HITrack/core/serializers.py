@@ -1439,18 +1439,12 @@ class RepositoryTagListSerializer(serializers.ModelSerializer):
 class RepositorySerializer(serializers.ModelSerializer):
     tags = RepositoryTagSerializer(many=True, read_only=True)
     tag_count = serializers.SerializerMethodField()
-    # Write-only: set via partial_update; not stored on model by serializer (view sets M2M)
-    image_fallback_repository_uuids = serializers.ListField(
-        child=serializers.UUIDField(),
-        write_only=True,
-        required=False
-    )
 
     class Meta:
         model = Repository
         fields = [
             'uuid', 'name', 'url', 'repo_key', 'repository_type', 'tags', 'tag_count',
-            'image_fallback_repository_uuids', 'created_at', 'updated_at'
+            'created_at', 'updated_at'
         ]
         read_only_fields = ['created_at', 'updated_at', 'uuid']
 
@@ -1464,7 +1458,6 @@ class RepositoryDetailSerializer(serializers.ModelSerializer):
     tag_count = serializers.SerializerMethodField()
     scan_status = serializers.SerializerMethodField()
     last_scanned = serializers.DateTimeField(read_only=True)
-    image_fallback_repositories = serializers.SerializerMethodField()
     container_registry = serializers.UUIDField(source='container_registry_id', read_only=True)
     current_unique_vulnerabilities_count = serializers.SerializerMethodField()
     active_images_count = serializers.SerializerMethodField()
@@ -1474,7 +1467,7 @@ class RepositoryDetailSerializer(serializers.ModelSerializer):
         model = Repository
         fields = [
             'uuid', 'name', 'url', 'repo_key', 'repository_type', 'tag_count',
-            'scan_status', 'last_scanned', 'image_fallback_repositories',
+            'scan_status', 'last_scanned',
             'container_registry', 'current_unique_vulnerabilities_count',
             'active_images_count', 'weighted_risk_score', 'created_at', 'updated_at'
         ]
@@ -1489,13 +1482,6 @@ class RepositoryDetailSerializer(serializers.ModelSerializer):
     @extend_schema_field(serializers.CharField())
     def get_scan_status(self, obj):
         return _get_repository_scan_status(obj)
-
-    @extend_schema_field(serializers.ListField(child=serializers.DictField()))
-    def get_image_fallback_repositories(self, obj):
-        return [
-            {'uuid': str(r.uuid), 'name': r.name}
-            for r in obj.image_fallback_repositories.all()
-        ]
 
     def _get_exposure_summary(self, obj):
         summary = getattr(obj, '_repository_exposure_summary_cache', None)

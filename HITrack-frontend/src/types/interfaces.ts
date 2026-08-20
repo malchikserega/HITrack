@@ -13,12 +13,6 @@ export interface BaseEntity {
  * When loaded from registry (e.g. get_acr_repos for JFrog), items may include
  * optional package_type ('docker' | 'helm') from the registry API.
  */
-/** Minimal repo for fallback list (detail API returns { uuid, name }) */
-export interface RepositoryFallbackItem {
-  uuid: string
-  name: string
-}
-
 export interface Repository extends BaseEntity {
   name: string
   url: string
@@ -29,8 +23,6 @@ export interface Repository extends BaseEntity {
   scan_status: 'pending' | 'in_process' | 'success' | 'error' | 'none'
   /** Set by get_acr_repos for JFrog; use when adding repos to set repository_type */
   package_type?: 'docker' | 'helm'
-  /** For Helm repos: Docker repos to try when chart image refs fail (detail only) */
-  image_fallback_repositories?: RepositoryFallbackItem[]
 }
 
 /**

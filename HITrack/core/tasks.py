@@ -1128,7 +1128,6 @@ def _derive_same_registry_image_candidates(repository, registry, image_ref):
 def _resolve_helm_image_location(repository, repo_tag, registry, image_ref):
     from .models import ContainerRegistry, Image
     from .utils.registry import (
-        build_fallback_image_ref,
         build_fallback_image_ref_from_url,
         get_image_digest,
         to_docker_pull_ref,
@@ -1202,31 +1201,6 @@ def _resolve_helm_image_location(repository, repo_tag, registry, image_ref):
                 resolved_pull_ref,
                 None,
             )
-
-    fallback_repositories = list(
-        repository.image_fallback_repositories.filter(
-            repository_type='docker',
-            container_registry__isnull=False,
-        ).select_related('container_registry')
-    )
-    for candidate_ref in candidate_refs:
-        for fallback_repository in fallback_repositories:
-            if not fallback_repository.container_registry:
-                continue
-            fallback_ref = build_fallback_image_ref(fallback_repository, candidate_ref)
-            if not fallback_ref:
-                continue
-            fallback_digest = _normalize_image_digest(
-                get_image_digest(fallback_repository.container_registry, fallback_ref)
-            )
-            if fallback_digest:
-                resolved_pull_ref = to_docker_pull_ref(fallback_ref)
-                return (
-                    resolved_pull_ref,
-                    fallback_digest,
-                    resolved_pull_ref,
-                    None,
-                )
 
     for candidate_ref in candidate_refs:
         for fallback_entry in (getattr(registry, 'image_fallback_repositories', None) or []):
@@ -2339,9 +2313,6 @@ def process_all_tags():
     results = []
     active_repositories = Repository.objects.filter(status=True).select_related(
         'container_registry'
-    ).prefetch_related(
-        'image_fallback_repositories',
-        'image_fallback_repositories__container_registry',
     )
     logger.info(f"Found {active_repositories.count()} active repositories")
 
@@ -4091,9 +4062,6 @@ def process_single_tag(tag_uuid: str):
     try:
         tag = RepositoryTag.objects.select_related(
             'repository', 'repository__container_registry'
-        ).prefetch_related(
-            'repository__image_fallback_repositories',
-            'repository__image_fallback_repositories__container_registry',
         ).get(uuid=tag_uuid)
         # Set status to in_process
         tag.processing_status = 'in_process'

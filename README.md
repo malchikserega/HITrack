@@ -67,7 +67,7 @@ Repositories can be classified as:
 - `helm`
 - `none`
 
-Helm repositories can also define fallback Docker repositories for cases where chart image references are incomplete or inconsistent.
+Container registries can define fallback Docker repositories for cases where Helm chart image references are incomplete or inconsistent. The registry-level policy applies to all Helm repositories linked to that registry.
 
 ### 2. Tag and Image Scanning
 

@@ -1898,24 +1898,8 @@ class RepositoryViewSet(BaseViewSet):
         if self.action == 'list':
             qs = _with_repository_scan_status_annotations(qs)
         elif self.action == 'retrieve':
-            qs = _with_repository_scan_status_annotations(
-                qs.prefetch_related('image_fallback_repositories')
-            )
+            qs = _with_repository_scan_status_annotations(qs)
         return qs
-
-    def partial_update(self, request, *args, **kwargs):
-        """Allow updating image_fallback_repository_uuids (for Helm repos)."""
-        instance = self.get_object()
-        uuids = request.data.get('image_fallback_repository_uuids')
-        if uuids is not None:
-            if not isinstance(uuids, list):
-                return Response(
-                    {'image_fallback_repository_uuids': 'Must be a list of repository UUIDs.'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            valid = Repository.objects.filter(uuid__in=uuids, repository_type='docker').values_list('uuid', flat=True)
-            instance.image_fallback_repositories.set(valid)
-        return super().partial_update(request, *args, **kwargs)
 
     @action(detail=False, methods=['get'])
     def names(self, request):
