@@ -894,6 +894,29 @@ const getFixStatusIcon = (vulnerability: Vulnerability) => {
   }
 }
 
+const getFixStatusTooltip = (vulnerability: Vulnerability) => {
+  switch (getNormalizedFixStatus(vulnerability)) {
+    case 'available_all':
+      return 'Grype reports at least one fixed version for every finding of this vulnerability in the image.'
+    case 'available_partial':
+      return 'Only some findings or affected packages have a fixed version reported by Grype.'
+    case 'available':
+      return 'A fixed version was reported. Repository availability has not necessarily been verified.'
+    case 'not_in_repo':
+      return 'A fixed version is known but was not found in the checked package repository.'
+    case 'version_unknown':
+      return 'The scanner reports the vulnerability as fixed but did not provide a target version.'
+    case 'not_fixed':
+      return 'The scanner reports that no fix has been published.'
+    case 'wont_fix':
+      return 'The upstream source reports that this vulnerability will not be fixed.'
+    case 'unavailable_mixed':
+      return 'Affected packages have mixed unavailable states and no fixed version was reported.'
+    default:
+      return 'Fix availability could not be determined from the scanner data.'
+  }
+}
+
 const selectedSeverityCounts = computed((): number[] => {
   if (!image.value) return [0, 0, 0, 0, 0, 0]
   if (showUniqueFindings.value && showFixableOnly.value) {
@@ -909,6 +932,78 @@ const selectedSeverityCounts = computed((): number[] => {
 const selectedFindingsTotal = computed(() =>
   selectedSeverityCounts.value.reduce((total, count) => total + count, 0)
 )
+
+const findingsMetricLabel = computed(() => {
+  if (showUniqueFindings.value) {
+    return showFixableOnly.value ? 'Fully fixable unique vulnerabilities' : 'Unique vulnerabilities'
+  }
+  return showFixableOnly.value ? 'Findings in fully fixable packages' : 'Findings (package × vulnerability)'
+})
+
+const ecosystemMetricLabel = computed(() => {
+  if (showUniqueFindings.value) {
+    return showFixableOnly.value ? 'fully fixable unique vulnerabilities' : 'unique vulnerabilities'
+  }
+  return showFixableOnly.value ? 'findings in fully fixable packages' : 'findings'
+})
+
+const vulnerabilityBreakdown = computed(() => image.value?.vulnerability_breakdown || [])
+
+const vulnerableComponentsCount = computed(() =>
+  vulnerabilityBreakdown.value.reduce(
+    (total, ecosystem) => total + ecosystem.vulnerable_components_count,
+    0,
+  )
+)
+
+const fixableFindingsPercentage = computed(() => {
+  const findings = image.value?.findings || 0
+  return findings ? ((image.value?.fixable_findings || 0) / findings) * 100 : 0
+})
+
+const fullyCoveredPackagesPercentage = computed(() =>
+  vulnerableComponentsCount.value
+    ? ((image.value?.fully_fixable_components_count || 0) / vulnerableComponentsCount.value) * 100
+    : 0
+)
+
+const findingsWithoutReportedFix = computed(() =>
+  Math.max(0, (image.value?.findings || 0) - (image.value?.fixable_findings || 0))
+)
+
+const ecosystemMetricValue = (ecosystem: ImageVulnerabilityBreakdown) => {
+  if (showUniqueFindings.value && showFixableOnly.value) return ecosystem.fully_fixable_unique_findings
+  if (showUniqueFindings.value) return ecosystem.unique_findings
+  if (showFixableOnly.value) return ecosystem.fully_fixable_findings
+  return ecosystem.findings
+}
+
+const ecosystemSeverityCounts = (ecosystem: ImageVulnerabilityBreakdown): Record<string, number> => {
+  if (showUniqueFindings.value && showFixableOnly.value) return ecosystem.fully_fixable_unique_severity_counts
+  if (showUniqueFindings.value) return ecosystem.unique_severity_counts
+  if (showFixableOnly.value) return ecosystem.fully_fixable_severity_counts
+  return ecosystem.severity_counts
+}
+
+const ecosystemComponentCount = (ecosystem: ImageVulnerabilityBreakdown) =>
+  showFixableOnly.value
+    ? ecosystem.fully_fixable_components_count
+    : ecosystem.vulnerable_components_count
+
+const ecosystemIcon = (key: string) => {
+  const icons: Record<string, string> = {
+    os: 'mdi-linux',
+    python: 'mdi-language-python',
+    npm: 'mdi-nodejs',
+    java: 'mdi-language-java',
+    go: 'mdi-language-go',
+    ruby: 'mdi-language-ruby',
+    dotnet: 'mdi-dot-net',
+    rust: 'mdi-language-rust',
+    php: 'mdi-language-php',
+  }
+  return icons[key] || 'mdi-package-variant-closed'
+}
 
 const visiblePieTotal = computed(() =>
   selectedSeverityCounts.value.reduce(

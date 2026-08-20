@@ -191,6 +191,7 @@ export interface Image extends BaseEntity {
   fully_fixable_unique_findings: number
   fully_fixable_severity_counts: { [key: string]: number }
   fully_fixable_unique_severity_counts: { [key: string]: number }
+  vulnerability_breakdown?: ImageVulnerabilityBreakdown[]
   repository_info?: {
     repository_name: string
     repository_uuid: string
