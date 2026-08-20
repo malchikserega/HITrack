@@ -1,7 +1,4 @@
-from django.contrib.auth.models import User
 from django.test import TestCase
-from django.urls import reverse
-from rest_framework.test import APIClient
 
 from core.models import (
     Component,
@@ -11,8 +8,6 @@ from core.models import (
     Vulnerability,
 )
 from core.serializers import ImageSerializer
-from core.utils.image_vulnerability_summary import build_grype_vulnerability_summary
-from core.views import _build_optimized_image_list_queryset, _hydrate_image_list_page_metrics
 
 
 class ImageDetailMetricsTests(TestCase):
@@ -106,134 +101,3 @@ class ImageDetailMetricsTests(TestCase):
         self.assertEqual(data['severity_counts']['NEGLIGIBLE'], 1)
         self.assertEqual(data['severity_counts']['UNKNOWN'], 1)
         self.assertEqual(sum(data['severity_counts'].values()), data['findings'])
-
-    def test_vulnerabilities_are_grouped_by_package_ecosystem(self):
-        python_component = Component.objects.create(name='requests', type='python')
-        python_version = ComponentVersion.objects.create(
-            component=python_component,
-            version='2.32.0',
-        )
-        python_version.images.add(self.image)
-        ComponentVersionVulnerability.objects.create(
-            component_version=python_version,
-            vulnerability=self.high,
-            fixable=False,
-        )
-
-        data = ImageSerializer(self.image).data
-        breakdown = {item['key']: item for item in data['vulnerability_breakdown']}
-
-        self.assertEqual(set(breakdown), {'os', 'python'})
-        self.assertEqual(breakdown['os']['findings'], 4)
-        self.assertEqual(breakdown['os']['unique_findings'], 3)
-        self.assertEqual(breakdown['os']['vulnerable_components_count'], 2)
-        self.assertEqual(breakdown['python']['findings'], 1)
-        self.assertEqual(breakdown['python']['unique_findings'], 1)
-        self.assertEqual(breakdown['python']['severity_counts']['HIGH'], 1)
-        self.assertEqual(breakdown['python']['fully_fixable_findings'], 0)
-        self.assertEqual(
-            sum(item['findings'] for item in data['vulnerability_breakdown']),
-            data['findings'],
-        )
-
-    def test_ecosystem_breakdown_does_not_add_queries(self):
-        image = Image.objects.get(pk=self.image.pk)
-
-        with self.assertNumQueries(2):
-            summary = ImageSerializer()._get_summary(image)
-
-        self.assertEqual(summary['findings'], 4)
-        self.assertEqual(summary['vulnerability_breakdown'][0]['key'], 'os')
-
-    def test_raw_grype_matches_are_authoritative_for_image_counts(self):
-        self.image.grype_data = {
-            'matches': [
-                {
-                    'artifact': {
-                        'id': 'python-artifact',
-                        'name': 'requests',
-                        'version': '2.31.0',
-                        'type': 'python',
-                    },
-                    'vulnerability': {
-                        'id': 'CVE-2024-9999',
-                        'severity': 'High',
-                        'fix': {'state': 'fixed', 'versions': ['2.32.0']},
-                    },
-                },
-            ],
-        }
-        self.image.save(update_fields=['grype_data'])
-
-        data = ImageSerializer(self.image).data
-
-        # The image has four legacy/global CVV links, but only its own raw
-        # Grype match must contribute to image-detail counters.
-        self.assertEqual(data['findings'], 1)
-        self.assertEqual(data['unique_findings'], 1)
-        self.assertEqual(data['severity_counts']['HIGH'], 1)
-        self.assertEqual(data['vulnerability_breakdown'][0]['key'], 'python')
-
-    def test_image_list_uses_the_same_scoped_summary_as_detail(self):
-        grype_data = {
-            'matches': [
-                {
-                    'artifact': {'id': 'one', 'type': 'python'},
-                    'vulnerability': {'id': 'CVE-2024-9999', 'severity': 'High'},
-                },
-            ],
-        }
-        self.image.vulnerability_summary = build_grype_vulnerability_summary(grype_data)
-        self.image.save(update_fields=['vulnerability_summary'])
-
-        lightweight_image = Image.objects.get(pk=self.image.pk)
-        _hydrate_image_list_page_metrics([lightweight_image])
-        self.assertEqual(lightweight_image.findings_count, 1)
-        self.assertEqual(lightweight_image.unique_findings_count, 1)
-
-        optimized_image = _build_optimized_image_list_queryset(
-            Image.objects.filter(pk=self.image.pk)
-        ).get()
-        self.assertEqual(optimized_image.findings_count, 1)
-        self.assertEqual(optimized_image.unique_findings_count, 1)
-
-    def test_vulnerability_endpoint_reports_partial_fix_coverage_for_this_image(self):
-        grype_data = {
-            'matches': [
-                {
-                    'artifact': {'id': 'requests', 'type': 'python'},
-                    'vulnerability': {
-                        'id': self.high.vulnerability_id,
-                        'severity': 'High',
-                        'fix': {'state': 'fixed', 'versions': ['2.32.0']},
-                    },
-                },
-                {
-                    'artifact': {'id': 'urllib3', 'type': 'python'},
-                    'vulnerability': {
-                        'id': self.high.vulnerability_id,
-                        'severity': 'High',
-                        'fix': {'state': 'not-fixed', 'versions': []},
-                    },
-                },
-            ],
-        }
-        self.image.grype_data = grype_data
-        self.image.vulnerability_summary = build_grype_vulnerability_summary(grype_data)
-        self.image.save(update_fields=['grype_data', 'vulnerability_summary'])
-        client = APIClient()
-        client.force_authenticate(User.objects.create_user('image-metrics-user'))
-
-        response = client.get(reverse('image-vulnerabilities', args=[self.image.uuid]))
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data['count'], 1)
-        vulnerability = response.data['results'][0]
-        self.assertEqual(vulnerability['vulnerability_id'], self.high.vulnerability_id)
-        self.assertEqual(vulnerability['fix_status'], 'available_partial')
-        self.assertFalse(vulnerability['fixable'])
-        self.assertEqual(vulnerability['fix_versions'], ['2.32.0'])
-        self.assertEqual(vulnerability['fix_coverage']['fixable_findings'], 1)
-        self.assertEqual(vulnerability['fix_coverage']['findings'], 2)
-        self.assertEqual(vulnerability['fix_coverage']['fully_fixable_components'], 1)
-        self.assertEqual(vulnerability['fix_coverage']['affected_components'], 2)

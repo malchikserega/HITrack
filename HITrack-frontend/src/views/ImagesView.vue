@@ -366,7 +366,6 @@ const editedItem = ref<Image>({
   fully_fixable_unique_findings: 0,
   fully_fixable_severity_counts: {},
   fully_fixable_unique_severity_counts: {},
-  vulnerability_breakdown: [],
   created_at: '',
   updated_at: ''
 })
@@ -418,7 +417,6 @@ const defaultItem = {
   fully_fixable_unique_findings: 0,
   fully_fixable_severity_counts: {},
   fully_fixable_unique_severity_counts: {},
-  vulnerability_breakdown: [],
   created_at: '',
   updated_at: ''
 }
@@ -547,7 +545,6 @@ const openDialog = (title: string, item?: Image) => {
       fully_fixable_unique_findings: item.fully_fixable_unique_findings,
       fully_fixable_severity_counts: item.fully_fixable_severity_counts,
       fully_fixable_unique_severity_counts: item.fully_fixable_unique_severity_counts,
-      vulnerability_breakdown: item.vulnerability_breakdown || [],
       created_at: item.created_at,
       updated_at: item.updated_at
     }
