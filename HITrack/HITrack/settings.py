@@ -273,6 +273,8 @@ CELERY_TASK_ROUTES = {
     'Scan Repository': {'queue': 'scan', 'routing_key': 'scan'},
 
     'Periodic Repository Scan': {'queue': 'light', 'routing_key': 'light'},
+    'Sync JFrog Repositories': {'queue': 'light', 'routing_key': 'light'},
+    'Sync Single JFrog Registry': {'queue': 'light', 'routing_key': 'light'},
     'Rescan All Images with SBOM': {'queue': 'light', 'routing_key': 'light'},
     'Monitor Mass Rescan Progress': {'queue': 'light', 'routing_key': 'light'},
     'Update Components Latest Versions': {'queue': 'light', 'routing_key': 'light'},

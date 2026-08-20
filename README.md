@@ -523,6 +523,7 @@ HITrack supports scheduled jobs through `django-celery-beat` and manual operatio
 
 Examples of useful built-in tasks:
 
+- `Sync JFrog Repositories`
 - `Periodic Repository Scan`
 - `Collect Weekly Threat Intel Snapshot`
 - `Cleanup Threat Intel Snapshots`
@@ -541,6 +542,7 @@ Examples of useful built-in tasks:
 
 Recommended operating pattern:
 
+- discover new JFrog repo keys and applications before repository tag scanning
 - run repository scanning continuously or on a schedule
 - collect threat-intel snapshots daily
 - collect root-cause snapshots periodically
@@ -551,6 +553,8 @@ Recommended operating pattern:
 
 This depends on your environment, but a practical starting point is:
 
+- `Sync JFrog Repositories`
+  daily, before `Periodic Repository Scan`
 - `Periodic Repository Scan`
   every few hours or nightly
 - `Collect Weekly Threat Intel Snapshot`
@@ -565,6 +569,8 @@ This depends on your environment, but a practical starting point is:
   daily or weekly depending on how often you use newest-version analytics
 - `Deduplicate Images by Identity`
   daily as a safety net
+
+For configuration details, see [Periodic JFrog Repository Discovery](docs/jfrog-repository-discovery.md) and [Periodic Release-Line Tag Scanning](docs/periodic-tag-scanning.md).
 
 ## Development
 
