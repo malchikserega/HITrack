@@ -186,7 +186,10 @@ const pageCount = computed(() => Math.ceil(totalItems.value / itemsPerPage.value
 const fetchReleases = async () => {
   loadingReleases.value = true
   try {
-    const response = await api.get('/releases/with_stats/')
+    // This view only needs a UUID and label. ``with_stats`` aggregates every
+    // release through tags, images and CVEs, which can block the whole page on
+    // larger installations and returns a paginated shape unsuitable for v-select.
+    const response = await api.get('/releases/names/')
     releases.value = response.data
   } catch (error) {
     notificationService.error('Failed to load releases')
@@ -199,6 +202,19 @@ const onReleaseChange = (releaseUuid: string | null) => {
   selectedRelease.value = releaseUuid
   // Clear selected images when release changes
   selectedImages.value = []
+}
+
+const getReportErrorMessage = async (error: any, fallback: string) => {
+  const payload = error?.response?.data
+  if (payload instanceof Blob) {
+    try {
+      const parsed = JSON.parse(await payload.text())
+      return parsed.error || parsed.detail || fallback
+    } catch {
+      return fallback
+    }
+  }
+  return payload?.error || payload?.detail || fallback
 }
 
 const generateReleaseReport = async () => {
@@ -233,8 +249,8 @@ const generateReleaseReport = async () => {
     window.URL.revokeObjectURL(url)
 
     notificationService.success('Release report generated successfully')
-  } catch (error) {
-    notificationService.error('Failed to generate release report')
+  } catch (error: any) {
+    notificationService.error(await getReportErrorMessage(error, 'Failed to generate release report'))
   } finally {
     generatingReleaseReport.value = false
   }
@@ -299,8 +315,8 @@ const generateReport = async () => {
     window.URL.revokeObjectURL(url)
 
     notificationService.success('Report generated successfully')
-  } catch (error) {
-    notificationService.error('Failed to generate report')
+  } catch (error: any) {
+    notificationService.error(await getReportErrorMessage(error, 'Failed to generate report'))
   } finally {
     generating.value = false
   }
@@ -444,4 +460,4 @@ onMounted(() => {
 :deep(.v-input__details) {
   display: none !important;
 }
-</style> 
+</style>

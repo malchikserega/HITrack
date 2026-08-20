@@ -1495,6 +1495,9 @@ def _propagate_image_completion_to_equivalent_images(image):
         if duplicate.grype_data != image.grype_data:
             duplicate.grype_data = image.grype_data
             update_fields.append('grype_data')
+        if duplicate.vulnerability_summary != image.vulnerability_summary:
+            duplicate.vulnerability_summary = image.vulnerability_summary
+            update_fields.append('vulnerability_summary')
         if duplicate.scan_status != 'success':
             duplicate.scan_status = 'success'
             update_fields.append('scan_status')
@@ -1693,6 +1696,9 @@ def _merge_duplicate_image_group(images, normalized_digest):
         if primary.grype_data is None and duplicate.grype_data is not None:
             primary.grype_data = duplicate.grype_data
             update_fields.append('grype_data')
+        if primary.vulnerability_summary is None and duplicate.vulnerability_summary is not None:
+            primary.vulnerability_summary = duplicate.vulnerability_summary
+            update_fields.append('vulnerability_summary')
         if duplicate.digest != normalized_digest:
             duplicate.digest = normalized_digest
             duplicate.save(update_fields=['digest', 'updated_at'])
@@ -1988,6 +1994,7 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
             store_raw_artifact(image, 'sbom', image.sbom_data, scan_run=scan_run)
             # Reset stale Grype data so the follow-up vulnerability scan is always rerun.
             image.grype_data = None
+            image.vulnerability_summary = None
             image.scan_status = 'in_process'
             lineage_update_fields = _apply_image_lineage_fields(image)
             eol_update_fields = _apply_image_os_eol_fields(image, grype_data=None)
@@ -1995,6 +2002,7 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
                 update_fields=[
                     'sbom_data',
                     'grype_data',
+                    'vulnerability_summary',
                     'scan_status',
                     *lineage_update_fields,
                     *eol_update_fields,
@@ -3157,9 +3165,14 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict, scan_run_uui
                         cvv.save(update_fields=['fixable', 'fix', 'fix_state', 'fix_status', 'fix_versions', 'updated_at'])
 
         # Set status to success only after all matches are processed
+        from .utils.image_vulnerability_summary import build_grype_vulnerability_summary
+        image.vulnerability_summary = build_grype_vulnerability_summary(scan_results)
         image.scan_status = 'success'
         image.grype_data = scan_results
-        image.save(update_fields=['scan_status', 'grype_data', *eol_update_fields, 'updated_at'])
+        image.save(update_fields=[
+            'scan_status', 'grype_data', 'vulnerability_summary',
+            *eol_update_fields, 'updated_at',
+        ])
         if scan_run_uuid:
             from .services.scans import finish_scan, store_raw_artifact
             from .models import ScanRun
@@ -3294,7 +3307,9 @@ def scan_image_with_grype(self, image_uuid: str, scan_run_uuid: str | None = Non
 
             # Save Grype results to image (but don't set status to success yet)
             # Status will be set to 'success' in process_grype_scan_results after vulnerabilities are processed
+            from .utils.image_vulnerability_summary import build_grype_vulnerability_summary
             image.grype_data = grype_results
+            image.vulnerability_summary = build_grype_vulnerability_summary(grype_results)
             image.scan_status = 'in_process'  # Keep as in_process until vulnerabilities are processed
             image.save()
             logger.info(f"Saved Grype results for image {image_uuid}")

@@ -42,6 +42,7 @@ import logging
 from django.conf import settings
 from .utils.status import resolve_repository_tag_processing_status
 from .utils.threat_intel import get_dashboard_weekly_threat_intel
+from .utils.image_vulnerability_summary import build_grype_vulnerability_summary
 from .utils.analytics import (
     build_dashboard_fixability_analytics,
     build_base_lineage_grouped_queryset,
@@ -1270,13 +1271,13 @@ def _build_targeted_base_lineage_members_queryset(lineage_label, lineage_source=
 def _build_optimized_image_list_queryset(queryset):
     """Annotate lightweight image summary fields without loading large JSON blobs."""
     return queryset.annotate(
-        findings_count=Count(
-            'component_versions__componentversionvulnerability',
-            distinct=False
+        findings_count=Coalesce(
+            Cast('vulnerability_summary__findings', IntegerField()),
+            Count('component_versions__componentversionvulnerability', distinct=False),
         ),
-        unique_findings_count=Count(
-            'component_versions__componentversionvulnerability__vulnerability',
-            distinct=True
+        unique_findings_count=Coalesce(
+            Cast('vulnerability_summary__unique_findings', IntegerField()),
+            Count('component_versions__componentversionvulnerability__vulnerability', distinct=True),
         ),
         components_count=Count(
             'component_versions',
@@ -1320,6 +1321,7 @@ def _build_lightweight_image_list_queryset(queryset):
         'os_eol_source',
         'os_eol_message',
         'os_eol_checked_at',
+        'vulnerability_summary',
         'created_at',
         'updated_at',
     ).annotate(
@@ -1350,15 +1352,23 @@ def _hydrate_image_list_page_metrics(images):
         .annotate(total=Count('componentversion_id', distinct=True))
     }
 
+    legacy_image_ids = [
+        image.pk
+        for image in images
+        if not (
+            isinstance(image.vulnerability_summary, dict)
+            and image.vulnerability_summary.get('schema_version') in {1, 2}
+        )
+    ]
     vulnerability_count_rows = (
         ComponentVersionVulnerability.objects
-        .filter(component_version__images__pk__in=image_ids)
+        .filter(component_version__images__pk__in=legacy_image_ids)
         .values('component_version__images__pk')
         .annotate(
             findings_count=Count('pk'),
             unique_findings_count=Count('vulnerability', distinct=True),
         )
-    )
+    ) if legacy_image_ids else []
     findings_map = {
         row['component_version__images__pk']: row
         for row in vulnerability_count_rows
@@ -1366,9 +1376,14 @@ def _hydrate_image_list_page_metrics(images):
 
     for image in images:
         image.components_count = component_count_map.get(image.pk, 0)
-        counts = findings_map.get(image.pk, {})
-        image.findings_count = counts.get('findings_count', 0)
-        image.unique_findings_count = counts.get('unique_findings_count', 0)
+        summary = image.vulnerability_summary
+        if isinstance(summary, dict) and summary.get('schema_version') in {1, 2}:
+            image.findings_count = summary.get('findings', 0)
+            image.unique_findings_count = summary.get('unique_findings', 0)
+        else:
+            counts = findings_map.get(image.pk, {})
+            image.findings_count = counts.get('findings_count', 0)
+            image.unique_findings_count = counts.get('unique_findings_count', 0)
 
     prefetch_related_objects(
         images,
@@ -2779,19 +2794,32 @@ class ImageViewSet(BaseViewSet):
         # Restore original filter_backends
         self.filter_backends = original_filter_backends
         
-        # Get all vulnerabilities linked to this image through component versions
-        vulnerabilities = Vulnerability.objects.filter(
-            component_versions__images=image
-        ).select_related('details').annotate(
-            image_fixable=Count(
-                'componentversionvulnerability',
-                filter=Q(
-                    componentversionvulnerability__component_version__images=image,
-                    componentversionvulnerability__fixable=True,
-                ),
-                distinct=True,
-            )
-        ).distinct()
+        summary = image.vulnerability_summary if isinstance(image.vulnerability_summary, dict) else {}
+        if summary.get('schema_version') != 2 and isinstance(image.grype_data, dict):
+            summary = build_grype_vulnerability_summary(image.grype_data)
+        fix_summary = summary.get('vulnerability_fixes', {})
+        has_scoped_fix_data = isinstance(fix_summary, dict) and summary.get('schema_version') == 2
+
+        if has_scoped_fix_data:
+            # The raw Grype matches are authoritative for membership in this
+            # image. Global CVV links can include the same package version as
+            # observed in another image or scanner database revision.
+            vulnerabilities = Vulnerability.objects.filter(
+                vulnerability_id__in=fix_summary.keys()
+            ).select_related('details')
+        else:
+            vulnerabilities = Vulnerability.objects.filter(
+                component_versions__images=image
+            ).select_related('details').annotate(
+                image_fixable=Count(
+                    'componentversionvulnerability',
+                    filter=Q(
+                        componentversionvulnerability__component_version__images=image,
+                        componentversionvulnerability__fixable=True,
+                    ),
+                    distinct=True,
+                )
+            ).distinct()
 
         # Search
         search = request.query_params.get('search')
@@ -2821,7 +2849,27 @@ class ImageViewSet(BaseViewSet):
                 '-updated_at': '-updated_at',
             }
             ordering_field = ordering_map.get(ordering, ordering)
-            if ordering in ['severity', '-severity']:
+            if ordering in ['fixable', '-fixable'] and has_scoped_fix_data:
+                fully_available_ids = [
+                    vulnerability_id for vulnerability_id, fix in fix_summary.items()
+                    if fix.get('fix_status') == 'available_all'
+                ]
+                partially_available_ids = [
+                    vulnerability_id for vulnerability_id, fix in fix_summary.items()
+                    if fix.get('fix_status') == 'available_partial'
+                ]
+                vulnerabilities = vulnerabilities.annotate(
+                    _fix_order=Case(
+                        When(vulnerability_id__in=fully_available_ids, then=Value(2)),
+                        When(vulnerability_id__in=partially_available_ids, then=Value(1)),
+                        default=Value(0),
+                        output_field=IntegerField(),
+                    )
+                ).order_by(
+                    '-_fix_order' if ordering == '-fixable' else '_fix_order',
+                    'vulnerability_id',
+                )
+            elif ordering in ['severity', '-severity']:
                 vulnerabilities = vulnerabilities.annotate(
                     _severity_order=Case(
                         When(severity='CRITICAL', then=Value(4)),
@@ -2841,32 +2889,50 @@ class ImageViewSet(BaseViewSet):
         paginator = CustomPageNumberPagination()
         page = paginator.paginate_queryset(vulnerabilities, request)
         
-        # Bulk-fetch fix info for all vulns on this page in one query
-        page_vuln_ids = [v.pk for v in page]
-        cvv_qs = ComponentVersionVulnerability.objects.filter(
-            vulnerability__pk__in=page_vuln_ids,
-            component_version__images=image
-        ).values('vulnerability__pk', 'fixable', 'fix', 'fix_status', 'fix_state', 'fix_versions')
         fix_map = {}
-        for row in cvv_qs.order_by('vulnerability__pk', '-fixable', 'fix'):
-            fix_map.setdefault(row['vulnerability__pk'], row)
+        if not has_scoped_fix_data:
+            # Compatibility fallback for scans created before raw Grype data
+            # was retained. It cannot express partial coverage.
+            page_vuln_ids = [v.pk for v in page]
+            cvv_qs = ComponentVersionVulnerability.objects.filter(
+                vulnerability__pk__in=page_vuln_ids,
+                component_version__images=image
+            ).values('vulnerability__pk', 'fixable', 'fix', 'fix_status', 'fix_state', 'fix_versions')
+            for row in cvv_qs.order_by('vulnerability__pk', '-fixable', 'fix'):
+                fix_map.setdefault(row['vulnerability__pk'], row)
 
         vuln_data = []
         for vuln in page:
             vuln_dict = VulnerabilitySerializer(vuln).data
-            cvv_row = fix_map.get(vuln.pk)
-            if cvv_row:
+            scoped_fix = fix_summary.get(vuln.vulnerability_id) if has_scoped_fix_data else None
+            if scoped_fix:
+                fix_versions = scoped_fix.get('fix_versions', [])
+                vuln_dict['fixable'] = scoped_fix.get('fix_status') == 'available_all'
+                vuln_dict['fix'] = ', '.join(fix_versions)
+                vuln_dict['fix_status'] = scoped_fix.get('fix_status', 'unknown')
+                vuln_dict['fix_state'] = ', '.join(scoped_fix.get('fix_states', []))
+                vuln_dict['fix_versions'] = fix_versions
+                vuln_dict['fix_coverage'] = {
+                    'findings': scoped_fix.get('findings_count', 0),
+                    'fixable_findings': scoped_fix.get('fixable_findings_count', 0),
+                    'affected_components': scoped_fix.get('affected_components_count', 0),
+                    'fully_fixable_components': scoped_fix.get('fully_fixable_components_count', 0),
+                    'basis': scoped_fix.get('availability_basis', 'grype_fixed_version'),
+                }
+            elif (cvv_row := fix_map.get(vuln.pk)):
                 vuln_dict['fixable'] = cvv_row['fixable']
                 vuln_dict['fix'] = cvv_row['fix']
                 vuln_dict['fix_status'] = cvv_row['fix_status']
                 vuln_dict['fix_state'] = cvv_row['fix_state']
                 vuln_dict['fix_versions'] = cvv_row['fix_versions']
+                vuln_dict['fix_coverage'] = None
             else:
                 vuln_dict['fixable'] = False
                 vuln_dict['fix'] = ''
                 vuln_dict['fix_status'] = 'unknown'
                 vuln_dict['fix_state'] = ''
                 vuln_dict['fix_versions'] = []
+                vuln_dict['fix_coverage'] = None
             vuln_data.append(vuln_dict)
         
         return paginator.get_paginated_response(vuln_data)
@@ -4695,7 +4761,9 @@ class ReportGeneratorView(APIView):
             findings_rows = ComponentVersionVulnerability.objects.filter(
                 component_version__images__in=image_list
             ).values(
-                'component_version__images__id',
+                # Image uses UUID as its primary key, so ``__id`` is not a
+                # valid relation lookup and makes every non-empty report fail.
+                'component_version__images__uuid',
                 'component_version__component__name',
                 'component_version__component__type',
                 'component_version__version',
@@ -4704,7 +4772,7 @@ class ReportGeneratorView(APIView):
                 'fix',
             )
             for row in findings_rows:
-                findings_by_image_id[row['component_version__images__id']].append(row)
+                findings_by_image_id[row['component_version__images__uuid']].append(row)
 
             for image in image_list:
                 rows = findings_by_image_id.get(image.pk)
