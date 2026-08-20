@@ -1,5 +1,6 @@
 from unittest.mock import patch
 
+from django.core.exceptions import FieldDoesNotExist
 from django.test import TestCase
 
 from core.models import ContainerRegistry, Repository, RepositoryTag
@@ -32,21 +33,6 @@ class RegistryFallbackResolutionTests(TestCase):
         self,
         get_image_digest,
     ):
-        legacy_registry = ContainerRegistry.objects.create(
-            name='legacy-fallback-auth',
-            provider='acr',
-            api_url='https://legacy.example.test',
-        )
-        legacy_repository = Repository.objects.create(
-            name='legacy/docker-local',
-            url='https://legacy.example.test/docker-local',
-            repository_type='docker',
-            container_registry=legacy_registry,
-        )
-        # Preserve historical data while proving it is no longer an active
-        # fallback source when the registry-level policy is empty.
-        self.repository.image_fallback_repositories.add(legacy_repository)
-
         resolved_ref, digest, artifact_ref, error = _resolve_helm_image_location(
             self.repository,
             self.tag,
@@ -63,10 +49,10 @@ class RegistryFallbackResolutionTests(TestCase):
             {call.args[0].uuid for call in get_image_digest.call_args_list},
             {self.registry.uuid},
         )
-        self.assertEqual(
-            list(self.repository.image_fallback_repositories.values_list('uuid', flat=True)),
-            [legacy_repository.uuid],
-        )
+
+    def test_repository_model_has_no_fallback_field(self):
+        with self.assertRaises(FieldDoesNotExist):
+            Repository._meta.get_field('image_fallback_repositories')
 
     @patch('core.utils.registry.get_image_digest')
     def test_configured_registry_fallback_uses_its_auth_registry(
