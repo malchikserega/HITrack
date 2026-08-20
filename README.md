@@ -75,6 +75,7 @@ HITrack supports multiple scanning modes:
 
 - scan full repository tag history
 - scan only the latest tag
+- scan the latest tag in every supported major or major/minor release line
 - periodically process all active repositories
 - manually process tags from the UI
 - rescan stored images
@@ -90,6 +91,8 @@ For Helm repositories, HITrack:
 4. scans those child images through the standard image pipeline
 
 The platform also tracks effective processing state correctly across tag and image relationships, so repository/tag status reflects whether child images are still pending, in progress, successful, or failed.
+
+See [Periodic Release-Line Tag Scanning](docs/periodic-tag-scanning.md) for the selection algorithm, Django Admin configuration, ready-to-use JSON examples, and upgrade instructions.
 
 ### 3. SBOM Generation, Parsing, and Persisted Image Metadata
 
