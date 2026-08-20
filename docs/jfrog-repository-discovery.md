@@ -1,5 +1,7 @@
 # Periodic JFrog Repository Discovery
 
+[Back to the documentation index](README.md)
+
 HITrack stores ACR and JFrog applications in the same `Repository` model even though their remote hierarchies differ:
 
 ```text
@@ -49,7 +51,13 @@ Open [Django Admin](http://127.0.0.1:1337/admin/) and then:
 7. Put the configuration below in **Keyword arguments**.
 8. Enable and save the task.
 
-Recommended configuration for all JFrog registries:
+Every keyword parameter is optional. Use `{}` to process every JFrog registry with the defaults:
+
+```json
+{}
+```
+
+The equivalent expanded configuration is:
 
 ```json
 {
@@ -62,7 +70,7 @@ Recommended configuration for all JFrog registries:
 }
 ```
 
-No credentials belong in the periodic-task arguments. They are read separately from every `Registry` record.
+No credentials belong in the periodic-task arguments. They are read separately from every `ContainerRegistry` record.
 
 ### Synchronize One Registry Only
 
@@ -113,13 +121,15 @@ If you use `activate_new: false`, review and enable the new repositories manuall
 
 ## Deployment with Docker
 
-No database migration or backfill is required. Rebuild the services that register, schedule, and execute the task:
+The discovery feature itself adds no model fields or feature-specific backfill. Still run the normal project migration step when upgrading the complete branch, because the branch may contain unrelated migrations. Rebuild the services that register, schedule, and execute the task:
 
 ```bash
 docker compose up -d --build hitrack-api worker-light beat
 ```
 
 Then create the schedule in Django Admin. `Sync JFrog Repositories` is routed to the `light` Celery queue.
+
+For the shorter task catalog and cadence guidance, see [Periodic Tasks](periodic-tasks.md).
 
 ## Verification and Troubleshooting
 
