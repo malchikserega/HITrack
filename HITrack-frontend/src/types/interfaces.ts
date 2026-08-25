@@ -13,12 +13,6 @@ export interface BaseEntity {
  * When loaded from registry (e.g. get_acr_repos for JFrog), items may include
  * optional package_type ('docker' | 'helm') from the registry API.
  */
-/** Minimal repo for fallback list (detail API returns { uuid, name }) */
-export interface RepositoryFallbackItem {
-  uuid: string
-  name: string
-}
-
 export interface Repository extends BaseEntity {
   name: string
   url: string
@@ -29,8 +23,6 @@ export interface Repository extends BaseEntity {
   scan_status: 'pending' | 'in_process' | 'success' | 'error' | 'none'
   /** Set by get_acr_repos for JFrog; use when adding repos to set repository_type */
   package_type?: 'docker' | 'helm'
-  /** For Helm repos: Docker repos to try when chart image refs fail (detail only) */
-  image_fallback_repositories?: RepositoryFallbackItem[]
 }
 
 /**
@@ -103,6 +95,23 @@ export interface Vulnerability extends BaseEntity {
   affected_releases_count?: number
   affected_images_count?: number
   active_images_count?: number
+  is_suppressed?: boolean
+  suppression_expires_at?: string | null
+  suppression_reason?: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface RiskAcceptance extends BaseEntity {
+  vulnerability: string
+  reason: string
+  status: 'active' | 'expired' | 'revoked'
+  expires_at: string
+  created_by: number
+  created_by_username: string
+  revoked_by?: number | null
+  revoked_by_username?: string | null
+  revoked_at?: string | null
   created_at: string
   updated_at: string
 }
@@ -476,6 +485,18 @@ export interface WeeklyThreatIntelMatch {
   tags: string[]
   image_count: number
   images: string[]
+  component_count: number
+  components: WeeklyThreatIntelComponentMatch[]
+}
+
+export interface WeeklyThreatIntelComponentMatch {
+  component_version_uuid: string
+  name: string
+  version: string
+  ecosystem: string
+  purl?: string | null
+  image_count: number
+  images: string[]
 }
 
 export interface WeeklyThreatIntelListItem {
@@ -486,10 +507,12 @@ export interface WeeklyThreatIntelListItem {
   context: string
   timestamp: string
   severity?: string | null
+  ecosystem?: string | null
   source_labels?: string[]
   tags?: string[]
   relevant_in_hitrack?: boolean
   currently_present?: boolean
+  match_status?: 'confirmed_present' | 'historical' | 'not_confirmed' | null
   target_type?: 'vulnerability' | null
   target_uuid?: string | null
   external_url?: string | null
@@ -497,12 +520,22 @@ export interface WeeklyThreatIntelListItem {
   matched_by?: string | null
   matched_vulnerability_id?: string | null
   hitrack_match?: WeeklyThreatIntelMatch | null
+  affected_components?: WeeklyThreatIntelComponentMatch[]
 }
 
 export interface WeeklyThreatIntelResponse extends PaginatedResponse<WeeklyThreatIntelListItem> {
   period_start?: string
   period_end?: string
   selected_type?: WeeklyThreatIntelType
+  exposure_counts?: {
+    total: number
+    confirmed_present: number
+    historical: number
+    not_confirmed: number
+    affected_components: number
+  }
+  generated_at?: string | null
+  source_status?: Record<string, 'available' | 'partial' | 'unavailable' | 'unknown'>
 }
 
 export interface Stats {

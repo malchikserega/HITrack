@@ -225,12 +225,22 @@
               </v-card-subtitle>
               <v-card-text>
                 <v-alert
-                  v-if="!vulnerabilityBreakdown.length"
+                  v-if="!vulnerabilityBreakdown.length && (image?.findings || 0) > 0"
+                  type="warning"
+                  variant="tonal"
+                  density="compact"
+                >
+                  Vulnerability findings exist, but their package ecosystems could not be classified.
+                  Re-run the vulnerability scan to refresh package metadata.
+                </v-alert>
+                <v-alert
+                  v-else-if="!vulnerabilityBreakdown.length"
                   type="info"
                   variant="tonal"
                   density="compact"
                 >
-                  No vulnerable package ecosystems were detected for this image.
+                  No vulnerable packages were detected. The SBOM may still contain components;
+                  this section lists only packages with vulnerability findings.
                 </v-alert>
                 <v-row v-else>
                   <v-col

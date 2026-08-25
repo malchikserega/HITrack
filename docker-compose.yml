@@ -6,7 +6,7 @@ services:
       - POSTGRES_USER=hitrack
       - POSTGRES_PASSWORD=hitrack
     ports:
-      - '5432:5432'
+      - '127.0.0.1:5432:5432'
     volumes:
       - ./volume/db_volume:/var/lib/postgresql/data
     networks:
@@ -22,7 +22,7 @@ services:
     build:
       context: redis
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     networks:
       - hitrack-network
     healthcheck:
@@ -41,7 +41,6 @@ services:
     volumes:
       - ./storage:/storage
       - ./static_data:/code/static
-      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       hitrack-db:
         condition: service_healthy
@@ -53,6 +52,12 @@ services:
     command: "dev"
     networks:
       - hitrack-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/api/health/ || curl -fsS http://127.0.0.1:80/api/health/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   worker-light:
     restart: always
@@ -66,7 +71,6 @@ services:
     volumes:
       - ./storage:/storage
       - ./static_data:/code/static
-      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       hitrack-db:
         condition: service_healthy
@@ -91,7 +95,6 @@ services:
     volumes:
       - ./storage:/storage
       - ./static_data:/code/static
-      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       hitrack-db:
         condition: service_healthy

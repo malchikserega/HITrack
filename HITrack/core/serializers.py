@@ -2,7 +2,7 @@ from rest_framework import serializers
 from rest_framework.validators import UniqueValidator
 from drf_spectacular.utils import extend_schema_field
 from django.db.models import Count, Q
-from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ComponentVersionVulnerability, Release, RepositoryTagRelease, VulnerabilityDetails, ComponentLocation, ImageComponentVersionContext
+from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ComponentVersionVulnerability, Release, RepositoryTagRelease, VulnerabilityDetails, ComponentLocation, ImageComponentVersionContext, RiskAcceptance
 from collections import Counter, defaultdict
 from .utils.status import (
     resolve_repository_scan_status,
@@ -13,7 +13,10 @@ from .utils.analytics import (
     build_vulnerability_detail_analytics,
 )
 from .utils.threat_intel import get_vulnerability_weekly_threat_intel_match
-from .utils.image_vulnerability_summary import build_grype_vulnerability_summary
+from .utils.image_vulnerability_summary import (
+    build_grype_vulnerability_summary,
+    vulnerability_ecosystem,
+)
 # Celery Task Serializers
 from django_celery_results.models import TaskResult
 from django_celery_beat.models import PeriodicTask, IntervalSchedule, CrontabSchedule
@@ -52,14 +55,7 @@ ECOSYSTEM_ALIASES = {
 
 
 def image_vulnerability_ecosystem(component_type):
-    normalized_type = str(component_type or 'unknown').strip().lower() or 'unknown'
-    if normalized_type in OS_PACKAGE_TYPES:
-        return 'os', 'OS packages'
-    if normalized_type in ECOSYSTEM_ALIASES:
-        return ECOSYSTEM_ALIASES[normalized_type]
-    if normalized_type == 'unknown':
-        return 'unknown', 'Unknown / other'
-    return normalized_type, normalized_type.replace('-', ' ').title()
+    return vulnerability_ecosystem(component_type)
 
 
 def _get_first_repository_tag(obj):
@@ -226,6 +222,7 @@ def _get_repository_scan_status(obj):
     )
 
 
+@extend_schema_field(serializers.CharField(allow_null=True))
 class SafeAnnotatedValueField(serializers.ReadOnlyField):
     """Return None instead of raising when an optional annotation is absent."""
 
@@ -266,12 +263,16 @@ class VulnerabilityDetailsSerializer(serializers.ModelSerializer):
 class VulnerabilitySerializer(serializers.ModelSerializer):
     details = VulnerabilityDetailsSerializer(read_only=True)
     has_details = serializers.SerializerMethodField()
+    is_suppressed = serializers.BooleanField(read_only=True, default=False)
+    suppression_expires_at = serializers.DateTimeField(read_only=True, allow_null=True)
+    suppression_reason = serializers.CharField(read_only=True, allow_null=True)
 
     class Meta:
         model = Vulnerability
         fields = [
             'uuid', 'vulnerability_id', 'vulnerability_type', 'severity', 'description', 
-            'epss', 'details', 'has_details', 'created_at', 'updated_at'
+            'epss', 'details', 'has_details', 'is_suppressed',
+            'suppression_expires_at', 'suppression_reason', 'created_at', 'updated_at'
         ]
         read_only_fields = ['created_at', 'updated_at', 'uuid']
 
@@ -391,12 +392,17 @@ class VulnerabilityListSerializer(serializers.ModelSerializer):
     exploit_available = serializers.SerializerMethodField()
     cisa_kev = serializers.SerializerMethodField()
     details = VulnerabilityDetailsSerializer(read_only=True)
+    is_suppressed = serializers.BooleanField(read_only=True, default=False)
+    suppression_expires_at = serializers.DateTimeField(read_only=True, allow_null=True)
+    suppression_reason = serializers.CharField(read_only=True, allow_null=True)
 
     class Meta:
         model = Vulnerability
         fields = [
             'uuid', 'vulnerability_id', 'vulnerability_type', 'severity', 'description',
-            'epss', 'has_details', 'exploit_available', 'cisa_kev', 'details', 'created_at', 'updated_at'
+            'epss', 'has_details', 'exploit_available', 'cisa_kev', 'details',
+            'is_suppressed', 'suppression_expires_at', 'suppression_reason',
+            'created_at', 'updated_at'
         ]
         read_only_fields = ['created_at', 'updated_at', 'uuid']
 
@@ -422,6 +428,33 @@ class VulnerabilityListSerializer(serializers.ModelSerializer):
             return bool(details.cisa_kev_known_exploited) if details else False
         except VulnerabilityDetails.DoesNotExist:
             return False
+
+
+class RiskAcceptanceSerializer(serializers.ModelSerializer):
+    created_by_username = serializers.CharField(source='created_by.username', read_only=True)
+    revoked_by_username = serializers.CharField(source='revoked_by.username', read_only=True, allow_null=True)
+
+    class Meta:
+        model = RiskAcceptance
+        fields = [
+            'uuid', 'reason', 'status', 'expires_at', 'created_by', 'created_by_username',
+            'revoked_by', 'revoked_by_username',
+            'revoked_at', 'created_at', 'updated_at',
+        ]
+        read_only_fields = fields
+
+
+class RiskAcceptanceCreateSerializer(serializers.Serializer):
+    reason = serializers.CharField(min_length=10, max_length=4000)
+    expires_at = serializers.DateTimeField()
+
+    def validate_expires_at(self, value):
+        from django.utils import timezone
+        if value <= timezone.now():
+            raise serializers.ValidationError('Expiry must be in the future.')
+        if value > timezone.now() + timezone.timedelta(days=365):
+            raise serializers.ValidationError('Risk acceptance cannot exceed 365 days.')
+        return value
 
 
 class ComponentListSerializer(serializers.ModelSerializer):
@@ -609,6 +642,7 @@ class ImageSerializer(serializers.ModelSerializer):
     fully_fixable_unique_findings = serializers.SerializerMethodField()
     fully_fixable_severity_counts = serializers.SerializerMethodField()
     fully_fixable_unique_severity_counts = serializers.SerializerMethodField()
+    vulnerability_breakdown = serializers.SerializerMethodField()
     has_sbom = serializers.SerializerMethodField()
     has_grype = serializers.SerializerMethodField()
     repository_info = serializers.SerializerMethodField()
@@ -625,6 +659,7 @@ class ImageSerializer(serializers.ModelSerializer):
             'unique_severity_counts', 'fixable_unique_severity_counts',
             'fully_fixable_findings', 'fully_fixable_unique_findings',
             'fully_fixable_severity_counts', 'fully_fixable_unique_severity_counts',
+            'vulnerability_breakdown',
             'has_sbom', 'has_grype',
             'repository_info', 'created_at', 'updated_at'
         ]
@@ -640,7 +675,15 @@ class ImageSerializer(serializers.ModelSerializer):
             components_count = obj.component_versions.count()
 
         stored_summary = getattr(obj, 'vulnerability_summary', None)
-        if isinstance(stored_summary, dict) and stored_summary.get('schema_version') in {1, 2}:
+        if (
+            isinstance(stored_summary, dict)
+            and stored_summary.get('schema_version') in {1, 2}
+            and isinstance(stored_summary.get('vulnerability_breakdown'), list)
+            and (
+                not stored_summary.get('findings')
+                or bool(stored_summary.get('vulnerability_breakdown'))
+            )
+        ):
             summary = {**stored_summary, 'components_count': components_count}
             obj._image_summary_cache = summary
             return summary
@@ -666,6 +709,7 @@ class ImageSerializer(serializers.ModelSerializer):
                 'vulnerability__uuid',
                 'vulnerability__severity',
                 'component_version__component__type',
+                'component_version__purl',
             )
         )
 
@@ -675,7 +719,8 @@ class ImageSerializer(serializers.ModelSerializer):
             """Count findings and vulnerabilities without double-counting CVEs."""
             severity_counts = Counter()
             unique_severity_by_vulnerability = {}
-            for _component_version_id, _fixable, vulnerability_uuid, severity, _component_type in rows:
+            for row in rows:
+                vulnerability_uuid, severity = row[2], row[3]
                 normalized_severity = (severity or 'UNKNOWN').upper()
                 # Grype reports NEGLIGIBLE in addition to the usual four
                 # severities. Historical data can also contain other labels;
@@ -725,7 +770,7 @@ class ImageSerializer(serializers.ModelSerializer):
         ecosystem_labels = {}
         ecosystem_component_types = defaultdict(set)
         for row in cvv_rows:
-            ecosystem_key, ecosystem_label = image_vulnerability_ecosystem(row[4])
+            ecosystem_key, ecosystem_label = vulnerability_ecosystem(row[4], row[5])
             rows_by_ecosystem[ecosystem_key].append(row)
             ecosystem_labels[ecosystem_key] = ecosystem_label
             ecosystem_component_types[ecosystem_key].add(str(row[4] or 'unknown').lower())
@@ -833,6 +878,10 @@ class ImageSerializer(serializers.ModelSerializer):
     @extend_schema_field(serializers.DictField(child=serializers.IntegerField()))
     def get_fully_fixable_unique_severity_counts(self, obj):
         return self._get_summary(obj)['fully_fixable_unique_severity_counts']
+
+    @extend_schema_field(serializers.ListField(child=serializers.DictField()))
+    def get_vulnerability_breakdown(self, obj):
+        return self._get_summary(obj).get('vulnerability_breakdown', [])
 
     @extend_schema_field(serializers.BooleanField())
     def get_has_sbom(self, obj):
@@ -1439,18 +1488,12 @@ class RepositoryTagListSerializer(serializers.ModelSerializer):
 class RepositorySerializer(serializers.ModelSerializer):
     tags = RepositoryTagSerializer(many=True, read_only=True)
     tag_count = serializers.SerializerMethodField()
-    # Write-only: set via partial_update; not stored on model by serializer (view sets M2M)
-    image_fallback_repository_uuids = serializers.ListField(
-        child=serializers.UUIDField(),
-        write_only=True,
-        required=False
-    )
 
     class Meta:
         model = Repository
         fields = [
             'uuid', 'name', 'url', 'repo_key', 'repository_type', 'tags', 'tag_count',
-            'image_fallback_repository_uuids', 'created_at', 'updated_at'
+            'created_at', 'updated_at'
         ]
         read_only_fields = ['created_at', 'updated_at', 'uuid']
 
@@ -1464,7 +1507,6 @@ class RepositoryDetailSerializer(serializers.ModelSerializer):
     tag_count = serializers.SerializerMethodField()
     scan_status = serializers.SerializerMethodField()
     last_scanned = serializers.DateTimeField(read_only=True)
-    image_fallback_repositories = serializers.SerializerMethodField()
     container_registry = serializers.UUIDField(source='container_registry_id', read_only=True)
     current_unique_vulnerabilities_count = serializers.SerializerMethodField()
     active_images_count = serializers.SerializerMethodField()
@@ -1474,7 +1516,7 @@ class RepositoryDetailSerializer(serializers.ModelSerializer):
         model = Repository
         fields = [
             'uuid', 'name', 'url', 'repo_key', 'repository_type', 'tag_count',
-            'scan_status', 'last_scanned', 'image_fallback_repositories',
+            'scan_status', 'last_scanned',
             'container_registry', 'current_unique_vulnerabilities_count',
             'active_images_count', 'weighted_risk_score', 'created_at', 'updated_at'
         ]
@@ -1489,13 +1531,6 @@ class RepositoryDetailSerializer(serializers.ModelSerializer):
     @extend_schema_field(serializers.CharField())
     def get_scan_status(self, obj):
         return _get_repository_scan_status(obj)
-
-    @extend_schema_field(serializers.ListField(child=serializers.DictField()))
-    def get_image_fallback_repositories(self, obj):
-        return [
-            {'uuid': str(r.uuid), 'name': r.name}
-            for r in obj.image_fallback_repositories.all()
-        ]
 
     def _get_exposure_summary(self, obj):
         summary = getattr(obj, '_repository_exposure_summary_cache', None)
@@ -1650,6 +1685,7 @@ class ComponentVersionListSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['uuid', 'created_at', 'updated_at']
 
+    @extend_schema_field(serializers.IntegerField())
     def get_used_count(self, obj):
         if hasattr(obj, 'images_count'):
             return obj.images_count

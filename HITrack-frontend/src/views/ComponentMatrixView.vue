@@ -140,11 +140,11 @@
                   color="secondary"
                   variant="text"
                   :disabled="!matrixData"
-                  @click="exportMatrixToExcel"
+                  @click="exportMatrixToCsv"
                   style="min-width: 0;"
                 >
                   <v-icon>mdi-file-chart-outline</v-icon>
-                  <span style="opacity: 0.6; font-size: 0.9em; margin-left: 4px;">xlsx</span>
+                  <span style="opacity: 0.6; font-size: 0.9em; margin-left: 4px;">csv</span>
                 </v-btn>
                 <v-btn
                   class="ml-2"
@@ -245,7 +245,6 @@ import { ref, onMounted, watch, computed } from 'vue'
 import type { Ref } from 'vue'
 import api from '../plugins/axios'
 import { notificationService } from '../plugins/notifications'
-import * as XLSX from 'xlsx'
 import html2canvas from 'html2canvas'
 
 const comparisonType = ref('repository')
@@ -473,7 +472,14 @@ const fetchMatrix = async () => {
   }
 }
 
-const exportMatrixToExcel = () => {
+const csvCell = (value: unknown): string => {
+  let text = String(value ?? '')
+  // Prevent spreadsheet formula injection when a CSV is opened in Excel/Sheets.
+  if (/^[=+\-@]/.test(text)) text = `'${text}`
+  return `"${text.replace(/"/g, '""')}"`
+}
+
+const exportMatrixToCsv = () => {
   if (!matrixData.value) return
   const header = ['Component', 'Type', ...matrixData.value.columns.map((col: any) => col.label)]
   const rows = matrixData.value.components.map((component: string) => {
@@ -490,11 +496,14 @@ const exportMatrixToExcel = () => {
     ]
     return row
   })
-  const worksheet = XLSX.utils.aoa_to_sheet([header, ...rows])
-  worksheet['!cols'] = header.map(() => ({ wch: 40 }))
-  const workbook = XLSX.utils.book_new()
-  XLSX.utils.book_append_sheet(workbook, worksheet, 'Component Matrix')
-  XLSX.writeFile(workbook, 'component_matrix.xlsx')
+  const csv = [header, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n')
+  const blob = new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = 'component_matrix.csv'
+  anchor.click()
+  URL.revokeObjectURL(url)
 }
 
 const exportMatrixToImage = async () => {
