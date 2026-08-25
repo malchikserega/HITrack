@@ -11,6 +11,9 @@ interface User {
   id: number
   username: string
   email: string
+  groups: string[]
+  can_write: boolean
+  is_admin: boolean
 }
 
 interface LoginResponse {
@@ -33,7 +36,9 @@ export const useAuthStore = defineStore('auth', {
 
   getters: {
     isAuthenticated: (state) => !!state.token,
-    currentUser: (state) => state.user
+    currentUser: (state) => state.user,
+    canWrite: (state) => Boolean(state.user?.can_write),
+    isAdmin: (state) => Boolean(state.user?.is_admin)
   },
 
   actions: {
@@ -48,20 +53,17 @@ export const useAuthStore = defineStore('auth', {
         
         this.token = access
         sessionStorage.setItem('token', access)
-        this.user = {
-          id: 0,
-          username: username,
-          email: ''
-        }
-
-        
         // Update axios default headers
         api.defaults.headers.common['Authorization'] = `Bearer ${access}`
+        await this.loadCurrentUser()
 
         return { success: true }
       } catch (error) {
+        this.clearSession()
         const apiError = error as { response?: { data: ApiError } }
-        const errorMessage = apiError.response?.data?.message || 'Authentication failed'
+        const errorMessage = apiError.response?.data?.message
+          || (apiError.response?.data as { detail?: string } | undefined)?.detail
+          || 'Authentication failed'
         return { success: false, error: errorMessage }
       }
     },
@@ -73,6 +75,7 @@ export const useAuthStore = defineStore('auth', {
         await api.post('auth/token/verify/', {
           token: this.token
         })
+        if (!this.user) await this.loadCurrentUser()
         return true
       } catch (error) {
         return await this.refreshAuth()
@@ -94,15 +97,21 @@ export const useAuthStore = defineStore('auth', {
         
         // Update axios default headers
         api.defaults.headers.common['Authorization'] = `Bearer ${access}`
+        await this.loadCurrentUser()
 
         return true
       } catch (error) {
-        this.logout()
+        this.clearSession()
         return false
       }
     },
 
-    logout() {
+    async loadCurrentUser() {
+      const response = await api.get<User>('auth/me/')
+      this.user = response.data
+    },
+
+    clearSession() {
       this.token = null
       this.refreshToken = null
       this.user = null
@@ -110,6 +119,14 @@ export const useAuthStore = defineStore('auth', {
       
       // Clear axios default headers
       delete api.defaults.headers.common['Authorization']
+    },
+
+    async logout() {
+      try {
+        await api.post('auth/logout/')
+      } finally {
+        this.clearSession()
+      }
     }
   }
 })

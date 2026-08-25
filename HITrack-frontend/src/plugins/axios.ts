@@ -47,18 +47,19 @@ api.interceptors.response.use(
   async (error: AxiosError<ApiError>) => {
     const originalRequest = error.config as CustomAxiosRequestConfig
 
-    if (error.response?.status === 401 && !originalRequest._retry) {
+    const isAuthRequest = originalRequest.url?.includes('auth/')
+    if (error.response?.status === 401 && !originalRequest._retry && !isAuthRequest) {
       originalRequest._retry = true
 
       try {
-        const response = await api.post('auth/token/refresh/')
+        const authStore = useAuthStore()
+        const refreshed = await authStore.refreshAuth()
+        if (!refreshed || !authStore.token) throw new Error('Session expired')
 
-        const { access } = response.data
-
-        originalRequest.headers.Authorization = `Bearer ${access}`
+        originalRequest.headers.Authorization = `Bearer ${authStore.token}`
         return api(originalRequest)
       } catch (refreshError) {
-        sessionStorage.removeItem('token')
+        useAuthStore().clearSession()
         router.push('/login')
         return Promise.reject(refreshError)
       }

@@ -1,6 +1,6 @@
 <template>
   <v-app>
-    <v-navigation-drawer v-model="drawer" app class="drawer-accent bg-secondary">
+    <v-navigation-drawer v-if="isAuthenticated" v-model="drawer" app class="drawer-accent bg-secondary">
       <v-list>
         <v-list-item v-for="item in menuItems" :key="item.path" link>
           <router-link :to="item.path" style="text-decoration: none; color: inherit; width: 100%; display: block;">
@@ -11,7 +11,7 @@
     </v-navigation-drawer>
 
     <v-app-bar app color="primary" dark>
-      <v-app-bar-nav-icon @click="drawer = !drawer" />
+      <v-app-bar-nav-icon v-if="isAuthenticated" @click="drawer = !drawer" />
       <router-link to="/" style="text-decoration: none;">
         <v-app-bar-title class="logo-text">
           <span class="hi">HI</span><span class="track">Track</span>
@@ -213,6 +213,9 @@ const menuItems = [
   { title: 'Base Images & Distros', path: '/base-lineage-root-causes' },
   { title: 'Components', path: '/components' },
   { title: 'Vulnerabilities', path: '/vulnerabilities' },
+  { title: 'Prioritization', path: '/prioritization' },
+  { title: 'Threat Intelligence', path: '/threat-intel' },
+  { title: 'Recent Activities', path: '/activities' },
   { title: 'Releases', path: '/releases' },
   { title: 'Task Management', path: '/tasks' },
   { title: 'Container Registries', path: '/acr' },
@@ -227,7 +230,7 @@ const removeNotification = (id: number) => {
 }
 
 const handleLogout = async () => {
-  authStore.logout()
+  await authStore.logout()
   notificationService.success('Successfully logged out')
   router.push('/login')
 }
