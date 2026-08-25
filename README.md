@@ -77,6 +77,8 @@ Do not include a specific repo key in the Registry API URL.
 
 The documentation portal is built with MkDocs Material and published by GitHub Actions at `https://malchikserega.github.io/HITrack/` after GitHub Pages is configured to use **GitHub Actions** as its source.
 
+Before the first deployment, a repository administrator must open **Settings → Pages → Build and deployment** and select **GitHub Actions** as the source. A `404` from `actions/deploy-pages` means this one-time repository setting has not been enabled yet; rerun the Documentation workflow after enabling it.
+
 - [Documentation Index](docs/index.md)
 - [Getting Started](docs/getting-started.md)
 - [Platform Capabilities](docs/capabilities.md)
