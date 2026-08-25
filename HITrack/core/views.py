@@ -4,7 +4,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.generics import ListAPIView, GenericAPIView
 from django_filters.rest_framework import DjangoFilterBackend
-from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ContainerRegistry, ComponentVersionVulnerability, Release, RepositoryTagRelease, VulnerabilityDetails, ComponentLocation, ImageComponentVersionContext
+from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ContainerRegistry, ComponentVersionVulnerability, Release, RepositoryTagRelease, VulnerabilityDetails, ComponentLocation, ImageComponentVersionContext, RiskAcceptance
 from .serializers import (
     RepositorySerializer, RepositoryDetailSerializer, RepositoryTagSerializer, ImageSerializer, ImageListSerializer,
     ComponentSerializer, ComponentVersionSerializer, VulnerabilitySerializer, VulnerabilityShortSerializer, ComponentListSerializer,
@@ -21,10 +21,11 @@ from .serializers import (
     BaseLineageRootCauseSerializer, BaseLineageRootCausePreviewSerializer,
     RootCauseRepositoryPreviewSerializer, RootCauseVulnerabilityPreviewSerializer,
     BaseLineageComponentPreviewSerializer,
+    RiskAcceptanceSerializer, RiskAcceptanceCreateSerializer,
 )
-from django.db import models
+from django.db import models, transaction
 from .pagination import CustomPageNumberPagination
-from django.db.models import Q, Count, Prefetch, Case, When, Value, BooleanField, IntegerField, F, CharField, TextField, Func, Max, OuterRef, Subquery, Sum
+from django.db.models import Q, Count, Prefetch, Case, When, Value, BooleanField, IntegerField, F, CharField, TextField, Func, Max, OuterRef, Subquery, Sum, Exists
 from django.db.models.query import prefetch_related_objects
 from django.db.models.functions import Cast, Concat, TruncDate, Coalesce
 from django.utils import timezone
@@ -43,13 +44,13 @@ from django.conf import settings
 from .utils.status import resolve_repository_tag_processing_status
 from .utils.threat_intel import get_dashboard_weekly_threat_intel
 from .utils.image_vulnerability_summary import build_grype_vulnerability_summary
+from .utils.prioritization import build_prioritization_payload
 from .utils.analytics import (
     build_dashboard_fixability_analytics,
     build_base_lineage_grouped_queryset,
     build_base_lineage_image_queryset,
     build_dashboard_risk_rankings,
     build_shared_root_cause_queryset,
-    build_recent_scan_deltas,
     build_release_delta_summary,
     get_latest_root_cause_analytics_snapshots,
     serialize_base_lineage_root_cause_summary_rows,
@@ -368,6 +369,7 @@ def _build_weekly_threat_intel_rows(summary, intel_type='all'):
                 'external_url': None,
                 'relevant_in_hitrack': bool(entry.get('relevant_in_hitrack', True)),
                 'currently_present': bool(entry.get('currently_present')),
+                'match_status': entry.get('match_status'),
                 'source_labels': ['HITrack'],
                 'tags': [
                     tag for tag in [
@@ -380,6 +382,7 @@ def _build_weekly_threat_intel_rows(summary, intel_type='all'):
                 'matched_by': entry.get('matched_by'),
                 'matched_vulnerability_id': entry.get('matched_vulnerability_id'),
                 'hitrack_match': entry.get('hitrack_match'),
+                'affected_components': (entry.get('hitrack_match') or {}).get('components', []),
             })
 
     if selected_type in {'all', 'kev'}:
@@ -401,6 +404,7 @@ def _build_weekly_threat_intel_rows(summary, intel_type='all'):
                 'external_url': entry.get('url'),
                 'relevant_in_hitrack': bool(entry.get('relevant_in_hitrack')),
                 'currently_present': bool(entry.get('currently_present')),
+                'match_status': entry.get('match_status'),
                 'source_labels': ['CISA KEV'],
                 'tags': [
                     tag for tag in [
@@ -412,6 +416,7 @@ def _build_weekly_threat_intel_rows(summary, intel_type='all'):
                 'matched_by': entry.get('matched_by'),
                 'matched_vulnerability_id': entry.get('matched_vulnerability_id'),
                 'hitrack_match': entry.get('hitrack_match'),
+                'affected_components': (entry.get('hitrack_match') or {}).get('components', []),
             })
 
     if selected_type in {'all', 'supply_chain'}:
@@ -431,21 +436,94 @@ def _build_weekly_threat_intel_rows(summary, intel_type='all'):
                 'context': " · ".join(part for part in context_parts if part) or ", ".join(entry.get('source_labels') or []) or 'Supply-chain advisory',
                 'timestamp': entry.get('published_at'),
                 'severity': entry.get('severity') or ('MALWARE' if entry.get('type') == 'malware' else None),
+                'ecosystem': entry.get('ecosystem'),
                 'target_type': entry.get('target_type'),
                 'target_uuid': entry.get('target_uuid'),
                 'external_url': entry.get('url'),
                 'relevant_in_hitrack': bool(entry.get('relevant_in_hitrack')),
                 'currently_present': bool(entry.get('currently_present')),
+                'match_status': entry.get('match_status'),
                 'source_labels': entry.get('source_labels') or [],
                 'tags': entry.get('tags') or [],
                 'matched_identifier': entry.get('matched_identifier'),
                 'matched_by': entry.get('matched_by'),
                 'matched_vulnerability_id': entry.get('matched_vulnerability_id'),
                 'hitrack_match': entry.get('hitrack_match'),
+                'affected_components': (entry.get('hitrack_match') or {}).get('components', []),
             })
 
     rows.sort(key=lambda item: _parse_threat_intel_timestamp(item.get('timestamp')), reverse=True)
     return rows
+
+
+def _filter_weekly_threat_intel_rows(rows, *, signal='all', presence='all', ecosystem='all', search=''):
+    """Apply stable, server-side filters before pagination."""
+    normalized_signal = (signal or 'all').strip().lower()
+    normalized_presence = (presence or 'all').strip().lower()
+    normalized_ecosystem = (ecosystem or 'all').strip().lower()
+    ecosystem_aliases = {
+        'dotnet': 'nuget', 'nuget': 'nuget',
+        'python': 'pypi', 'pip': 'pypi', 'pypi': 'pypi',
+        'node': 'npm', 'nodejs': 'npm', 'npm': 'npm',
+        'golang': 'go', 'go': 'go',
+        'java': 'maven', 'maven': 'maven',
+        'ruby': 'rubygems', 'rubygems': 'rubygems',
+        'cargo': 'rust', 'crates.io': 'rust', 'rust': 'rust',
+        'php': 'composer', 'packagist': 'composer', 'composer': 'composer',
+    }
+    normalized_ecosystem = ecosystem_aliases.get(normalized_ecosystem, normalized_ecosystem)
+    search_term = (search or '').strip().casefold()
+
+    filtered = []
+    for row in rows:
+        values = {
+            str(value).strip().lower()
+            for value in [row.get('severity'), *(row.get('tags') or [])]
+            if value
+        }
+        if normalized_signal != 'all':
+            if normalized_signal == 'exploit':
+                signal_match = any('exploit' in value for value in values)
+            elif normalized_signal == 'fix_available':
+                signal_match = any('fix available' in value for value in values)
+            elif normalized_signal == 'no_fix':
+                signal_match = any('no fix' in value for value in values)
+            else:
+                signal_match = normalized_signal in values
+            if not signal_match:
+                continue
+
+        if normalized_presence == 'present' and not row.get('currently_present'):
+            continue
+        if normalized_presence == 'relevant' and (
+            not row.get('relevant_in_hitrack') or row.get('currently_present')
+        ):
+            continue
+        if normalized_presence == 'unmatched' and row.get('relevant_in_hitrack'):
+            continue
+
+        if normalized_ecosystem != 'all':
+            row_ecosystem = str(row.get('ecosystem') or '').strip().casefold()
+            row_ecosystem = ecosystem_aliases.get(row_ecosystem, row_ecosystem)
+            if row_ecosystem != normalized_ecosystem:
+                continue
+
+        if search_term:
+            haystack = ' '.join([
+                str(row.get('identifier') or ''), str(row.get('title') or ''),
+                str(row.get('context') or ''),
+                *(str(value) for value in row.get('source_labels') or []),
+                *(str(value) for value in row.get('tags') or []),
+                *(
+                    f"{component.get('name', '')} {component.get('version', '')} "
+                    f"{component.get('ecosystem', '')} {component.get('purl', '')}"
+                    for component in row.get('affected_components') or []
+                ),
+            ]).casefold()
+            if search_term not in haystack:
+                continue
+        filtered.append(row)
+    return filtered
 
 
 def _build_vulnerability_trend_series(days=30):
@@ -603,7 +681,6 @@ def _build_dashboard_analytics_payload():
     return {
         'risk_rankings': build_dashboard_risk_rankings(limit=5),
         'fixability_analytics': build_dashboard_fixability_analytics(),
-        'recent_scan_deltas': build_recent_scan_deltas(limit=10),
     }
 
 
@@ -1870,7 +1947,11 @@ class BaseViewSet(viewsets.ModelViewSet):
 
     def finalize_response(self, request, response, *args, **kwargs):
         response = super().finalize_response(request, response, *args, **kwargs)
-        if request.method not in ('GET', 'HEAD', 'OPTIONS') and response.status_code < 400:
+        if (
+            request.method not in ('GET', 'HEAD', 'OPTIONS')
+            and response.status_code < 400
+            and not getattr(request, '_audit_recorded', False)
+        ):
             AuditEvent.objects.create(
                 actor=request.user if request.user.is_authenticated else None,
                 action=f'{self.basename or self.__class__.__name__}.{getattr(self, "action", request.method)}',
@@ -2608,6 +2689,40 @@ class ImageViewSet(BaseViewSet):
             _hydrate_image_list_page_metrics(items)
         serializer = self.get_serializer(items, many=True)
         return Response(serializer.data)
+
+    @action(detail=False, methods=['get', 'post'], url_path='cleanup-orphaned')
+    def cleanup_orphaned(self, request):
+        """Remove registry images no longer linked to a repository tag.
+
+        Manually created standalone images and images with active scans are
+        deliberately excluded.
+        """
+        unlinked = Image.objects.annotate(
+            repository_tag_count=Count('repository_tags', distinct=True)
+        ).filter(repository_tag_count=0)
+        standalone_filter = Q(artifact_reference__isnull=True) | Q(artifact_reference='')
+        standalone_count = unlinked.filter(standalone_filter).count()
+        registry_images = unlinked.exclude(standalone_filter)
+        active_count = registry_images.filter(
+            scan_status__in=['pending', 'in_process']
+        ).count()
+        orphaned = registry_images.exclude(scan_status__in=['pending', 'in_process'])
+        count = orphaned.count()
+        payload = {
+            'orphaned': count,
+            'excluded_standalone': standalone_count,
+            'excluded_active_scans': active_count,
+        }
+
+        if request.method == 'GET':
+            return Response(payload)
+
+        orphaned.delete()
+        return Response({
+            **payload,
+            'deleted': count,
+            'message': f'Removed {count} orphaned registry image(s).',
+        })
 
     @action(detail=False, methods=['get'], url_path='comparisons')
     def comparisons(self, request):
@@ -3641,7 +3756,20 @@ class VulnerabilityViewSet(BaseViewSet):
     ]
 
     def get_queryset(self):
-        queryset = Vulnerability.objects.select_related('details').all()
+        active_acceptance = RiskAcceptance.objects.filter(
+            vulnerability=OuterRef('pk'),
+            status='active',
+            expires_at__gt=timezone.now(),
+        ).order_by('-created_at')
+        queryset = Vulnerability.objects.select_related('details').annotate(
+            is_suppressed=Exists(active_acceptance),
+            suppression_expires_at=Subquery(active_acceptance.values('expires_at')[:1]),
+            suppression_reason=Subquery(active_acceptance.values('reason')[:1]),
+        )
+
+        suppressed = self.request.query_params.get('suppressed')
+        if suppressed is not None:
+            queryset = queryset.filter(is_suppressed=suppressed.lower() == 'true')
 
         # Add filters for exploit information
         exploit_available = self.request.query_params.get('exploit_available', None)
@@ -3754,6 +3882,102 @@ class VulnerabilityViewSet(BaseViewSet):
         serializer = VulnerabilityRiskPrioritizationSerializer(payload)
         return Response(serializer.data)
 
+    @action(detail=True, methods=['get'], url_path='risk-acceptances')
+    def risk_acceptances(self, request, uuid=None):
+        vulnerability = self.get_object()
+        RiskAcceptance.objects.filter(
+            vulnerability=vulnerability,
+            status='active',
+            expires_at__lte=timezone.now(),
+        ).update(status='expired')
+        records = vulnerability.risk_acceptances.select_related(
+            'created_by', 'revoked_by'
+        ).all()
+        return Response(RiskAcceptanceSerializer(records, many=True).data)
+
+    @action(
+        detail=True,
+        methods=['post'],
+        url_path='accept-risk',
+        permission_classes=[IsSecurityAdmin],
+    )
+    def accept_risk(self, request, uuid=None):
+        vulnerability = self.get_object()
+        serializer = RiskAcceptanceCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        with transaction.atomic():
+            RiskAcceptance.objects.select_for_update().filter(
+                vulnerability=vulnerability,
+                status='active',
+                expires_at__lte=timezone.now(),
+            ).update(status='expired')
+            if RiskAcceptance.objects.select_for_update().filter(
+                vulnerability=vulnerability,
+                status='active',
+            ).exists():
+                return Response(
+                    {'detail': 'This vulnerability already has an active risk acceptance.'},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            acceptance = RiskAcceptance.objects.create(
+                vulnerability=vulnerability,
+                reason=serializer.validated_data['reason'],
+                expires_at=serializer.validated_data['expires_at'],
+                created_by=request.user,
+            )
+
+        AuditEvent.objects.create(
+            actor=request.user,
+            action='risk_acceptance.created',
+            target_type='Vulnerability',
+            target_id=str(vulnerability.uuid),
+            details={
+                'risk_acceptance_uuid': str(acceptance.uuid),
+                'vulnerability_id': vulnerability.vulnerability_id,
+                'reason': acceptance.reason,
+                'expires_at': acceptance.expires_at.isoformat(),
+            },
+        )
+        request._audit_recorded = True
+        return Response(RiskAcceptanceSerializer(acceptance).data, status=status.HTTP_201_CREATED)
+
+    @action(
+        detail=True,
+        methods=['post'],
+        url_path='revoke-risk-acceptance',
+        permission_classes=[IsSecurityAdmin],
+    )
+    def revoke_risk_acceptance(self, request, uuid=None):
+        vulnerability = self.get_object()
+        with transaction.atomic():
+            acceptance = RiskAcceptance.objects.select_for_update().filter(
+                vulnerability=vulnerability,
+                status='active',
+            ).order_by('-created_at').first()
+            if not acceptance:
+                return Response(
+                    {'detail': 'No active risk acceptance exists.'},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            acceptance.status = 'revoked'
+            acceptance.revoked_by = request.user
+            acceptance.revoked_at = timezone.now()
+            acceptance.save(update_fields=['status', 'revoked_by', 'revoked_at', 'updated_at'])
+
+        AuditEvent.objects.create(
+            actor=request.user,
+            action='risk_acceptance.revoked',
+            target_type='Vulnerability',
+            target_id=str(vulnerability.uuid),
+            details={
+                'risk_acceptance_uuid': str(acceptance.uuid),
+                'vulnerability_id': vulnerability.vulnerability_id,
+            },
+        )
+        request._audit_recorded = True
+        return Response(RiskAcceptanceSerializer(acceptance).data)
+
     @method_decorator(cache_page(60))
     @action(detail=False, methods=['get'])
     def severity_stats(self, request):
@@ -3767,20 +3991,21 @@ class VulnerabilityViewSet(BaseViewSet):
             'total_vulnerabilities': Vulnerability.objects.count()
         })
 
-    @action(detail=False, methods=['post'], url_path='cleanup-orphaned')
+    @action(detail=False, methods=['get', 'post'], url_path='cleanup-orphaned')
     def cleanup_orphaned(self, request):
         """
-        Delete vulnerabilities that have no associated component versions (and thus no images).
-        Use after deleting images to keep statistics accurate.
+        Delete vulnerabilities that are not reachable from any current image.
         """
         orphaned = Vulnerability.objects.annotate(
-            n=Count('component_versions')
-        ).filter(n=0)
+            linked_image_count=Count('component_versions__images', distinct=True)
+        ).filter(linked_image_count=0)
         count = orphaned.count()
+        if request.method == 'GET':
+            return Response({'orphaned': count})
         orphaned.delete()
         return Response({
             'deleted': count,
-            'message': f'Removed {count} orphaned vulnerability(ies) with no linked components or images.'
+            'message': f'Removed {count} vulnerability(ies) not linked to any current image.'
         })
 
     @action(detail=True, methods=['post'])
@@ -4015,7 +4240,7 @@ class ListRegistriesView(GenericAPIView):
 
 class RegistryDetailView(GenericAPIView):
     """Get or update a single container registry (supports PATCH for fallback repos)."""
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsOperatorOrReadOnly]
 
     @staticmethod
     def _registry_response(registry):
@@ -4062,6 +4287,26 @@ class RegistryDetailView(GenericAPIView):
 
 class StatsViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
+
+    @method_decorator(cache_page(60))
+    @action(detail=False, methods=['get'], url_path='prioritization')
+    def prioritization(self, request):
+        limit = _parse_bounded_integer(
+            request.query_params.get('limit'), 50, minimum=1, maximum=100,
+        )
+        stale_days = _parse_bounded_integer(
+            request.query_params.get('stale_days'), 30, minimum=1, maximum=365,
+        )
+        include_suppressed = str(
+            request.query_params.get('include_suppressed', 'false')
+        ).lower() in {'1', 'true', 'yes'}
+        return Response(build_prioritization_payload(
+            limit=limit,
+            stale_days=stale_days,
+            search=(request.query_params.get('search') or '').strip()[:255],
+            ecosystem=(request.query_params.get('ecosystem') or 'all').strip()[:50],
+            include_suppressed=include_suppressed,
+        ))
     serializer_class = StatsResponseSerializer
 
     def list(self, request):
@@ -4160,6 +4405,33 @@ class StatsViewSet(viewsets.ViewSet):
         selected_type = request.query_params.get('type', 'all')
         summary = get_dashboard_weekly_threat_intel(limit=None)
         rows = _build_weekly_threat_intel_rows(summary, selected_type)
+        exposure_counts = {
+            'total': len(rows),
+            'confirmed_present': sum(1 for row in rows if row.get('currently_present')),
+            'historical': sum(
+                1 for row in rows
+                if row.get('relevant_in_hitrack') and not row.get('currently_present')
+            ),
+            'not_confirmed': sum(1 for row in rows if not row.get('relevant_in_hitrack')),
+            'affected_components': len({
+                component.get('component_version_uuid')
+                for row in rows
+                for component in row.get('affected_components') or []
+                if component.get('component_version_uuid')
+            }),
+        }
+        source_status = {
+            'hitrack': (summary.get('observed_this_week') or {}).get('collection_status', 'unknown'),
+            'cisa_kev': (summary.get('kev_added_this_week') or {}).get('collection_status', 'unknown'),
+            'supply_chain': (summary.get('supply_chain_this_week') or {}).get('collection_status', 'unknown'),
+        }
+        rows = _filter_weekly_threat_intel_rows(
+            rows,
+            signal=request.query_params.get('signal', 'all'),
+            presence=request.query_params.get('presence', 'all'),
+            ecosystem=request.query_params.get('ecosystem', 'all'),
+            search=request.query_params.get('search', ''),
+        )
 
         paginator = CustomPageNumberPagination()
         page = paginator.paginate_queryset(rows, request)
@@ -4170,6 +4442,9 @@ class StatsViewSet(viewsets.ViewSet):
             response.data['period_start'] = summary.get('period_start')
             response.data['period_end'] = summary.get('period_end')
             response.data['selected_type'] = selected_type
+            response.data['exposure_counts'] = exposure_counts
+            response.data['generated_at'] = summary.get('generated_at')
+            response.data['source_status'] = source_status
             return response
 
         return Response({
@@ -4179,6 +4454,9 @@ class StatsViewSet(viewsets.ViewSet):
             'period_start': summary.get('period_start'),
             'period_end': summary.get('period_end'),
             'selected_type': selected_type,
+            'exposure_counts': exposure_counts,
+            'generated_at': summary.get('generated_at'),
+            'source_status': source_status,
             'results': results,
         })
 
@@ -4589,7 +4867,6 @@ class StatsViewSet(viewsets.ViewSet):
 
 class JobViewSet(viewsets.ViewSet):
     permission_classes = [IsOperatorOrReadOnly]
-    permission_classes = [IsAuthenticated]
     serializer_class = JobAddRepositoriesResponseSerializer
 
     @action(detail=False, methods=['post'], url_path='add-repositories')
@@ -5298,7 +5575,6 @@ class PeriodicTaskViewSet(viewsets.ReadOnlyModelViewSet):
     """
     ViewSet for managing periodic tasks
     """
-    permission_classes = [IsAuthenticated]
     queryset = PeriodicTask.objects.select_related('interval', 'crontab').all().order_by('name')
     serializer_class = PeriodicTaskSerializer
     filterset_fields = ['enabled', 'task']

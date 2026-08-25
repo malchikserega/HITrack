@@ -133,7 +133,7 @@
                   <v-tooltip location="top">
                     <template #activator="{ props }">
                       <v-chip v-bind="props" size="x-small" color="success" variant="tonal">
-                        Relevant {{ intel?.kev_added_this_week?.relevant_in_hitrack_count || 0 }}
+                        Matched {{ intel?.kev_added_this_week?.relevant_in_hitrack_count || 0 }}
                       </v-chip>
                     </template>
                     <span>{{ relevantTooltip }}</span>
@@ -141,7 +141,7 @@
                   <v-tooltip location="top">
                     <template #activator="{ props }">
                       <v-chip v-bind="props" size="x-small" color="primary" variant="tonal">
-                        Present {{ intel?.kev_added_this_week?.currently_present_count || 0 }}
+                        Confirmed {{ intel?.kev_added_this_week?.currently_present_count || 0 }}
                       </v-chip>
                     </template>
                     <span>{{ presentTooltip }}</span>
@@ -192,7 +192,7 @@
                           color="primary"
                           variant="tonal"
                         >
-                          Present
+                          Confirmed
                         </v-chip>
                       </template>
                       <span>{{ presentTooltip }}</span>
@@ -205,7 +205,7 @@
                           color="success"
                           variant="tonal"
                         >
-                          Relevant
+                          Historical
                         </v-chip>
                       </template>
                       <span>{{ relevantTooltip }}</span>
@@ -255,7 +255,7 @@
                   <v-tooltip location="top">
                     <template #activator="{ props }">
                       <v-chip v-bind="props" size="x-small" color="success" variant="tonal">
-                        Relevant {{ intel?.supply_chain_this_week?.relevant_in_hitrack_count || 0 }}
+                        Matched {{ intel?.supply_chain_this_week?.relevant_in_hitrack_count || 0 }}
                       </v-chip>
                     </template>
                     <span>{{ relevantTooltip }}</span>
@@ -263,7 +263,7 @@
                   <v-tooltip location="top">
                     <template #activator="{ props }">
                       <v-chip v-bind="props" size="x-small" color="primary" variant="tonal">
-                        Present {{ intel?.supply_chain_this_week?.currently_present_count || 0 }}
+                        Confirmed {{ intel?.supply_chain_this_week?.currently_present_count || 0 }}
                       </v-chip>
                     </template>
                     <span>{{ presentTooltip }}</span>
@@ -334,7 +334,7 @@
                           color="primary"
                           variant="tonal"
                         >
-                          Present
+                          Confirmed
                         </v-chip>
                       </template>
                       <span>{{ presentTooltip }}</span>
@@ -347,7 +347,7 @@
                           color="success"
                           variant="tonal"
                         >
-                          Relevant
+                          Historical
                         </v-chip>
                       </template>
                       <span>{{ relevantTooltip }}</span>
@@ -383,6 +383,7 @@
 import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { getSeverityColor } from '../utils/colors'
+import { openSafeExternalUrl } from '../utils/urls'
 
 interface ThreatIntelHitrackMatch {
   repository_count: number
@@ -391,6 +392,15 @@ interface ThreatIntelHitrackMatch {
   tags: string[]
   image_count: number
   images: string[]
+  component_count: number
+  components: Array<{
+    component_version_uuid: string
+    name: string
+    version: string
+    ecosystem: string
+    image_count: number
+    images: string[]
+  }>
 }
 
 interface ObservedThreatEntry {
@@ -499,8 +509,8 @@ const formattedPeriod = computed(() => {
 const observedTooltip = 'Vulnerabilities first seen in HITrack during the current week.'
 const kevTooltip = 'New entries added to the official CISA Known Exploited Vulnerabilities catalog this week.'
 const supplyChainTooltip = 'New weekly package or malware advisories from external supply-chain sources such as GitHub Advisory data and OSV.'
-const relevantTooltip = 'This external advisory matches a vulnerability that exists in HITrack at least once in historical data.'
-const presentTooltip = 'This external advisory matches a vulnerability that is currently present in scanned images linked in HITrack.'
+const relevantTooltip = 'This advisory matches a HITrack vulnerability record. A Historical badge means no current image is linked to it.'
+const presentTooltip = 'Scanner evidence confirms this vulnerability on an exact component version in at least one current image.'
 
 const getThreatIntelMatchSummary = (
   entry: ObservedThreatEntry | KevThreatEntry | SupplyChainEntry,
@@ -513,6 +523,15 @@ const getThreatIntelMatchSummary = (
     summaryParts.push(`Matched by ${entry.matched_by}: ${entry.matched_identifier}`)
   } else if (entry.matched_vulnerability_id) {
     summaryParts.push(`Matched to ${entry.matched_vulnerability_id}`)
+  }
+
+  if (match.components?.length) {
+    const componentPreview = match.components.slice(0, 2)
+      .map(component => `${component.name} ${component.version}`)
+      .join(', ')
+    const extraComponentCount = Math.max(match.component_count - 2, 0)
+    summaryParts.push(`Components ${componentPreview}${extraComponentCount > 0 ? ` +${extraComponentCount}` : ''}`)
+    return summaryParts.join(' · ')
   }
 
   if (match.tags?.length) {
@@ -572,8 +591,7 @@ const openSupplyChainEntry = (entry: SupplyChainEntry) => {
 }
 
 const openExternal = (url?: string | null) => {
-  if (!url) return
-  window.open(url, '_blank', 'noopener,noreferrer')
+  openSafeExternalUrl(url)
 }
 </script>
 

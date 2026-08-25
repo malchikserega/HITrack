@@ -208,7 +208,7 @@
                     >
                       <template #prepend>
                         <v-avatar color="error" size="32">
-                          <span class="text-white font-weight-bold">{{ index + 1 }}</span>
+                          <span class="text-white font-weight-bold">{{ Number(index) + 1 }}</span>
                         </v-avatar>
                       </template>
 
@@ -253,7 +253,7 @@
                     >
                       <template #prepend>
                         <v-avatar :color="getSeverityColor(vuln.severity)" size="32">
-                          <span class="text-white font-weight-bold">{{ index + 1 }}</span>
+                          <span class="text-white font-weight-bold">{{ Number(index) + 1 }}</span>
                         </v-avatar>
                       </template>
 
@@ -371,7 +371,7 @@
                 >
                   <template #prepend>
                     <v-avatar color="primary" size="32">
-                      <span class="text-white font-weight-bold">{{ index + 1 }}</span>
+                      <span class="text-white font-weight-bold">{{ Number(index) + 1 }}</span>
                     </v-avatar>
                   </template>
 
@@ -458,67 +458,6 @@
                   height="8"
                 />
               </div>
-            </v-card-text>
-          </v-card>
-        </v-col>
-      </v-row>
-
-      <v-row v-if="!blockErrors.analytics || blockHasLoadedData('analytics')">
-        <v-col cols="12">
-          <v-skeleton-loader
-            v-if="isBlockInitialLoading('analytics')"
-            type="card"
-            class="dashboard-skeleton-card dashboard-skeleton-card--table"
-          />
-          <v-card v-else class="chart-card" elevation="2">
-            <v-card-title class="text-h6 font-weight-bold pa-4 pb-2">
-              Recent Scan Changes
-            </v-card-title>
-            <v-card-text class="pa-0">
-              <div v-if="!(dashboardData.recent_scan_deltas || []).length" class="text-center pa-8">
-                <v-icon size="48" color="grey">mdi-chart-timeline-variant</v-icon>
-                <p class="text-body-2 text-medium-emphasis mt-2">No material scan deltas captured yet</p>
-              </div>
-              <v-table v-else density="compact" class="recent-scan-deltas-table">
-                <thead>
-                  <tr>
-                    <th>Tag</th>
-                    <th>New</th>
-                    <th>Fixed</th>
-                    <th>Severity Up</th>
-                    <th>New KEV</th>
-                    <th>Risk Delta</th>
-                    <th>When</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr
-                    v-for="item in dashboardData.recent_scan_deltas"
-                    :key="item.uuid"
-                    class="scan-delta-row"
-                    @click="openScanDelta(item)"
-                  >
-                    <td>
-                      <div class="font-weight-medium">{{ item.repository_name }}</div>
-                      <div class="text-caption text-medium-emphasis">{{ item.tag }}</div>
-                    </td>
-                    <td>{{ item.new_vulnerabilities_count }}</td>
-                    <td>{{ item.fixed_vulnerabilities_count }}</td>
-                    <td>{{ item.severity_increased_count }}</td>
-                    <td>{{ item.new_kev_relevant_count }}</td>
-                    <td>
-                      <v-chip
-                        size="small"
-                        :color="item.risk_score_delta >= 0 ? 'error' : 'success'"
-                        variant="tonal"
-                      >
-                        {{ formatRiskDelta(item.risk_score_delta) }}
-                      </v-chip>
-                    </td>
-                    <td>{{ $formatDate(item.timestamp) }}</td>
-                  </tr>
-                </tbody>
-              </v-table>
             </v-card-text>
           </v-card>
         </v-col>
@@ -757,7 +696,7 @@ const dashboardBlockConfig: Record<DashboardBlockKey, { endpoint: string; keys: 
   },
   analytics: {
     endpoint: 'stats/dashboard-analytics/',
-    keys: ['risk_rankings', 'fixability_analytics', 'recent_scan_deltas'],
+    keys: ['risk_rankings', 'fixability_analytics'],
   },
   rootCauses: {
     endpoint: 'stats/dashboard-root-causes/',
@@ -996,17 +935,7 @@ const openRootCauseItem = (item: any) => {
   router.push('/base-lineage-root-causes')
 }
 
-const openScanDelta = (item: any) => {
-  if (!item?.tag_uuid) return
-  router.push(`/repository-tags/${item.tag_uuid}/images`)
-}
-
 const formatRiskScore = (value: number) => Number(value || 0).toFixed(1)
-
-const formatRiskDelta = (value: number) => {
-  const numericValue = Number(value || 0)
-  return `${numericValue >= 0 ? '+' : ''}${numericValue.toFixed(1)}`
-}
 
 const getFixabilityBucketPercent = (count: number) => {
   const buckets = dashboardData.value?.fixability_analytics?.critical_high_fixable_age_buckets || []
@@ -1101,8 +1030,7 @@ onUnmounted(() => {
   border: 1px solid #39FF14 !important;
 }
 
-.risk-ranking-item.clickable,
-.scan-delta-row {
+.risk-ranking-item.clickable {
   cursor: pointer;
 }
 
@@ -1114,11 +1042,6 @@ onUnmounted(() => {
 
 .fixability-age-row + .fixability-age-row {
   margin-top: 12px;
-}
-
-.recent-scan-deltas-table th,
-.recent-scan-deltas-table td {
-  white-space: nowrap;
 }
 
 /* Matrix theme for all cards */

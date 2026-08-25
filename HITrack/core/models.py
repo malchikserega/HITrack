@@ -371,6 +371,60 @@ class Vulnerability(models.Model):
         return f"{self.vulnerability_id} ({self.severity})"
 
 
+class RiskAcceptance(models.Model):
+    """Governed, time-bounded suppression of one vulnerability's risk signal.
+
+    The vulnerability and findings remain in inventory; only prioritization
+    views may exclude an active acceptance.
+    """
+    STATUS_CHOICES = [
+        ('active', 'Active'),
+        ('expired', 'Expired'),
+        ('revoked', 'Revoked'),
+    ]
+    uuid = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    vulnerability = models.ForeignKey(
+        Vulnerability,
+        on_delete=models.CASCADE,
+        related_name='risk_acceptances',
+    )
+    reason = models.TextField()
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default='active')
+    expires_at = models.DateTimeField()
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name='created_risk_acceptances',
+    )
+    revoked_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='revoked_risk_acceptances',
+    )
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['vulnerability'],
+                condition=models.Q(status='active'),
+                name='unique_active_risk_acceptance',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['status', 'expires_at'], name='core_risk_status_expiry_idx'),
+            models.Index(fields=['vulnerability', '-created_at'], name='core_risk_vuln_created_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.vulnerability.vulnerability_id}: {self.status} until {self.expires_at}"
+
+
 class ThreatIntelSnapshot(models.Model):
     uuid = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     snapshot_date = models.DateField(unique=True)
