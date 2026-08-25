@@ -136,7 +136,9 @@ Available analytics include:
 - shared vulnerable component versions across repositories;
 - OS/distro lineage groups;
 - repository, image, component, and vulnerability dashboard metrics;
-- recent activities and scan deltas;
+- remediation opportunities and high-impact vulnerable packages;
+- scan freshness and SBOM/Grype coverage;
+- recent activities;
 - component matrix views.
 
 Root-cause pages use persisted snapshots for larger datasets. Snapshot collection is not automatic unless a periodic task is configured.
@@ -160,4 +162,4 @@ Backfills update stored data and should normally be run after an upgrade that in
 - A registry fallback policy applies to every Helm repository linked to that registry.
 - Registry credentials are stored in the current database model and should be protected by deployment controls.
 - Scanner accuracy depends on Syft/Grype output, accessible image manifests, and the available vulnerability database.
-- The checked-in Compose and Django settings are development-oriented and require hardening before public exposure.
+- The checked-in Compose profile remains development-oriented and requires the documented production controls before public exposure.

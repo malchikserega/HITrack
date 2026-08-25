@@ -48,16 +48,13 @@ Open:
 
 The API container automatically runs migrations and the initialization command when it starts.
 
-Default bootstrap credentials are currently created when no active superuser exists:
+HITrack intentionally does not ship a default administrator password. Create the first administrator explicitly:
 
-```text
-username: admin
-password: P@ssw0rd
+```bash
+docker compose exec hitrack-api python manage.py createsuperuser
 ```
 
-Set `SUPERUSER_NAME` and `SUPERUSER_PSWD` before the first start to override them.
-
-> **Deployment note:** the checked-in Compose configuration is intended for local or controlled environments. It runs Django with `runserver`, enables development settings, exposes PostgreSQL and Redis ports, uses default database credentials, and mounts the Docker socket into backend services. Review [Operations and Deployment](docs/operations.md) before exposing HITrack outside a trusted host.
+> **Deployment note:** the checked-in Compose configuration is intended for local or controlled environments. It runs Django with `runserver`, enables development settings, uses default local database credentials, and gives the scan worker Docker-daemon access. Review the [Production Checklist](docs/production.md) before exposing HITrack outside a trusted host.
 
 ## First Configuration
 
@@ -78,13 +75,19 @@ Do not include a specific repo key in the Registry API URL.
 
 ## Documentation
 
-- [Documentation Index](docs/README.md)
+The documentation portal is built with MkDocs Material and published by GitHub Actions at `https://malchikserega.github.io/HITrack/` after GitHub Pages is configured to use **GitHub Actions** as its source.
+
+- [Documentation Index](docs/index.md)
+- [Getting Started](docs/getting-started.md)
 - [Platform Capabilities](docs/capabilities.md)
 - [Architecture and Data Flow](docs/architecture.md)
 - [Registries and Repository Discovery](docs/registries.md)
 - [Scanning and Result Semantics](docs/scanning.md)
 - [Periodic Tasks](docs/periodic-tasks.md)
 - [Operations and Deployment](docs/operations.md)
+- [Prioritization and Remediation](docs/prioritization.md)
+- [Authentication and Authorization](docs/authentication.md)
+- [Solution Audit](docs/security-audit.md)
 - [Periodic JFrog Repository Discovery](docs/jfrog-repository-discovery.md)
 - [Release-Line Tag Scanning](docs/periodic-tag-scanning.md)
 
@@ -121,6 +124,14 @@ cd HITrack-frontend
 npm install
 npm run type-check
 npm run build
+npm audit --omit=dev
+```
+
+Documentation:
+
+```bash
+python -m pip install -r docs/requirements.txt
+mkdocs build --strict
 ```
 
 ## License

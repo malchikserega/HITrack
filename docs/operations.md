@@ -47,7 +47,11 @@ Therefore a normal `docker compose up -d --build` applies migrations automatical
 docker compose exec hitrack-api python manage.py migrate
 ```
 
-The initialization command currently creates a superuser if no active superuser exists. Its checked-in defaults are `admin` / `P@ssw0rd`; set `SUPERUSER_NAME` and `SUPERUSER_PSWD` before first startup and change existing default credentials immediately.
+The initialization command creates a superuser only when both `SUPERUSER_NAME` and `SUPERUSER_PSWD` are explicitly provided. The safer interactive path is:
+
+```bash
+docker compose exec hitrack-api python manage.py createsuperuser
+```
 
 ## Upgrade Procedure
 
@@ -176,22 +180,19 @@ Check the Artifactory base URL, API permissions, included package types, project
 
 ## Current Security and Production Gaps
 
-The repository currently includes these deployment characteristics:
+The repository still includes these deployment characteristics:
 
-- Django `DEBUG=True`, wildcard hosts/CORS behavior, and a hard-coded secret key;
-- predictable bootstrap and database defaults unless overridden;
+- debug mode and predictable database credentials in the local `env.env` profile;
 - registry credentials stored in the application database;
 - Django `runserver` in the default Compose path;
-- a `service` entrypoint that references `config.wsgi`, which is not the project's WSGI module;
-- no application health check on the API service;
-- exposed PostgreSQL and Redis host ports;
-- the host Docker socket mounted into the API and all worker containers.
+- loopback-bound PostgreSQL and Redis host ports;
+- the host Docker socket mounted into the scan worker.
 
 The Docker socket grants capabilities comparable to host root access if a mounted container is compromised. Keep the current stack on a trusted host and network.
 
 Before public or multi-tenant deployment, at minimum:
 
-- use environment/secret-managed Django and database credentials;
+- use environment/secret-managed Django and database credentials (production startup requires an explicit secret and allowed hosts);
 - separate development and production settings and define explicit domains/CORS policy;
 - use a supported WSGI server with `HITrack.wsgi` and add health checks;
 - remove unnecessary host port exposure;
@@ -199,7 +200,7 @@ Before public or multi-tenant deployment, at minimum:
 - move registry credentials to a secret store or encrypt them with a key held outside PostgreSQL;
 - set resource limits, backup/restore tests, monitoring, log retention, and TLS/authentication at the ingress.
 
-These are deployment requirements; the checked-in Compose file does not implement them yet.
+The reference stack now removes the socket from web/orchestration/enrichment services and restricts database/broker host bindings, but the remaining items still require deployment-specific work. Use the [Production checklist](production.md).
 
 ## Development Checks
 

@@ -1,6 +1,6 @@
 # Periodic Release-Line Tag Scanning
 
-[Back to the documentation index](README.md)
+[Back to the documentation index](index.md)
 
 HITrack can periodically scan either one latest tag per repository or one latest tag in every supported release line. Release-line mode solves the following case:
 

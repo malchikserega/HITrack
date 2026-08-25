@@ -1,6 +1,6 @@
 # Periodic JFrog Repository Discovery
 
-[Back to the documentation index](README.md)
+[Back to the documentation index](index.md)
 
 HITrack stores ACR and JFrog applications in the same `Repository` model even though their remote hierarchies differ:
 

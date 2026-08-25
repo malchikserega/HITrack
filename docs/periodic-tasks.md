@@ -141,6 +141,8 @@ These are network-dependent. Stagger them and respect the limits of external ser
 
 It saves the current weekly summary and invokes retention cleanup. Scheduling `Cleanup Threat Intel Snapshots` separately is optional when collection runs regularly.
 
+New installations and upgrades create the enabled `HITrack: Refresh Vulnerability Feed` schedule at `02:15 UTC` every day. The migration uses `get_or_create`, so it does not overwrite an existing task with that name. Administrators can change or disable the schedule in Django admin when external API budgets require a different cadence.
+
 ### Root-Cause Analytics
 
 `Collect Root Cause Analytics Snapshot` accepts:

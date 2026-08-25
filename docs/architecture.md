@@ -62,7 +62,7 @@ Durable scan records include:
 
 - `ScanRun`: idempotency key, state, attempt count, lease, task ID, and scanner/policy versions;
 - `ScanArtifact`: stored raw scanner artifacts and checksums;
-- `AuditEvent`: append-only records for API mutations handled by the base view set.
+- `AuditEvent`: append-only records for API mutations and explicit security decisions.
 
 Image deduplication primarily uses normalized image name and digest. Existing historical duplicates can be repaired by `Deduplicate Images by Identity`.
 
@@ -151,16 +151,14 @@ The default stack uses:
 
 Raw scan artifact storage uses Django storage abstractions. The checked-in configuration uses local filesystem storage.
 
-## Current Deployment Characteristics
+## Reference Deployment Characteristics
 
-The repository currently has development-oriented runtime choices:
+The repository keeps development-oriented runtime choices in its local Compose profile:
 
-- Django `DEBUG=True`;
-- wildcard `ALLOWED_HOSTS`;
-- hard-coded Django secret key;
+- Django debug mode (explicit in `env.env`);
 - API started with Django `runserver` by the default Compose command;
-- default database and bootstrap credentials;
-- host ports for PostgreSQL and Redis;
-- Docker socket mounted into API and worker containers.
+- default local database credentials;
+- loopback host bindings for PostgreSQL and Redis;
+- Docker socket mounted only into the scan worker.
 
-These are implementation facts, not recommended production settings. See [Operations and Deployment](operations.md) for the required review points.
+Production mode requires an explicit secret and allowed hosts and defaults to restricted CORS. These controls do not turn the local Compose profile into a production design. See the [Production checklist](production.md).
