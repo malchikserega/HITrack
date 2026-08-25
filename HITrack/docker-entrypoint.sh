@@ -6,7 +6,7 @@ if [ "$1" = 'service' ]; then
 	python manage.py collectstatic --no-input
 	python manage.py migrate
 	python manage.py init
-	gunicorn -b=0.0.0.0:80 -w="$WORKERS" config.wsgi
+	gunicorn -b=0.0.0.0:80 -w="$WORKERS" HITrack.wsgi:application
 
 elif [ "$1" = 'dev' ]; then
 	python manage.py collectstatic --no-input

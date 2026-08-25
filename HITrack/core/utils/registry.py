@@ -120,16 +120,6 @@ def get_image_digest(registry, image_ref: str) -> Optional[str]:
     return get_acr_image_digest(registry.api_url, get_bearer_token(registry), image_ref)
 
 
-def build_fallback_image_ref(fallback_repository, image_ref: str) -> Optional[str]:
-    """
-    Build a candidate image ref for a fallback Docker repository from the original ref.
-    image_ref is e.g. 'bad-registry.io/namespace/image:tag'; we use path and tag with fallback repo base.
-    """
-    if not fallback_repository or not fallback_repository.url:
-        return None
-    return build_fallback_image_ref_from_url(fallback_repository.url, image_ref)
-
-
 def build_fallback_image_ref_from_url(fallback_url: str, image_ref: str) -> Optional[str]:
     """
     Build a candidate image ref by replacing the host portion of *image_ref*

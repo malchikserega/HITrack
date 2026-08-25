@@ -1,5 +1,7 @@
 # Periodic Release-Line Tag Scanning
 
+[Back to the documentation index](index.md)
+
 HITrack can periodically scan either one latest tag per repository or one latest tag in every supported release line. Release-line mode solves the following case:
 
 1. A repository contains `28.1`, `28.2`, `29.1`, and `29.2`.
@@ -136,6 +138,8 @@ docker compose up -d --build hitrack-api worker-light worker-scan beat
 ```
 
 Then save or update the periodic task in Django Admin. Celery Beat reads the database-backed schedule and queues `Periodic Repository Scan` on the `light` queue; that task dispatches individual repository scans to the scan workflow.
+
+For other schedulable and internal task names, see [Periodic Tasks](periodic-tasks.md).
 
 ## Verification and Troubleshooting
 

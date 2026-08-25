@@ -1,0 +1,82 @@
+site_name: HITrack Documentation
+site_description: Self-hosted container, SBOM, vulnerability and supply-chain risk management
+site_url: https://malchikserega.github.io/HITrack/
+repo_url: https://github.com/malchikserega/HITrack
+repo_name: malchikserega/HITrack
+edit_uri: edit/main/docs/
+docs_dir: docs
+strict: true
+
+theme:
+  name: material
+  logo: logo.png
+  favicon: logo.png
+  features:
+    - navigation.instant
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+    - search.highlight
+    - search.suggest
+  palette:
+    - scheme: default
+      primary: blue grey
+      accent: cyan
+      toggle:
+        icon: material/weather-night
+        name: Dark mode
+    - scheme: slate
+      primary: blue grey
+      accent: cyan
+      toggle:
+        icon: material/weather-sunny
+        name: Light mode
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - User guide:
+      - Platform capabilities: capabilities.md
+      - Registries and discovery: registries.md
+      - Scanning and result semantics: scanning.md
+      - Prioritization and remediation: prioritization.md
+      - Vulnerabilities and risk decisions: vulnerabilities.md
+      - Threat intelligence: threat-intelligence.md
+      - Releases and reports: releases-and-reports.md
+  - Administration:
+      - Authentication and authorization: authentication.md
+      - Periodic tasks: periodic-tasks.md
+      - Release-line scanning: periodic-tag-scanning.md
+      - JFrog discovery: jfrog-repository-discovery.md
+      - Operations and deployment: operations.md
+      - Production checklist: production.md
+  - Architecture:
+      - System architecture: architecture.md
+      - Data model: data-model.md
+      - API reference: api.md
+  - Development:
+      - Contributing: contributing.md
+      - Security policy: security.md
+      - Solution audit: security-audit.md
+  - Glossary: glossary.md
+
+copyright: Copyright &copy; HITrack contributors — CC BY-NC-SA 4.0

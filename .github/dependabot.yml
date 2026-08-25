@@ -1,0 +1,18 @@
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /HITrack
+    schedule: {interval: weekly}
+    labels: [dependencies, backend]
+  - package-ecosystem: npm
+    directory: /HITrack-frontend
+    schedule: {interval: weekly}
+    labels: [dependencies, frontend]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: {interval: weekly}
+    labels: [dependencies, ci]
+  - package-ecosystem: docker
+    directory: /HITrack
+    schedule: {interval: weekly}
+    labels: [dependencies, container]

@@ -8,6 +8,7 @@ from core.models import (
     Vulnerability,
 )
 from core.serializers import ImageSerializer
+from core.utils.image_vulnerability_summary import build_grype_vulnerability_summary
 
 
 class ImageDetailMetricsTests(TestCase):
@@ -101,3 +102,58 @@ class ImageDetailMetricsTests(TestCase):
         self.assertEqual(data['severity_counts']['NEGLIGIBLE'], 1)
         self.assertEqual(data['severity_counts']['UNKNOWN'], 1)
         self.assertEqual(sum(data['severity_counts'].values()), data['findings'])
+
+    def test_dotnet_ecosystem_is_inferred_from_nuget_purl(self):
+        component = Component.objects.create(name='Newtonsoft.Json', type='unknown')
+        version = ComponentVersion.objects.create(
+            component=component,
+            version='12.0.1',
+            purl='pkg:nuget/Newtonsoft.Json@12.0.1',
+        )
+        version.images.add(self.image)
+        ComponentVersionVulnerability.objects.create(
+            component_version=version, vulnerability=self.high, fixable=True,
+        )
+
+        dotnet = next(
+            row for row in ImageSerializer(self.image).data['vulnerability_breakdown']
+            if row['key'] == 'dotnet'
+        )
+        self.assertEqual(dotnet['label'], '.NET / NuGet')
+        self.assertEqual(dotnet['vulnerable_components_count'], 1)
+
+    def test_legacy_stored_summary_without_breakdown_is_rebuilt_from_grype(self):
+        grype_data = {
+            'matches': [{
+                'artifact': {
+                    'id': 'nuget-package', 'name': 'Example.Package', 'version': '1.0',
+                    'type': 'unknown', 'purl': 'pkg:nuget/Example.Package@1.0',
+                },
+                'vulnerability': {'id': 'CVE-2025-9999', 'severity': 'HIGH'},
+            }],
+        }
+        self.image.grype_data = grype_data
+        self.image.vulnerability_summary = {'schema_version': 1, 'findings': 1}
+        self.image.save(update_fields=['grype_data', 'vulnerability_summary'])
+
+        data = ImageSerializer(self.image).data
+        self.assertEqual(data['vulnerability_breakdown'][0]['key'], 'dotnet')
+
+
+class GrypeEcosystemSummaryTests(TestCase):
+    def test_common_language_ecosystems_and_schema_version(self):
+        matches = []
+        for package_type, purl in [
+            ('dotnet', 'pkg:nuget/A@1'), ('unknown', 'pkg:pypi/B@1'),
+            ('java-archive', 'pkg:maven/org.example/C@1'), ('go-module', 'pkg:golang/D@1'),
+        ]:
+            matches.append({
+                'artifact': {'name': purl, 'version': '1', 'type': package_type, 'purl': purl},
+                'vulnerability': {'id': f'CVE-{len(matches)}', 'severity': 'HIGH'},
+            })
+        summary = build_grype_vulnerability_summary({'matches': matches})
+        self.assertEqual(summary['schema_version'], 2)
+        self.assertEqual(
+            {row['key'] for row in summary['vulnerability_breakdown']},
+            {'dotnet', 'python', 'java', 'go'},
+        )

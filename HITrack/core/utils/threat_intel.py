@@ -1,12 +1,16 @@
 from datetime import date, datetime, timedelta
 from typing import Dict
 from collections import defaultdict
+import logging
 
 from django.db.models import Exists, OuterRef
+from django.db.models.functions import Upper
 from django.utils import timezone
 
 from core.models import ComponentVersionVulnerability, Image, RepositoryTag, ThreatIntelSnapshot, Vulnerability
 from core.utils.vulnerability_sources import VulnerabilityDataCollector
+
+logger = logging.getLogger(__name__)
 
 
 def get_current_week_period():
@@ -30,11 +34,14 @@ def _limit_summary_entries(summary: Dict, limit: int | None) -> Dict:
             limited['relevant_in_hitrack_count'] = bucket.get('relevant_in_hitrack_count', 0)
         if 'currently_present_count' in bucket:
             limited['currently_present_count'] = bucket.get('currently_present_count', 0)
+        if 'collection_status' in bucket:
+            limited['collection_status'] = bucket.get('collection_status')
         return limited
 
     return {
         'period_start': summary.get('period_start'),
         'period_end': summary.get('period_end'),
+        'generated_at': summary.get('generated_at'),
         'observed_this_week': limited_bucket(summary.get('observed_this_week')),
         'kev_added_this_week': limited_bucket(summary.get('kev_added_this_week')),
         'supply_chain_this_week': limited_bucket(summary.get('supply_chain_this_week')),
@@ -68,6 +75,7 @@ def _build_hitrack_location_preview(vulnerability_queryset) -> Dict[int, Dict]:
     repositories_map = defaultdict(set)
     tags_map = defaultdict(set)
     images_map = defaultdict(set)
+    components_map = defaultdict(dict)
 
     tag_rows = RepositoryTag.objects.filter(
         images__component_versions__componentversionvulnerability__vulnerability_id__in=vulnerability_ids,
@@ -102,11 +110,52 @@ def _build_hitrack_location_preview(vulnerability_queryset) -> Dict[int, Dict]:
         if image_name:
             images_map[vulnerability_id].add(image_name)
 
+    component_rows = ComponentVersionVulnerability.objects.filter(
+        vulnerability_id__in=vulnerability_ids,
+        component_version__images__repository_tags__isnull=False,
+    ).values(
+        'vulnerability_id',
+        'component_version__uuid',
+        'component_version__component__name',
+        'component_version__component__type',
+        'component_version__version',
+        'component_version__purl',
+        'component_version__images__name',
+    ).distinct()
+
+    for row in component_rows:
+        vulnerability_id = row['vulnerability_id']
+        component_version_uuid = str(row['component_version__uuid'])
+        component = components_map[vulnerability_id].setdefault(component_version_uuid, {
+            'component_version_uuid': component_version_uuid,
+            'name': row.get('component_version__component__name') or 'Unknown package',
+            'version': row.get('component_version__version') or 'Unknown version',
+            'ecosystem': row.get('component_version__component__type') or 'unknown',
+            'purl': row.get('component_version__purl'),
+            'images': set(),
+        })
+        image_name = row.get('component_version__images__name')
+        if image_name:
+            component['images'].add(image_name)
+
     preview_map = {}
     for vulnerability in vulnerability_queryset:
         repository_names = sorted(repositories_map.get(vulnerability.pk, set()))
         tag_names = sorted(tags_map.get(vulnerability.pk, set()))
         image_names = sorted(images_map.get(vulnerability.pk, set()))
+        component_matches = []
+        for component in components_map.get(vulnerability.pk, {}).values():
+            component_image_names = sorted(component.pop('images'))
+            component_matches.append({
+                **component,
+                'image_count': len(component_image_names),
+                'images': component_image_names[:3],
+            })
+        component_matches.sort(key=lambda item: (
+            str(item['ecosystem']).casefold(),
+            str(item['name']).casefold(),
+            str(item['version']).casefold(),
+        ))
         preview_map[vulnerability.pk] = {
             'repository_count': len(repository_names),
             'repositories': repository_names[:3],
@@ -114,6 +163,8 @@ def _build_hitrack_location_preview(vulnerability_queryset) -> Dict[int, Dict]:
             'tags': tag_names[:3],
             'image_count': len(image_names),
             'images': image_names[:3],
+            'component_count': len(component_matches),
+            'components': component_matches[:10],
         }
 
     return preview_map
@@ -128,8 +179,10 @@ def _build_vulnerability_presence_map(identifiers) -> Dict[str, Dict]:
     if not normalized_identifiers:
         return {}
 
-    queryset = Vulnerability.objects.filter(
-        vulnerability_id__in=normalized_identifiers,
+    queryset = Vulnerability.objects.annotate(
+        normalized_vulnerability_id=Upper('vulnerability_id'),
+    ).filter(
+        normalized_vulnerability_id__in=normalized_identifiers,
     ).annotate(
         currently_present=Exists(
             ComponentVersionVulnerability.objects.filter(
@@ -153,6 +206,8 @@ def _build_vulnerability_presence_map(identifiers) -> Dict[str, Dict]:
                 'tags': [],
                 'image_count': 0,
                 'images': [],
+                'component_count': 0,
+                'components': [],
             }),
         }
         for vulnerability in vulnerabilities
@@ -214,6 +269,11 @@ def _augment_entries_with_hitrack_presence(entries, identifier_resolver, total_c
             **entry,
             'relevant_in_hitrack': bool(matched_record),
             'currently_present': bool(matched_record and matched_record['currently_present']),
+            'match_status': (
+                'confirmed_present' if matched_record and matched_record['currently_present']
+                else 'historical' if matched_record
+                else 'not_confirmed'
+            ),
             'target_type': 'vulnerability' if matched_record else None,
             'target_uuid': matched_record['uuid'] if matched_record else None,
             'matched_identifier': matched_identifier,
@@ -227,6 +287,82 @@ def _augment_entries_with_hitrack_presence(entries, identifier_resolver, total_c
         'entries': augmented_entries,
         'relevant_in_hitrack_count': relevant_count,
         'currently_present_count': currently_present_count,
+    }
+
+
+def _refresh_summary_hitrack_presence(summary: Dict) -> Dict:
+    """Refresh inventory evidence without re-querying external feed providers."""
+    observed_bucket = summary.get('observed_this_week') or {}
+    observed_entries = list(observed_bucket.get('entries') or [])
+    observed_map = _build_vulnerability_presence_map(
+        entry.get('vulnerability_id') for entry in observed_entries
+    )
+    refreshed_observed_entries = []
+    for entry in observed_entries:
+        identifier = _normalize_vulnerability_identifier(entry.get('vulnerability_id'))
+        matched_record = observed_map.get(identifier) if identifier else None
+        refreshed_observed_entries.append({
+            **entry,
+            'relevant_in_hitrack': bool(matched_record),
+            'currently_present': bool(matched_record and matched_record['currently_present']),
+            'match_status': (
+                'confirmed_present' if matched_record and matched_record['currently_present']
+                else 'historical' if matched_record
+                else 'not_confirmed'
+            ),
+            'target_type': 'vulnerability' if matched_record else None,
+            'target_uuid': matched_record['uuid'] if matched_record else None,
+            'matched_identifier': identifier if matched_record else None,
+            'matched_by': 'Vulnerability ID' if matched_record else None,
+            'matched_vulnerability_id': matched_record['vulnerability_id'] if matched_record else None,
+            'hitrack_match': matched_record['hitrack_match'] if matched_record else None,
+        })
+
+    refreshed_observed = {
+        **observed_bucket,
+        'entries': refreshed_observed_entries,
+        'relevant_in_hitrack_count': sum(
+            1 for entry in refreshed_observed_entries if entry.get('relevant_in_hitrack')
+        ),
+        'currently_present_count': sum(
+            1 for entry in refreshed_observed_entries if entry.get('currently_present')
+        ),
+    }
+
+    kev_bucket = summary.get('kev_added_this_week') or {}
+    refreshed_kev = {
+        **kev_bucket,
+        **_augment_entries_with_hitrack_presence(
+            kev_bucket.get('entries') or [],
+            lambda entry: [{'identifier': entry.get('vulnerability_id'), 'match_type': 'CVE ID'}],
+            total_count=kev_bucket.get('count'),
+        ),
+    }
+
+    supply_bucket = summary.get('supply_chain_this_week') or {}
+    refreshed_supply_chain = {
+        **supply_bucket,
+        **_augment_entries_with_hitrack_presence(
+            supply_bucket.get('entries') or [],
+            lambda entry: [
+                {'identifier': entry.get('ghsa_id'), 'match_type': 'GHSA ID'},
+                {'identifier': entry.get('cve_id'), 'match_type': 'CVE ID'},
+                {'identifier': entry.get('osv_id'), 'match_type': 'OSV ID'},
+                *[
+                    {'identifier': alias, 'match_type': 'Alias'}
+                    for alias in (entry.get('aliases') or [])
+                ],
+                {'identifier': entry.get('advisory_id'), 'match_type': 'Advisory ID'},
+            ],
+            total_count=supply_bucket.get('count'),
+        ),
+    }
+
+    return {
+        **summary,
+        'observed_this_week': refreshed_observed,
+        'kev_added_this_week': refreshed_kev,
+        'supply_chain_this_week': refreshed_supply_chain,
     }
 
 
@@ -277,6 +413,7 @@ def build_live_weekly_threat_intel_summary(limit: int | None = 5) -> Dict:
             'epss': round(vulnerability.epss or 0, 3),
             'relevant_in_hitrack': True,
             'currently_present': bool(vulnerability.currently_present),
+            'match_status': 'confirmed_present' if vulnerability.currently_present else 'historical',
             'target_type': 'vulnerability',
             'target_uuid': str(vulnerability.uuid),
             'cisa_kev': bool(getattr(vulnerability.details, 'cisa_kev_known_exploited', False))
@@ -295,6 +432,8 @@ def build_live_weekly_threat_intel_summary(limit: int | None = 5) -> Dict:
                     'tags': [],
                     'image_count': 0,
                     'images': [],
+                    'component_count': 0,
+                    'components': [],
                 },
             ).get('hitrack_match'),
         }
@@ -303,11 +442,15 @@ def build_live_weekly_threat_intel_summary(limit: int | None = 5) -> Dict:
 
     collector = VulnerabilityDataCollector()
 
+    kev_collection_status = 'available'
     try:
         kev_summary = collector.get_weekly_cisa_kev_entries(week_start, week_end, limit=None)
     except Exception:
+        logger.exception('Unable to collect the weekly CISA KEV feed')
+        kev_collection_status = 'unavailable'
         kev_summary = {'count': 0, 'entries': []}
 
+    supply_chain_collection_status = 'available'
     try:
         supply_chain_summary = collector.get_weekly_supply_chain_advisories(
             week_start,
@@ -315,7 +458,15 @@ def build_live_weekly_threat_intel_summary(limit: int | None = 5) -> Dict:
             limit=None,
         )
     except Exception:
+        logger.exception('Unable to collect the weekly supply-chain advisory feed')
+        supply_chain_collection_status = 'unavailable'
         supply_chain_summary = {'count': 0, 'entries': []}
+
+    supply_chain_metadata = {
+        key: supply_chain_summary.get(key)
+        for key in ('truncated', 'candidate_ids_considered', 'candidate_ids_available')
+        if key in supply_chain_summary
+    }
 
     kev_summary = _augment_entries_with_hitrack_presence(
         kev_summary.get('entries', []),
@@ -327,6 +478,7 @@ def build_live_weekly_threat_intel_summary(limit: int | None = 5) -> Dict:
         ],
         total_count=kev_summary.get('count'),
     )
+    kev_summary['collection_status'] = kev_collection_status
     supply_chain_summary = _augment_entries_with_hitrack_presence(
         supply_chain_summary.get('entries', []),
         lambda entry: [
@@ -356,14 +508,20 @@ def build_live_weekly_threat_intel_summary(limit: int | None = 5) -> Dict:
         ],
         total_count=supply_chain_summary.get('count'),
     )
+    supply_chain_summary.update(supply_chain_metadata)
+    if supply_chain_collection_status == 'available' and supply_chain_metadata.get('truncated'):
+        supply_chain_collection_status = 'partial'
+    supply_chain_summary['collection_status'] = supply_chain_collection_status
 
     summary = {
         'period_start': week_start.isoformat(),
         'period_end': week_end.isoformat(),
+        'generated_at': timezone.now().isoformat(),
         'observed_this_week': {
             'count': observed_queryset.count(),
             'relevant_in_hitrack_count': observed_queryset.count(),
             'currently_present_count': observed_queryset.filter(currently_present=True).count(),
+            'collection_status': 'available',
             'entries': observed_entries,
         },
         'kev_added_this_week': kev_summary,
@@ -410,13 +568,15 @@ def get_dashboard_weekly_threat_intel(limit: int | None = 5) -> Dict:
     ).order_by('-snapshot_date', '-updated_at').first()
 
     if latest_snapshot:
-        return _limit_summary_entries({
+        refreshed_summary = _refresh_summary_hitrack_presence({
             'period_start': latest_snapshot.period_start.isoformat(),
             'period_end': latest_snapshot.period_end.isoformat(),
+            'generated_at': latest_snapshot.updated_at.isoformat(),
             'observed_this_week': latest_snapshot.observed_this_week,
             'kev_added_this_week': latest_snapshot.kev_added_this_week,
             'supply_chain_this_week': latest_snapshot.supply_chain_this_week,
-        }, limit)
+        })
+        return _limit_summary_entries(refreshed_summary, limit)
 
     return build_live_weekly_threat_intel_summary(limit=limit)
 
@@ -487,6 +647,8 @@ def _build_vulnerability_threat_intel_match(summary: Dict, vulnerability: Vulner
                     'tags': [],
                     'image_count': 0,
                     'images': [],
+                    'component_count': 0,
+                    'components': [],
                 },
             })
 
@@ -546,6 +708,8 @@ def get_vulnerability_weekly_threat_intel_match(vulnerability: Vulnerability) ->
                     'tags': [],
                     'image_count': 0,
                     'images': [],
+                    'component_count': 0,
+                    'components': [],
                 },
             }],
         }

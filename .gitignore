@@ -8,3 +8,6 @@ HITrack-frontend/dist
 __pycache__
 .DS_Store
 .idea
+.env
+.env.local
+site/

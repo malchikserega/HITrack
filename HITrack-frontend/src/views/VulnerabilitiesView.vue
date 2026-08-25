@@ -6,9 +6,10 @@
           <div class="d-flex align-center justify-space-between mb-4">
             <h1 class="text-h4 font-weight-black">Vulnerabilities</h1>
             <div class="d-flex align-center gap-2">
-              <v-tooltip text="Remove vulnerabilities that have no linked components or images (e.g. after deleting images)" location="bottom">
+              <v-tooltip text="Delete vulnerability records that are not linked to any current image" location="bottom">
                 <template v-slot:activator="{ props }">
                   <v-btn
+                    v-if="authStore.canWrite"
                     v-bind="props"
                     color="secondary"
                     variant="tonal"
@@ -17,7 +18,7 @@
                     :loading="cleanupOrphanedLoading"
                     @click="openCleanupOrphanedDialog"
                   >
-                    Cleanup orphaned
+                    Delete orphaned
                   </v-btn>
                 </template>
               </v-tooltip>
@@ -43,12 +44,19 @@
         <v-card>
           <v-card-title class="text-subtitle-1 font-weight-bold">Cleanup orphaned vulnerabilities</v-card-title>
           <v-card-text>
-            Remove vulnerabilities that have no linked components or images (e.g. after deleting images). This will update statistics. This action cannot be undone.
+            <template v-if="cleanupOrphanedCount === null">
+              Checking for vulnerabilities not linked to any current image…
+            </template>
+            <template v-else>
+              <strong>{{ cleanupOrphanedCount }}</strong> orphaned vulnerability{{ cleanupOrphanedCount === 1 ? '' : 'ies' }}
+              will be deleted. This updates statistics and cannot be undone.
+            </template>
           </v-card-text>
           <v-card-actions>
             <v-spacer></v-spacer>
             <v-btn variant="text" @click="cleanupOrphanedDialog = false" :disabled="cleanupOrphanedLoading">Cancel</v-btn>
-            <v-btn color="primary" @click="confirmCleanupOrphaned" :loading="cleanupOrphanedLoading">Remove orphaned</v-btn>
+            <v-btn color="error" @click="confirmCleanupOrphaned" :loading="cleanupOrphanedLoading"
+              :disabled="cleanupOrphanedCount === null || cleanupOrphanedCount === 0">Delete orphaned</v-btn>
           </v-card-actions>
         </v-card>
       </v-dialog>
@@ -59,7 +67,7 @@
           <v-card class="mb-4">
             <v-card-text>
               <v-row>
-                <v-col cols="12" md="6">
+                <v-col cols="12" md="4">
                   <v-text-field
                     v-model="searchQuery"
                     label="Search vulnerabilities"
@@ -71,7 +79,7 @@
                     @click:clear="searchQuery = ''"
                   ></v-text-field>
                 </v-col>
-                <v-col cols="12" md="3">
+                <v-col cols="12" md="2">
                   <v-select
                     v-model="severityFilter"
                     :items="severityOptions"
@@ -91,12 +99,22 @@
                     @update:model-value="onFilterChange"
                   ></v-select>
                 </v-col>
-                <v-col cols="12" md="1">
+                <v-col cols="12" md="2">
                   <v-checkbox
                     v-model="fixableFilter"
                     label="Fixable"
                     @update:model-value="onFilterChange"
                   ></v-checkbox>
+                </v-col>
+                <v-col cols="12" md="2">
+                  <v-select
+                    v-model="suppressedFilter"
+                    :items="suppressionOptions"
+                    label="Risk decision"
+                    variant="outlined"
+                    clearable
+                    @update:model-value="onFilterChange"
+                  />
                 </v-col>
               </v-row>
               <div class="d-flex align-center justify-space-between mt-3">
@@ -247,6 +265,16 @@
                   {{ item.has_details ? 'Yes' : 'No' }}
                 </v-chip>
               </template>
+              <template v-slot:item.is_suppressed="{ item }">
+                <v-tooltip :text="item.is_suppressed ? `${item.suppression_reason || 'Accepted'} · review ${$formatDate(item.suppression_expires_at)}` : 'Included in prioritization'">
+                  <template #activator="{ props }">
+                    <v-chip v-bind="props" size="small" :color="item.is_suppressed ? 'info' : 'success'" variant="tonal">
+                      <v-icon size="16" class="mr-1">{{ item.is_suppressed ? 'mdi-shield-check-outline' : 'mdi-radar' }}</v-icon>
+                      {{ item.is_suppressed ? 'Accepted' : 'Active' }}
+                    </v-chip>
+                  </template>
+                </v-tooltip>
+              </template>
               <template v-slot:item.description="{ item }">
                 <div class="text-truncate" style="max-width: 300px;" :title="getDescriptionWithFallback(item)">
                   <div class="d-flex align-center">
@@ -311,6 +339,7 @@ import api from '../plugins/axios'
 import { notificationService } from '../plugins/notifications'
 import { debounce } from '../utils/debounce'
 import { getVulnerabilityTypeColor, getSeverityColor, getEpssColor, getEpssSourceColor, getEpssSourceIcon, getEpssSourceDisplay } from '../utils/colors'
+import { useAuthStore } from '../stores/auth'
 import type { Vulnerability, PaginatedResponse } from '../types/interfaces'
 
 interface SortItem { key: string; order: 'asc' | 'desc' }
@@ -329,6 +358,7 @@ const areSortByEqual = (left: readonly SortItem[], right: readonly SortItem[]) =
 
 const router = useRouter()
 const route = useRoute()
+const authStore = useAuthStore()
 
 // Reactive data
 const vulnerabilities = ref<Vulnerability[]>([])
@@ -348,11 +378,13 @@ const searchQuery = ref('')
 const severityFilter = ref('')
 const typeFilter = ref('')
 const fixableFilter = ref(false)
+const suppressedFilter = ref<boolean | null>(null)
 const activeFilter = ref('')
 
 // Cleanup orphaned
 const cleanupOrphanedDialog = ref(false)
 const cleanupOrphanedLoading = ref(false)
+const cleanupOrphanedCount = ref<number | null>(null)
 
 // Filter options
 const severityOptions = [
@@ -371,6 +403,11 @@ const typeOptions = [
   { title: 'NPM', value: 'NPM' }
 ] as const
 
+const suppressionOptions = [
+  { title: 'Accepted risk', value: true },
+  { title: 'Active findings', value: false },
+] as const
+
 // Table configuration
 const headers = [
   { title: 'Vulnerability ID', key: 'vulnerability_id', sortable: true },
@@ -380,12 +417,24 @@ const headers = [
   { title: 'CISA KEV', key: 'cisa_kev', sortable: true },
   { title: 'Exploit', key: 'exploit_available', sortable: true },
   { title: 'Details', key: 'has_details', sortable: true },
+  { title: 'Risk status', key: 'is_suppressed', sortable: false },
   { title: 'Updated', key: 'updated_at', sortable: true, width: '210px' },
   { title: 'Description', key: 'description', sortable: false }
 ] as const
 
-const openCleanupOrphanedDialog = () => {
+const openCleanupOrphanedDialog = async () => {
   cleanupOrphanedDialog.value = true
+  cleanupOrphanedCount.value = null
+  cleanupOrphanedLoading.value = true
+  try {
+    const response = await api.get<{ orphaned: number }>('vulnerabilities/cleanup-orphaned/')
+    cleanupOrphanedCount.value = response.data.orphaned || 0
+  } catch {
+    cleanupOrphanedDialog.value = false
+    notificationService.error('Failed to check orphaned vulnerabilities')
+  } finally {
+    cleanupOrphanedLoading.value = false
+  }
 }
 
 const confirmCleanupOrphaned = async () => {
@@ -424,6 +473,7 @@ const fetchVulnerabilities = async () => {
     if (severityFilter.value) params.severity = severityFilter.value
     if (typeFilter.value) params.vulnerability_type = typeFilter.value
     if (fixableFilter.value) params.fixable = 'true'
+    if (suppressedFilter.value !== null) params.suppressed = String(suppressedFilter.value)
     
     // Add special filters from URL parameters
     if (route.query.cisa_kev === 'true') params.cisa_kev = 'true'

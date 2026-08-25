@@ -2,7 +2,7 @@ from django.contrib import admin
 from django.contrib import messages
 from django.utils import timezone
 from django.db import models
-from .models import AuditEvent, Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, VulnerabilityDetails, ContainerRegistry, ComponentVersionVulnerability, Release, RepositoryTagRelease, ScanArtifact, ScanRun, ThreatIntelSnapshot
+from .models import AuditEvent, Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, VulnerabilityDetails, ContainerRegistry, ComponentVersionVulnerability, Release, RepositoryTagRelease, ScanArtifact, ScanRun, ThreatIntelSnapshot, RiskAcceptance
 from .tasks import update_vulnerability_details
 
 
@@ -99,6 +99,26 @@ class AuditEventAdmin(admin.ModelAdmin):
         return False
 
     def has_change_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(RiskAcceptance)
+class RiskAcceptanceAdmin(admin.ModelAdmin):
+    list_display = ('vulnerability', 'status', 'expires_at', 'created_by', 'created_at')
+    list_filter = ('status', 'expires_at')
+    search_fields = ('vulnerability__vulnerability_id', 'reason', 'created_by__username')
+    readonly_fields = (
+        'uuid', 'vulnerability', 'reason', 'status', 'expires_at', 'created_by',
+        'revoked_by', 'revoked_at', 'created_at', 'updated_at',
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
         return False
 
 

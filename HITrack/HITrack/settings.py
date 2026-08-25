@@ -12,22 +12,34 @@ https://docs.djangoproject.com/en/5.0/ref/settings/
 
 from pathlib import Path
 import os
+import hashlib
+from django.core.exceptions import ImproperlyConfigured
 from kombu import Queue
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
-# Quick-start development settings - unsuitable for production
-# See https://docs.djangoproject.com/en/5.0/howto/deployment/checklist/
+def env_bool(name, default=False):
+    return os.getenv(name, str(default)).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def env_list(name, default=''):
+    return [item.strip() for item in os.getenv(name, default).split(',') if item.strip()]
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-24!b901jksa90zf)8#t&n86kjxy2f_8m&og5oy*f9q^%8a&4j1'
+DEBUG = env_bool('DJANGO_DEBUG', True)
+SECRET_KEY = os.getenv('DJANGO_SECRET_KEY')
+if not SECRET_KEY:
+    if not DEBUG:
+        raise ImproperlyConfigured('DJANGO_SECRET_KEY must be set when DJANGO_DEBUG is false')
+    # Stable local-only key. Production can never fall back to it.
+    SECRET_KEY = 'development-only-' + hashlib.sha256(str(BASE_DIR).encode()).hexdigest()
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
-
-ALLOWED_HOSTS = ['*']
+ALLOWED_HOSTS = env_list('DJANGO_ALLOWED_HOSTS', 'localhost,127.0.0.1,hitrack-api')
+if not DEBUG and not os.getenv('DJANGO_ALLOWED_HOSTS'):
+    raise ImproperlyConfigured('DJANGO_ALLOWED_HOSTS must be set when DJANGO_DEBUG is false')
 
 
 # Application definition
@@ -42,6 +54,7 @@ INSTALLED_APPS = [
     'init',
     'core',
     'rest_framework',
+    'rest_framework_simplejwt.token_blacklist',
     'celery',
     'django_celery_beat',
     'django_celery_results',
@@ -139,10 +152,25 @@ APPEND_SLASH = True
 # CORS settings
 # CORS_ALLOWED_ORIGINS = ['*']
 CORS_ALLOW_CREDENTIALS = True
-CORS_ALLOW_ALL_ORIGINS = True
+CORS_ALLOW_ALL_ORIGINS = env_bool('CORS_ALLOW_ALL_ORIGINS', DEBUG)
+CORS_ALLOWED_ORIGINS = env_list('CORS_ALLOWED_ORIGINS')
+CSRF_TRUSTED_ORIGINS = env_list(
+    'CSRF_TRUSTED_ORIGINS',
+    'http://localhost:1337,http://127.0.0.1:1337' if DEBUG else '',
+)
 
-CORS_ORIGIN_ALLOW_ALL = True
-CSRF_TRUSTED_ORIGINS = ['http://127.0.0.1:8000']
+SESSION_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_SECURE = not DEBUG
+SESSION_COOKIE_HTTPONLY = True
+CSRF_COOKIE_HTTPONLY = False  # required for conventional SPA CSRF handling
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_REFERRER_POLICY = 'same-origin'
+SECURE_SSL_REDIRECT = env_bool('SECURE_SSL_REDIRECT', False)
+SECURE_HSTS_SECONDS = int(os.getenv('SECURE_HSTS_SECONDS', '0'))
+SECURE_HSTS_INCLUDE_SUBDOMAINS = env_bool('SECURE_HSTS_INCLUDE_SUBDOMAINS', False)
+SECURE_HSTS_PRELOAD = env_bool('SECURE_HSTS_PRELOAD', False)
+if env_bool('TRUST_PROXY_HTTPS_HEADER', False):
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 # Application definition
 
 # Timeout settings
@@ -152,12 +180,15 @@ TIMEOUT = 300  # 5 minutes in seconds
 
 
 # REST Framework settings
+AUTHENTICATION_CLASSES = [
+    'rest_framework_simplejwt.authentication.JWTAuthentication',
+    'rest_framework.authentication.SessionAuthentication',
+]
+if env_bool('ENABLE_BASIC_AUTH', False):
+    AUTHENTICATION_CLASSES.append('rest_framework.authentication.BasicAuthentication')
+
 REST_FRAMEWORK = {
-    'DEFAULT_AUTHENTICATION_CLASSES': [
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
-        'rest_framework.authentication.SessionAuthentication',
-        'rest_framework.authentication.BasicAuthentication',
-    ],
+    'DEFAULT_AUTHENTICATION_CLASSES': AUTHENTICATION_CLASSES,
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
     ],
@@ -273,6 +304,8 @@ CELERY_TASK_ROUTES = {
     'Scan Repository': {'queue': 'scan', 'routing_key': 'scan'},
 
     'Periodic Repository Scan': {'queue': 'light', 'routing_key': 'light'},
+    'Sync JFrog Repositories': {'queue': 'light', 'routing_key': 'light'},
+    'Sync Single JFrog Registry': {'queue': 'light', 'routing_key': 'light'},
     'Rescan All Images with SBOM': {'queue': 'light', 'routing_key': 'light'},
     'Monitor Mass Rescan Progress': {'queue': 'light', 'routing_key': 'light'},
     'Update Components Latest Versions': {'queue': 'light', 'routing_key': 'light'},

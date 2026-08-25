@@ -13,6 +13,7 @@ from datetime import timedelta
 from urllib.parse import parse_qsl, unquote, urlparse
 
 import requests
+from django.core.cache import cache
 from django.utils import timezone
 from typing import List, Dict
 from django.db import connection, transaction
@@ -1127,7 +1128,6 @@ def _derive_same_registry_image_candidates(repository, registry, image_ref):
 def _resolve_helm_image_location(repository, repo_tag, registry, image_ref):
     from .models import ContainerRegistry, Image
     from .utils.registry import (
-        build_fallback_image_ref,
         build_fallback_image_ref_from_url,
         get_image_digest,
         to_docker_pull_ref,
@@ -1201,31 +1201,6 @@ def _resolve_helm_image_location(repository, repo_tag, registry, image_ref):
                 resolved_pull_ref,
                 None,
             )
-
-    fallback_repositories = list(
-        repository.image_fallback_repositories.filter(
-            repository_type='docker',
-            container_registry__isnull=False,
-        ).select_related('container_registry')
-    )
-    for candidate_ref in candidate_refs:
-        for fallback_repository in fallback_repositories:
-            if not fallback_repository.container_registry:
-                continue
-            fallback_ref = build_fallback_image_ref(fallback_repository, candidate_ref)
-            if not fallback_ref:
-                continue
-            fallback_digest = _normalize_image_digest(
-                get_image_digest(fallback_repository.container_registry, fallback_ref)
-            )
-            if fallback_digest:
-                resolved_pull_ref = to_docker_pull_ref(fallback_ref)
-                return (
-                    resolved_pull_ref,
-                    fallback_digest,
-                    resolved_pull_ref,
-                    None,
-                )
 
     for candidate_ref in candidate_refs:
         for fallback_entry in (getattr(registry, 'image_fallback_repositories', None) or []):
@@ -2338,9 +2313,6 @@ def process_all_tags():
     results = []
     active_repositories = Repository.objects.filter(status=True).select_related(
         'container_registry'
-    ).prefetch_related(
-        'image_fallback_repositories',
-        'image_fallback_repositories__container_registry',
     )
     logger.info(f"Found {active_repositories.count()} active repositories")
 
@@ -4090,9 +4062,6 @@ def process_single_tag(tag_uuid: str):
     try:
         tag = RepositoryTag.objects.select_related(
             'repository', 'repository__container_registry'
-        ).prefetch_related(
-            'repository__image_fallback_repositories',
-            'repository__image_fallback_repositories__container_registry',
         ).get(uuid=tag_uuid)
         # Set status to in_process
         tag.processing_status = 'in_process'
@@ -4533,6 +4502,168 @@ def deduplicate_images_by_identity():
             f"images removed across {summary['duplicate_groups_merged']} identity groups"
         ),
         "timestamp": timezone.now().isoformat(),
+    }
+
+
+@celery_app.task(
+    bind=True,
+    name="Sync Single JFrog Registry",
+    soft_time_limit=1800,
+    time_limit=2100,
+)
+def sync_single_jfrog_registry(
+    self,
+    registry_uuid: str,
+    include_docker: bool = True,
+    include_helm: bool = True,
+    activate_new: bool = True,
+    catalog_page_size: int = 500,
+    max_projects_per_repo_key: int | None = None,
+    batch_size: int = 500,
+):
+    """Discover and persist applications for one JFrog registry."""
+    from .models import ContainerRegistry
+    from .services.jfrog_discovery import sync_jfrog_registry_repositories
+
+    try:
+        registry = ContainerRegistry.objects.get(uuid=registry_uuid, provider='jfrog')
+    except ContainerRegistry.DoesNotExist as exc:
+        raise ValueError(f'JFrog registry {registry_uuid} was not found') from exc
+
+    lock_key = f'hitrack:jfrog-repository-sync:{registry.uuid}'
+    lock_owner = self.request.id or f'worker-{time.time_ns()}'
+    lock_acquired = False
+    try:
+        lock_acquired = cache.add(lock_key, lock_owner, timeout=2100)
+    except Exception as exc:
+        logger.warning(
+            "Could not acquire discovery lock for JFrog registry %s: %s; continuing",
+            registry.name,
+            exc,
+        )
+
+    if not lock_acquired:
+        try:
+            lock_exists = cache.get(lock_key) is not None
+        except Exception:
+            lock_exists = False
+        if lock_exists:
+            return {
+                'registry': registry.name,
+                'registry_uuid': str(registry.uuid),
+                'status': 'skipped',
+                'reason': 'sync_already_in_process',
+                'timestamp': timezone.now().isoformat(),
+            }
+
+    try:
+        result = sync_jfrog_registry_repositories(
+            registry,
+            include_docker=include_docker,
+            include_helm=include_helm,
+            activate_new=activate_new,
+            catalog_page_size=catalog_page_size,
+            max_projects_per_repo_key=max_projects_per_repo_key,
+            batch_size=batch_size,
+        )
+        result['task_name'] = 'Sync Single JFrog Registry'
+        result['timestamp'] = timezone.now().isoformat()
+        return result
+    finally:
+        if lock_acquired:
+            try:
+                if cache.get(lock_key) == lock_owner:
+                    cache.delete(lock_key)
+            except Exception as exc:
+                logger.warning(
+                    "Could not release discovery lock for JFrog registry %s: %s",
+                    registry.name,
+                    exc,
+                )
+
+
+@celery_app.task(name="Sync JFrog Repositories")
+def sync_jfrog_repositories(
+    registry_uuid: str | None = None,
+    include_docker: bool = True,
+    include_helm: bool = True,
+    activate_new: bool = True,
+    catalog_page_size: int = 500,
+    max_projects_per_repo_key: int | None = None,
+    batch_size: int = 500,
+):
+    """Queue one independent discovery job for every selected JFrog registry."""
+    from .models import ContainerRegistry
+    from .services.jfrog_discovery import validate_discovery_options
+
+    options = validate_discovery_options(
+        include_docker=include_docker,
+        include_helm=include_helm,
+        catalog_page_size=catalog_page_size,
+        max_projects_per_repo_key=max_projects_per_repo_key,
+        batch_size=batch_size,
+    )
+
+    registries = ContainerRegistry.objects.filter(provider='jfrog').order_by('name')
+    if registry_uuid:
+        registries = registries.filter(uuid=registry_uuid)
+        if not registries.exists():
+            raise ValueError(f'JFrog registry {registry_uuid} was not found')
+
+    child_kwargs = {
+        'include_docker': options['include_docker'],
+        'include_helm': options['include_helm'],
+        'activate_new': activate_new,
+        'catalog_page_size': options['catalog_page_size'],
+        'max_projects_per_repo_key': options['max_projects_per_repo_key'],
+        'batch_size': options['batch_size'],
+    }
+    results = []
+    for registry in registries:
+        try:
+            async_result = sync_single_jfrog_registry.apply_async(
+                args=[str(registry.uuid)],
+                kwargs=child_kwargs,
+            )
+            results.append({
+                'registry': registry.name,
+                'registry_uuid': str(registry.uuid),
+                'status': 'queued',
+                'task_id': async_result.id,
+            })
+        except Exception as exc:
+            logger.exception(
+                "Could not queue JFrog repository discovery for registry %s",
+                registry.name,
+            )
+            results.append({
+                'registry': registry.name,
+                'registry_uuid': str(registry.uuid),
+                'status': 'error',
+                'error': str(exc),
+            })
+
+    queued_count = sum(result['status'] == 'queued' for result in results)
+    failed_count = sum(result['status'] == 'error' for result in results)
+    if failed_count and not queued_count:
+        status = 'error'
+    elif failed_count:
+        status = 'partial'
+    elif queued_count:
+        status = 'queued'
+    else:
+        status = 'success'
+
+    return {
+        'status': status,
+        'task_name': 'Sync JFrog Repositories',
+        'summary': {
+            'registries_selected': len(results),
+            'registry_syncs_queued': queued_count,
+            'registry_syncs_failed_to_queue': failed_count,
+        },
+        'registries': results,
+        'timestamp': timezone.now().isoformat(),
     }
 
 

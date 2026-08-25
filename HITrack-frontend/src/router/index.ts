@@ -66,6 +66,12 @@ const router = createRouter({
       meta: { requiresAuth: true }
     },
     {
+      path: '/prioritization',
+      name: 'prioritization',
+      component: () => import('../views/PrioritizationView.vue'),
+      meta: { requiresAuth: true }
+    },
+    {
       path: '/vulnerabilities/:uuid',
       name: 'vulnerability-detail',
       component: () => import('../views/VulnerabilityDetailView.vue'),
@@ -99,6 +105,7 @@ const router = createRouter({
       path: '/repositories/:uuid',
       name: 'RepositoryDetail',
       component: () => import('../views/RepositoryDetailView.vue'),
+      meta: { requiresAuth: true },
     },
     {
       path: '/repository-tags/:uuid/images',

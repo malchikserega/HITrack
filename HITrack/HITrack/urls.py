@@ -18,10 +18,17 @@ from django.contrib import admin
 from django.urls import path, include
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
 from rest_framework_simplejwt.views import TokenVerifyView
-from core.auth import CookieTokenObtainPairView, CookieTokenRefreshView
+from core.auth import (
+    CookieTokenLogoutView,
+    CookieTokenObtainPairView,
+    CookieTokenRefreshView,
+    CurrentUserView,
+    HealthView,
+)
 from core.views import HasACRRegistryView, ListACRRegistriesView
 
 urlpatterns = [
+    path('api/health/', HealthView.as_view(), name='health'),
     path('admin/', admin.site.urls),
     path('api/', include('core.urls')),
     
@@ -29,6 +36,8 @@ urlpatterns = [
     path('api/auth/token/', CookieTokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('api/auth/token/refresh/', CookieTokenRefreshView.as_view(), name='token_refresh'),
     path('api/auth/token/verify/', TokenVerifyView.as_view(), name='token_verify'),
+    path('api/auth/logout/', CookieTokenLogoutView.as_view(), name='token_logout'),
+    path('api/auth/me/', CurrentUserView.as_view(), name='current_user'),
     
     # OpenAPI documentation URLs
     path('api/schema/', SpectacularAPIView.as_view(), name='schema'),

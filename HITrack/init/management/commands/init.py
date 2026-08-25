@@ -21,11 +21,18 @@ class Command(BaseCommand):
         if has_admin:
             logger.info('Superuser already exists')
             return
-        name = os.getenv('SUPERUSER_NAME', 'admin')
-        password = os.getenv('SUPERUSER_PSWD', 'P@ssw0rd')
+        name = os.getenv('SUPERUSER_NAME')
+        password = os.getenv('SUPERUSER_PSWD')
+        if not name and not password:
+            logger.warning(
+                'No active superuser exists. Set SUPERUSER_NAME and SUPERUSER_PSWD '
+                'or run `python manage.py createsuperuser`.'
+            )
+            return
+        if not name or not password:
+            raise ValueError('SUPERUSER_NAME and SUPERUSER_PSWD must be set together')
         user_model.objects.create_superuser(username=name, password=password, email='')
-        logger.info('Default superuser: admin, successfully created')
+        logger.info('Configured superuser %s successfully created', name)
 
     def handle(self, *args, **options):
         self._create_superuser()
-

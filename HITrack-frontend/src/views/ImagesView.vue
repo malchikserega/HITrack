@@ -16,6 +16,16 @@
             >
               Compare By Logical Name
             </v-btn>
+            <v-btn
+              v-if="authStore.canWrite"
+              variant="tonal"
+              color="error"
+              prepend-icon="mdi-broom"
+              :loading="cleanupOrphanedLoading"
+              @click="openCleanupOrphanedDialog"
+            >
+              Delete orphaned
+            </v-btn>
           </div>
         </v-col>
       </v-row>
@@ -309,6 +319,30 @@
           </v-card-actions>
         </v-card>
       </v-dialog>
+
+      <v-dialog v-model="cleanupOrphanedDialog" max-width="520px" persistent>
+        <v-card title="Delete orphaned images">
+          <v-card-text>
+            <template v-if="orphanedImageSummary === null">
+              Checking for registry images no longer linked to repository tags…
+            </template>
+            <template v-else>
+              <p><strong>{{ orphanedImageSummary.orphaned }}</strong> orphaned registry image{{ orphanedImageSummary.orphaned === 1 ? '' : 's' }} will be deleted.</p>
+              <p class="text-body-2 text-medium-emphasis mt-2">
+                {{ orphanedImageSummary.excluded_standalone }} manually created standalone image{{ orphanedImageSummary.excluded_standalone === 1 ? '' : 's' }}
+                and {{ orphanedImageSummary.excluded_active_scans }} active scan{{ orphanedImageSummary.excluded_active_scans === 1 ? '' : 's' }} are protected.
+              </p>
+              <p class="text-body-2 text-error mt-3">This action cannot be undone.</p>
+            </template>
+          </v-card-text>
+          <v-card-actions>
+            <v-spacer />
+            <v-btn variant="text" :disabled="cleanupOrphanedLoading" @click="cleanupOrphanedDialog = false">Cancel</v-btn>
+            <v-btn color="error" :loading="cleanupOrphanedLoading"
+              :disabled="!orphanedImageSummary?.orphaned" @click="confirmCleanupOrphanedImages">Delete orphaned</v-btn>
+          </v-card-actions>
+        </v-card>
+      </v-dialog>
     </v-container>
   </div>
 </template>
@@ -320,6 +354,15 @@ import api from '../plugins/axios'
 import { notificationService } from '../plugins/notifications'
 import type { Image, PaginatedResponse } from '../types/interfaces'
 import type { DataTableSortItem } from 'vuetify'
+import { useAuthStore } from '../stores/auth'
+
+interface OrphanedImageSummary {
+  orphaned: number
+  excluded_standalone: number
+  excluded_active_scans: number
+  deleted?: number
+  message?: string
+}
 
 const images = ref<Image[]>([])
 const loading = ref(false)
@@ -327,6 +370,9 @@ const saving = ref(false)
 const deleting = ref(false)
 const dialog = ref(false)
 const dialogDelete = ref(false)
+const cleanupOrphanedDialog = ref(false)
+const cleanupOrphanedLoading = ref(false)
+const orphanedImageSummary = ref<OrphanedImageSummary | null>(null)
 const scanAfterCreate = ref(true)
 const search = ref('')
 const page = ref(1)
@@ -373,7 +419,37 @@ const itemToDelete = ref<Image | null>(null)
 const formTitle = ref('New Image')
 const showUniqueFindings = ref(false)
 const router = useRouter()
+const authStore = useAuthStore()
 let refreshTimer: number | null = null
+
+const openCleanupOrphanedDialog = async () => {
+  cleanupOrphanedDialog.value = true
+  cleanupOrphanedLoading.value = true
+  orphanedImageSummary.value = null
+  try {
+    const response = await api.get<OrphanedImageSummary>('images/cleanup-orphaned/')
+    orphanedImageSummary.value = response.data
+  } catch {
+    cleanupOrphanedDialog.value = false
+    notificationService.error('Failed to check orphaned images')
+  } finally {
+    cleanupOrphanedLoading.value = false
+  }
+}
+
+const confirmCleanupOrphanedImages = async () => {
+  cleanupOrphanedLoading.value = true
+  try {
+    const response = await api.post<OrphanedImageSummary>('images/cleanup-orphaned/')
+    notificationService.success(response.data.message || `Removed ${response.data.deleted || 0} orphaned image(s).`)
+    cleanupOrphanedDialog.value = false
+    await fetchImages()
+  } catch {
+    notificationService.error('Failed to delete orphaned images')
+  } finally {
+    cleanupOrphanedLoading.value = false
+  }
+}
 
 const normalizeSortBy = (items?: readonly DataTableSortItem[]): DataTableSortItem[] =>
   (items || []).map((item) => {
