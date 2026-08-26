@@ -287,8 +287,10 @@ def _upsert_image_component_version_contexts(image, sbom_data=None):
 
 _PKG_VERSION_CACHE_TTL = 3600  # 1 hour
 VULNERABILITY_DETAILS_FRESHNESS_HOURS = 24
+PARTIAL_VULNERABILITY_DETAILS_FRESHNESS_HOURS = 6
 ENRICHMENT_BATCH_SIZE = 100
 CRITICAL_ENRICHMENT_BATCH_SIZE = 50
+INCOMPLETE_ENRICHMENT_DAILY_LIMIT = int(os.getenv('INCOMPLETE_ENRICHMENT_DAILY_LIMIT', '500'))
 _DEBIAN_DISTRO_SERIES_MAP = {
     "10": "buster",
     "11": "bullseye",
@@ -826,6 +828,22 @@ def _has_usable_vulnerability_enrichment(cve_details, exploit_info):
     return any(exploit_info.get(field) is True for field in meaningful_fields) or bool(
         exploit_info.get('exploit_links') or exploit_info.get('exploit_db_links')
     )
+
+
+def _vulnerability_enrichment_status(vulnerability_id, cve_details, exploit_info):
+    if not _has_usable_vulnerability_enrichment(cve_details, exploit_info):
+        return 'failed'
+    # Fresh CVEs are often published before CVSS or EPSS is available. Retain
+    # useful fields but retry these incomplete records sooner than full results.
+    if not cve_details or cve_details.get('cve_details_score') is None:
+        return 'partial'
+    normalized_id = str(vulnerability_id or '').upper()
+    if (
+        normalized_id.startswith('CVE-')
+        or cve_details.get('_linked_cve_id')
+    ) and cve_details.get('epss_score') is None:
+        return 'partial'
+    return 'success'
 
 
 def _normalize_image_digest(digest):
@@ -4998,9 +5016,14 @@ def update_vulnerability_details(vulnerability_uuid: str, force: bool = False):
             # successful once, but never use a failed attempt as a freshness marker.
             if successful_at is None and existing_details.enrichment_status == 'never':
                 successful_at = existing_details.last_updated
+            freshness_hours = (
+                PARTIAL_VULNERABILITY_DETAILS_FRESHNESS_HOURS
+                if existing_details.enrichment_status == 'partial'
+                else VULNERABILITY_DETAILS_FRESHNESS_HOURS
+            )
             if not force and (
                 successful_at and
-                (timezone.now() - successful_at) < timedelta(hours=VULNERABILITY_DETAILS_FRESHNESS_HOURS)
+                (timezone.now() - successful_at) < timedelta(hours=freshness_hours)
             ):
                 logger.info(f"Skipping {vulnerability.vulnerability_id} - updated recently")
                 return {
@@ -5021,9 +5044,17 @@ def update_vulnerability_details(vulnerability_uuid: str, force: bool = False):
             pass  # No existing details, will create new ones
 
         # Collect data from external sources
-        cve_details, exploit_info = collect_vulnerability_data(vulnerability.vulnerability_id)
+        cve_details, exploit_info = collect_vulnerability_data(
+            vulnerability.vulnerability_id,
+            force_refresh=force,
+        )
         now = timezone.now()
         enrichment_succeeded = _has_usable_vulnerability_enrichment(cve_details, exploit_info)
+        enrichment_status = _vulnerability_enrichment_status(
+            vulnerability.vulnerability_id,
+            cve_details,
+            exploit_info,
+        )
         # Empty default exploit payloads mean "no source response", not "clear all prior signals".
         exploit_info_to_apply = exploit_info if enrichment_succeeded else None
         data_sources = _build_vulnerability_data_sources(cve_details, exploit_info_to_apply)
@@ -5054,7 +5085,7 @@ def update_vulnerability_details(vulnerability_uuid: str, force: bool = False):
             if enrichment_succeeded:
                 details.data_source = ' + '.join(data_sources) if data_sources else details.data_source
                 details.last_successful_at = now
-                details.enrichment_status = 'success'
+                details.enrichment_status = enrichment_status
                 details.enrichment_error = ''
             else:
                 details.enrichment_status = 'failed'
@@ -5090,6 +5121,7 @@ def update_vulnerability_details(vulnerability_uuid: str, force: bool = False):
                 "cve_details_available": cve_details is not None,
                 "exploit_info_available": exploit_info is not None,
                 "enrichment_succeeded": enrichment_succeeded,
+                "enrichment_status": enrichment_status,
             },
             "data_sources": data_sources if data_sources else [],
             "processing_time": processing_time,
@@ -5138,9 +5170,23 @@ def update_all_vulnerability_details():
 
     try:
         cutoff_time = timezone.now() - timedelta(hours=VULNERABILITY_DETAILS_FRESHNESS_HOURS)
+        partial_cutoff_time = timezone.now() - timedelta(
+            hours=PARTIAL_VULNERABILITY_DETAILS_FRESHNESS_HOURS
+        )
         vulnerabilities = list(
             Vulnerability.objects.exclude(
-                details__last_successful_at__gte=cutoff_time
+                Q(
+                    details__enrichment_status='success',
+                    details__last_successful_at__gte=cutoff_time,
+                )
+                | Q(
+                    details__enrichment_status='partial',
+                    details__last_successful_at__gte=partial_cutoff_time,
+                )
+                | Q(
+                    details__enrichment_status='never',
+                    details__last_successful_at__gte=cutoff_time,
+                )
             ).only('uuid', 'vulnerability_id', 'vulnerability_type')
         )
         eligible_vulnerabilities = [
@@ -5233,6 +5279,64 @@ def update_all_vulnerability_details():
             "task_name": "Update All Vulnerability Details",
             "error": str(e)
         }
+
+
+@celery_app.task(name="Retry Incomplete Vulnerability Enrichment")
+def retry_incomplete_vulnerability_enrichment(limit: int | None = None):
+    """Retry source-lagged CVEs without refreshing the entire vulnerability table."""
+    from .models import Vulnerability
+
+    effective_limit = INCOMPLETE_ENRICHMENT_DAILY_LIMIT if limit is None else max(0, int(limit))
+    retry_cutoff = timezone.now() - timedelta(
+        hours=PARTIAL_VULNERABILITY_DETAILS_FRESHNESS_HOURS
+    )
+    candidates = Vulnerability.objects.filter(
+        Q(details__isnull=True)
+        | Q(
+            details__enrichment_status__in={'partial', 'failed'},
+            details__last_attempted_at__lt=retry_cutoff,
+        )
+        | Q(
+            details__enrichment_status__in={'partial', 'failed'},
+            details__last_attempted_at__isnull=True,
+        )
+    ).only('uuid', 'vulnerability_id', 'vulnerability_type').order_by(
+        'details__last_attempted_at', 'created_at'
+    )
+    if effective_limit:
+        candidates = candidates[:effective_limit]
+    else:
+        candidates = candidates.none()
+
+    vulnerability_uuids = [
+        str(vulnerability.uuid)
+        for vulnerability in candidates
+        if _is_supported_vulnerability_enrichment_target(
+            vulnerability.vulnerability_id,
+            vulnerability.vulnerability_type,
+        )
+    ]
+    task_ids = []
+    for batch in _chunked(vulnerability_uuids, ENRICHMENT_BATCH_SIZE):
+        task = update_vulnerability_details_bulk.apply_async(
+            args=[batch],
+            kwargs={'batch_size': min(50, len(batch))},
+            task_name="Update Vulnerability Details (Bulk)",
+        )
+        task_ids.append(task.id)
+
+    return {
+        'status': 'completed',
+        'task_name': 'Retry Incomplete Vulnerability Enrichment',
+        'summary': {
+            'scheduled_count': len(vulnerability_uuids),
+            'total_batches': len(task_ids),
+            'retry_after_hours': PARTIAL_VULNERABILITY_DETAILS_FRESHNESS_HOURS,
+            'limit': effective_limit,
+        },
+        'task_ids': task_ids,
+        'timestamp': timezone.now().isoformat(),
+    }
 
 
 @celery_app.task(name="Update Critical Vulnerability Details")
@@ -5553,6 +5657,11 @@ def update_vulnerability_details_bulk(vulnerability_uuids: List[str], batch_size
                             enrichment_succeeded = _has_usable_vulnerability_enrichment(
                                 cve_details, exploit_info,
                             )
+                            enrichment_status = _vulnerability_enrichment_status(
+                                vulnerability.vulnerability_id,
+                                cve_details,
+                                exploit_info,
+                            )
                             exploit_info_to_apply = exploit_info if enrichment_succeeded else None
                             if cve_details:
                                 for field, value in cve_details.items():
@@ -5572,7 +5681,7 @@ def update_vulnerability_details_bulk(vulnerability_uuids: List[str], batch_size
                             if enrichment_succeeded:
                                 details.data_source = ' + '.join(data_sources) if data_sources else details.data_source
                                 details.last_successful_at = now
-                                details.enrichment_status = 'success'
+                                details.enrichment_status = enrichment_status
                                 details.enrichment_error = ''
                             else:
                                 details.enrichment_status = 'failed'
