@@ -2939,6 +2939,31 @@ def update_components_latest_versions(image_uuid: str):
             "timestamp": timezone.now().isoformat()
         }
 
+def _schedule_vulnerability_enrichment(vulnerabilities) -> list[str]:
+    """Immediately queue enrichment for newly persisted supported findings."""
+    eligible_uuids = [
+        str(vulnerability.uuid)
+        for vulnerability in vulnerabilities
+        if _is_supported_vulnerability_enrichment_target(
+            vulnerability.vulnerability_id,
+            vulnerability.vulnerability_type,
+        )
+    ]
+    if not eligible_uuids:
+        return []
+    task = update_vulnerability_details_bulk.apply_async(
+        args=[eligible_uuids],
+        kwargs={'batch_size': min(50, len(eligible_uuids))},
+        task_name="Update Vulnerability Details (Bulk)",
+    )
+    logger.info(
+        "Queued immediate enrichment for %s newly detected vulnerabilities as task %s",
+        len(eligible_uuids),
+        task.id,
+    )
+    return eligible_uuids
+
+
 @celery_app.task(name="Process Grype Scan Results")
 def process_grype_scan_results(image_uuid: str, scan_results: dict, scan_run_uuid: str | None = None):
     """
@@ -2987,13 +3012,22 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict, scan_run_uui
 
         # Bulk create Vulnerabilities with optimized query
         existing_vulns = {v.vulnerability_id: v for v in Vulnerability.objects.filter(vulnerability_id__in=vuln_ids)}
-        new_vulns = [Vulnerability(vulnerability_id=vid) for vid in vuln_ids if vid not in existing_vulns]
+        new_vulnerability_ids = [vid for vid in vuln_ids if vid not in existing_vulns]
+        new_vulns = [Vulnerability(vulnerability_id=vid) for vid in new_vulnerability_ids]
         if new_vulns:
             Vulnerability.objects.bulk_create(new_vulns, ignore_conflicts=True)
             # Refresh cache only if new vulnerabilities were created
             existing_vulns.update({v.vulnerability_id: v for v in Vulnerability.objects.filter(
                 vulnerability_id__in=[nv.vulnerability_id for nv in new_vulns]
             )})
+            # Queue only after rows are visible in the database. Routing sends
+            # this work to the isolated enrichment worker, so image scanning is
+            # not blocked by external CVE/KEV/EPSS sources.
+            _schedule_vulnerability_enrichment([
+                existing_vulns[vulnerability_id]
+                for vulnerability_id in new_vulnerability_ids
+                if vulnerability_id in existing_vulns
+            ])
 
         # Bulk create ComponentVersions with optimized query
         existing_versions = {(cv.component.name, cv.version): cv for cv in ComponentVersion.objects.filter(

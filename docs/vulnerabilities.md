@@ -31,3 +31,5 @@ Only one active acceptance can exist per vulnerability. Creation and revocation 
 ## Enrichment
 
 Supported identifiers can be enriched with EPSS, CISA KEV, GitHub/OSV and exploit-related evidence. A failed external lookup records failure state without erasing previously successful data. Displayed timestamps distinguish last attempt from last successful update.
+
+When Grype first persists a supported CVE or GHSA identifier, HITrack immediately queues a batched enrichment job on `worker-enrichment`. Image result processing does not wait for external services: the base finding and component relationship become available first, while detailed intelligence follows asynchronously. Repeated scans of an already known identifier do not create duplicate immediate jobs; scheduled refresh tasks keep successful data current and retry missing or stale data.
