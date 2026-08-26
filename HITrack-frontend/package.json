@@ -22,7 +22,7 @@
     "chart.js": "^4.4.9",
     "chartjs-plugin-datalabels": "^2.2.0",
     "html2canvas": "^1.4.1",
-    "pinia": "^2.1.7",
+    "pinia": "^4.0.3",
     "vue": "^3.4.15",
     "vue-chartjs": "^5.3.2",
     "vue-router": "^4.2.5",
