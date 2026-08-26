@@ -322,6 +322,7 @@ CELERY_TASK_ROUTES = {
     'Collect Base Lineage Root Cause Analytics Snapshot': {'queue': 'enrichment', 'routing_key': 'enrichment'},
     'Update Vulnerability Details': {'queue': 'enrichment', 'routing_key': 'enrichment'},
     'Update All Vulnerability Details': {'queue': 'light', 'routing_key': 'light'},
+    'Retry Incomplete Vulnerability Enrichment': {'queue': 'enrichment', 'routing_key': 'enrichment'},
     'Update Critical Vulnerability Details': {'queue': 'light', 'routing_key': 'light'},
     'Cleanup Old Vulnerability Data': {'queue': 'light', 'routing_key': 'light'},
     'Update Vulnerability Details (Bulk)': {'queue': 'enrichment', 'routing_key': 'enrichment'},

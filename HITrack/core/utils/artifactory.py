@@ -27,6 +27,61 @@ logger = logging.getLogger(__name__)
 # Configuration
 PAGE_SIZE = 500
 
+
+def _digest_from_docker_pull(image_ref: str) -> Optional[str]:
+    """Resolve a digest through Docker without invoking a shell."""
+    try:
+        subprocess.run(["docker", "pull", image_ref], capture_output=True, check=True)
+        result = subprocess.run(
+            ["docker", "inspect", image_ref],
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+        inspect_data = json.loads(result.stdout)
+        repo_digests = inspect_data[0].get('RepoDigests', []) if inspect_data else []
+        return repo_digests[0].split('@', 1)[1] if repo_digests and '@' in repo_digests[0] else None
+    except Exception as exc:
+        logger.warning("Docker digest fallback failed for %s: %s", image_ref, exc)
+        return None
+
+
+def _artifactory_registry_hostname(registry_url: str) -> str:
+    normalized = _normalize_base_url(registry_url)
+    return urlparse(normalized).hostname or ''
+
+
+def _digest_via_artifactory_subdomain_api(
+    registry_url: str,
+    token: str,
+    image_ref: str,
+    base_hostname: str,
+) -> Optional[str]:
+    """Resolve ``<repo-key>.<host>/<image>:<tag>`` via Artifactory Docker API."""
+    raw_ref = image_ref.split('://', 1)[-1]
+    host, separator, remainder = raw_ref.partition('/')
+    suffix = f'.{base_hostname}'
+    if not separator or not host.endswith(suffix) or ':' not in remainder.rsplit('/', 1)[-1]:
+        return None
+    repo_key = host[:-len(suffix)]
+    image_name, tag = remainder.rsplit(':', 1)
+    if not repo_key or not image_name or not tag:
+        return None
+    try:
+        response = requests.get(
+            f"{_docker_api_base(registry_url, repo_key)}/v2/{image_name}/manifests/{tag}",
+            headers={
+                **_auth_headers(token),
+                'Accept': 'application/vnd.docker.distribution.manifest.v2+json',
+            },
+            timeout=60,
+        )
+        response.raise_for_status()
+        return response.headers.get('Docker-Content-Digest')
+    except requests.RequestException as exc:
+        logger.warning("Artifactory subdomain digest lookup failed for %s: %s", image_ref, exc)
+        return None
+
 def get_bearer_token(api_url: str, login: str, password: str) -> str:
     """
     Get auth token for Artifactory (Basic auth encoded).

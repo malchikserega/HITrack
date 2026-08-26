@@ -1,0 +1,13 @@
+[run]
+branch = True
+source = core
+omit =
+    core/migrations/*
+    core/tests/*
+
+[report]
+show_missing = True
+skip_covered = True
+
+[xml]
+output = coverage.xml

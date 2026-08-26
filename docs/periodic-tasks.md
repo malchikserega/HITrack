@@ -25,6 +25,7 @@ This is a starting point, not a universal retention or capacity policy:
 | `Sync JFrog Repositories` | daily, before tag discovery | Discover new JFrog repo keys, applications, and charts. Omit when JFrog is not used. |
 | `Periodic Repository Scan` | daily or every few hours | Select tags for all active repositories and queue their processing. |
 | `Update Critical Vulnerability Details` | daily | Refresh stale or missing critical/high-priority external details. |
+| `Retry Incomplete Vulnerability Enrichment` | daily, installed automatically | Retry only source-lagged partial/failed CVE and GHSA records after six hours. |
 | `Update All Vulnerability Details` | weekly | Refresh other supported vulnerability details in batches. Adjust for external API limits. |
 | `Update CISA KEV Vulnerabilities` | daily | Refresh CISA KEV flags. |
 | `Collect Weekly Threat Intel Snapshot` | daily | Persist the current rolling-week view and apply snapshot retention. |
@@ -121,6 +122,7 @@ Example for a deliberate 90-day policy:
 | Registered task | Arguments | Notes |
 | --- | --- | --- |
 | `Update Critical Vulnerability Details` | `{}` | Queues bulk enrichment for critical/stale targets. |
+| `Retry Incomplete Vulnerability Enrichment` | `{}` or `{"limit": 500}` | Retries partial/failed records older than six hours; capped by `INCOMPLETE_ENRICHMENT_DAILY_LIMIT`. |
 | `Update All Vulnerability Details` | `{}` | Queues batched enrichment for eligible records. |
 | `Update CISA KEV Vulnerabilities` | `{}` | Refreshes KEV data. |
 | `Cleanup Old Vulnerability Data` | `{}` | Deletes details older than 90 days only when the vulnerability has no linked component versions. |

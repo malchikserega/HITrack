@@ -5,9 +5,13 @@ on:
   push:
     branches: [main, fixes]
 
+permissions:
+  contents: read
+
 jobs:
   backend:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:17-alpine
@@ -24,19 +28,39 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: {python-version: '3.12'}
-      - run: pip install -r requirements.txt
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            HITrack/requirements.txt
+            HITrack/requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
       - run: pip install pip-audit
-      - run: pip-audit
+      - run: pip-audit -r requirements.txt
       - run: python manage.py check
         env: {DB_HOST: 127.0.0.1}
       - run: python manage.py makemigrations --check --dry-run
         env: {DB_HOST: 127.0.0.1}
-      - run: python manage.py test
+      - name: Run tests and enforce coverage
+        run: |
+          coverage run manage.py test
+          coverage report --fail-under=30
+          coverage report \
+            --include="core/auth.py,core/permissions.py,core/services/scans.py,core/services/jfrog_discovery.py,core/utils/acr.py,core/utils/artifactory.py,core/utils/ecr.py,core/utils/oci_registry.py,core/utils/registry.py" \
+            --fail-under=65
+          coverage xml
         env: {DB_HOST: 127.0.0.1}
+      - name: Upload backend coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: HITrack/coverage.xml
+          if-no-files-found: error
 
   frontend:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: HITrack-frontend
@@ -46,5 +70,6 @@ jobs:
         with: {node-version: 22, cache: npm, cache-dependency-path: HITrack-frontend/package-lock.json}
       - run: npm ci
       - run: npm audit --omit=dev --audit-level=high
+      - run: npm test
       - run: npm run type-check
       - run: npm run build
