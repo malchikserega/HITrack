@@ -11,3 +11,6 @@ __pycache__
 .env
 .env.local
 site/
+.coverage
+coverage.xml
+htmlcov/

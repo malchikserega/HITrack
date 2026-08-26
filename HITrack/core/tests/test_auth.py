@@ -42,6 +42,19 @@ class AuthenticationFlowTests(TestCase):
         response = self.client.post('/api/auth/logout/')
         self.assertEqual(response.status_code, 204)
 
+    def test_refresh_requires_cookie_and_rotates_refresh_cookie(self):
+        missing = self.client.post('/api/auth/token/refresh/', format='json')
+        self.assertEqual(missing.status_code, 401)
+
+        login = self.client.post('/api/auth/token/', {
+            'username': self.user.username, 'password': 'safe-test-password',
+        }, format='json')
+        refreshed = self.client.post('/api/auth/token/refresh/', format='json')
+        self.assertEqual(refreshed.status_code, 200)
+        self.assertIn('access', refreshed.data)
+        self.assertNotIn('refresh', refreshed.data)
+        self.assertTrue(self.client.cookies['hitrack_refresh']['httponly'])
+
     @patch('core.auth.cache.get', return_value='ok')
     @patch('core.auth.cache.set')
     def test_health_is_public_and_checks_dependencies(self, _cache_set, _cache_get):
@@ -62,3 +75,20 @@ class AuthenticationFlowTests(TestCase):
             format='json',
         )
         self.assertEqual(response.status_code, 403)
+
+    def test_unauthenticated_user_cannot_read_current_user_or_registries(self):
+        self.client.force_authenticate(user=None)
+        self.assertEqual(self.client.get('/api/auth/me/').status_code, 401)
+        self.assertEqual(self.client.get('/api/registries/').status_code, 401)
+
+    def test_security_admin_can_change_registry_policy(self):
+        admin = get_user_model().objects.create_user(username='admin-user', password='test-password')
+        admin.groups.add(Group.objects.create(name='admin'))
+        registry = ContainerRegistry.objects.create(name='admin-registry', provider='acr')
+        self.client.force_authenticate(admin)
+        response = self.client.patch(
+            f'/api/registries/{registry.uuid}/',
+            {'image_fallback_repositories': []},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200)
