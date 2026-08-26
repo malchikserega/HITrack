@@ -4018,7 +4018,9 @@ class VulnerabilityViewSet(BaseViewSet):
         vulnerability = self.get_object()
         
         # Trigger the update task
-        force = str(request.data.get('force', '')).lower() in {'1', 'true', 'yes'}
+        # This is an explicitly requested refresh. Default to bypassing freshness
+        # caches; API clients can still opt out with {"force": false}.
+        force = str(request.data.get('force', 'true')).lower() in {'1', 'true', 'yes'}
         task = update_vulnerability_details.delay(str(vulnerability.uuid), force=force)
         
         return Response({

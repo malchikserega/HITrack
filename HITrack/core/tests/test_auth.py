@@ -3,7 +3,7 @@ from django.contrib.auth.models import Group
 from django.test import TestCase
 from rest_framework.test import APIClient
 from unittest.mock import patch
-from core.models import ContainerRegistry
+from core.models import ContainerRegistry, Vulnerability
 
 
 class AuthenticationFlowTests(TestCase):
@@ -92,3 +92,23 @@ class AuthenticationFlowTests(TestCase):
             format='json',
         )
         self.assertEqual(response.status_code, 200)
+
+    @patch('core.tasks.update_vulnerability_details.delay')
+    def test_manual_vulnerability_enrichment_is_forced_by_default(self, delay):
+        delay.return_value.id = 'enrichment-task'
+        vulnerability = Vulnerability.objects.create(
+            vulnerability_id='CVE-2026-63074',
+            vulnerability_type='CVE',
+            severity='MEDIUM',
+        )
+        self.client.force_authenticate(self.user)
+
+        response = self.client.post(
+            f'/api/vulnerabilities/{vulnerability.uuid}/update_details/',
+            {},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data['force'])
+        delay.assert_called_once_with(str(vulnerability.uuid), force=True)
