@@ -35,7 +35,7 @@ def get_bearer_token(registry) -> str:
         from .artifactory import get_bearer_token as art_get_token
         return art_get_token(registry.api_url, registry.login, registry.password)
 
-    if registry.provider in {'gcr', 'dockerhub', 'harbor', 'ecr'}:
+    if registry.provider in {'gcr', 'dockerhub', 'harbor'}:
         # These providers use standard Registry v2 challenge-based auth.  A
         # persisted bearer token is usable by callers that explicitly need it;
         # discovery operations obtain correctly scoped tokens per request.
