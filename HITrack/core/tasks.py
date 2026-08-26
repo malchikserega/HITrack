@@ -1811,7 +1811,7 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
     import json
     import tempfile
     import os
-    from .utils.registry import get_bearer_token, get_image_digest
+    from .utils.registry import get_docker_login_credentials, get_image_digest
 
     logger.info(f"Starting SBOM generation for image {image_uuid}")
     
@@ -1853,13 +1853,12 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
             image.save()
             raise ValueError("Unsafe image reference")
 
-        # Get registry token if available
+        # Resolve registry metadata without performing network authentication.
+        # A locally available image must remain scannable even when its source
+        # registry is temporarily unavailable.
         registry = None
-        token = None
         if image.repository_tags.exists():
             registry = image.repository_tags.first().repository.container_registry
-            if registry:
-                token = get_bearer_token(registry)
 
         # Prefer the image already present in the worker's Docker daemon. This
         # permits scanning images built locally without publishing them first.
@@ -1875,29 +1874,20 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
                 subprocess.run(["docker", "pull", image_ref], capture_output=True, check=True)
                 downloaded_by_task = True
             except subprocess.CalledProcessError:
-                if token and registry:
+                credentials = get_docker_login_credentials(registry) if registry else None
+                if credentials:
                     # Try with registry authentication
                     registry_host = image_ref.split('/')[0]
                     logger.info(f"First pull failed, trying with registry authentication for {registry_host}")
-                    # Artifactory uses username/password; ACR uses token with special username
-                    if getattr(registry, 'provider', None) == 'jfrog':
-                        login_process = subprocess.Popen(
-                            ["docker", "login", registry_host, "-u", registry.login, "--password-stdin"],
-                            stdin=subprocess.PIPE,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE,
-                            text=True
-                        )
-                        _, stderr = login_process.communicate(input=registry.password)
-                    else:
-                        login_process = subprocess.Popen(
-                            ["docker", "login", registry_host, "-u", "00000000-0000-0000-0000-000000000000", "--password-stdin"],
-                            stdin=subprocess.PIPE,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE,
-                            text=True
-                        )
-                        _, stderr = login_process.communicate(input=token)
+                    login_username, login_password = credentials
+                    login_process = subprocess.Popen(
+                        ["docker", "login", registry_host, "-u", login_username, "--password-stdin"],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True
+                    )
+                    _, stderr = login_process.communicate(input=login_password)
 
                     # Check if login failed
                     if login_process.returncode != 0:
@@ -3764,10 +3754,7 @@ def scan_repository_tags(
         # Get registry
         registry = repository.container_registry
         if not registry:
-            logger.warning(f"No registry found for repository {repository.name}")
-            repository.scan_status = 'error'
-            repository.save()
-            return
+            raise RuntimeError(f"No registry configured for repository {repository.name}")
 
         all_tag_tuples = []  # (tag_name, image_path or None)
         jfrog_new_style = registry.provider == 'jfrog' and repository.repo_key
@@ -3792,10 +3779,9 @@ def scan_repository_tags(
                 try:
                     helm_entries = get_helm_chart_versions(registry, rk)
                 except Exception as e:
-                    logger.error(f"Failed to get Helm index for {repository.name}: {e}")
-                    repository.scan_status = 'error'
-                    repository.save()
-                    return
+                    raise RuntimeError(
+                        f"Failed to get Helm index for {repository.name}: {e}"
+                    ) from e
                 # Filter for this specific chart only
                 helm_entries = [(ver, chart) for ver, chart in helm_entries if chart == image_name]
                 if limited_selection and helm_entries:
@@ -3817,10 +3803,9 @@ def scan_repository_tags(
                         image_name=image_name,
                     ))
                 except Exception as e:
-                    logger.error(f"Failed to get tags for {repository.name}: {e}")
-                    repository.scan_status = 'error'
-                    repository.save()
-                    return
+                    raise RuntimeError(
+                        f"Failed to get tags for {repository.name}: {e}"
+                    ) from e
                 if limited_selection and tags:
                     tags = select_tags(tags)
                 all_tag_tuples = [(t, None) for t in tags]
@@ -3835,10 +3820,9 @@ def scan_repository_tags(
                 try:
                     helm_entries = get_helm_chart_versions(registry, repository.name)
                 except Exception as e:
-                    logger.error(f"Failed to get Helm index for {repository.name}: {e}")
-                    repository.scan_status = 'error'
-                    repository.save()
-                    return
+                    raise RuntimeError(
+                        f"Failed to get Helm index for {repository.name}: {e}"
+                    ) from e
                 if limited_selection and helm_entries:
                     entries_by_chart = defaultdict(list)
                     for version, chart in helm_entries:
@@ -3854,13 +3838,13 @@ def scan_repository_tags(
                 try:
                     image_names, _ = get_catalog(registry, repository.name, page_size=500)
                 except Exception as e:
-                    logger.error(f"Failed to get catalog for {repository.name}: {e}")
-                    repository.scan_status = 'error'
-                    repository.save()
-                    return
+                    raise RuntimeError(
+                        f"Failed to get catalog for {repository.name}: {e}"
+                    ) from e
                 if limited_selection:
                     image_names = image_names[:SCAN_LATEST_ONLY_MAX_IMAGES]
                 logger.info(f"Found {len(image_names)} images in Artifactory repo {repository.name}" + (f" ({effective_selection_mode})" if limited_selection else ""))
+                tag_discovery_errors = []
                 for img in image_names:
                     try:
                         tags = list(get_tags(
@@ -3875,6 +3859,12 @@ def scan_repository_tags(
                             all_tag_tuples.append((tag_name, img))
                     except Exception as e:
                         logger.warning(f"Failed to get tags for image {img}: {e}")
+                        tag_discovery_errors.append(f"{img}: {e}")
+                if tag_discovery_errors:
+                    raise RuntimeError(
+                        "Failed to completely discover JFrog image tags: "
+                        + "; ".join(tag_discovery_errors[:3])
+                    )
                 if all_tag_tuples and repository.repository_type in ('none', 'Unknown'):
                     repository.repository_type = 'docker'
                     repository.save()

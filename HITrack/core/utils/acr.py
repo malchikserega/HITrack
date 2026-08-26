@@ -21,6 +21,12 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 PAGE_SIZE = 500
+MANIFEST_ACCEPT = ", ".join([
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.oci.image.manifest.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+    "application/vnd.docker.distribution.manifest.v2+json",
+])
 
 def get_bearer_token(api_url: str, login: str, password: str) -> str:
     """
@@ -40,10 +46,17 @@ def get_bearer_token(api_url: str, login: str, password: str) -> str:
     try:
         b64 = base64.b64encode(f"{login}:{password}".encode()).decode()
         scope = urllib.parse.quote("repository:*:* registry:catalog:*", safe='')
-        svc = api_url.split("//")[1]
-        url = f"{api_url}/oauth2/token?service={svc}&scope={scope}"
+        endpoint = api_url.strip().rstrip('/')
+        if '://' not in endpoint:
+            endpoint = f"https://{endpoint}"
+        svc = urllib.parse.urlparse(endpoint).netloc
+        url = f"{endpoint}/oauth2/token?api-version=2021-07-01&service={svc}&scope={scope}"
 
-        response = requests.get(url, headers={"Authorization": f"Basic {b64}"})
+        response = requests.get(
+            url,
+            headers={"Authorization": f"Basic {b64}"},
+            timeout=30,
+        )
         response.raise_for_status()
         return response.json()["access_token"]
     except requests.RequestException as e:
@@ -81,7 +94,7 @@ def get_paged_data(url: str, token: str) -> Generator[dict, None, None]:
         except requests.RequestException as e:
             logger.error(f"Failed to fetch data from {url}: {e}")
             logger.error(f"Response content: {getattr(e.response, 'text', None)}")
-            break
+            raise
 
 
 def get_repositories(api_url: str, token: str, page_size: int = 100, last_repo: str = None) -> Tuple[list, str]:
@@ -101,7 +114,7 @@ def get_repositories(api_url: str, token: str, page_size: int = 100, last_repo: 
     if last_repo:
         url += f"&last={last_repo}"
         
-    response = requests.get(url, headers={'Authorization': f'Bearer {token}'})
+    response = requests.get(url, headers={'Authorization': f'Bearer {token}'}, timeout=30)
     response.raise_for_status()
     
     data = response.json()
@@ -163,9 +176,13 @@ def get_manifest(api_url: str, token: str, repo: str, tag: str) -> Tuple[Optiona
     try:
         headers = {
             "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.oci.image.manifest.v1+json"
+            "Accept": MANIFEST_ACCEPT,
         }
-        response = requests.get(f"{api_url}/v2/{repo}/manifests/{tag}", headers=headers)
+        response = requests.get(
+            f"{api_url.rstrip('/')}/v2/{repo}/manifests/{tag}",
+            headers=headers,
+            timeout=30,
+        )
         response.raise_for_status()
         return response.json(), response.headers.get("Docker-Content-Digest")
     except requests.RequestException as e:

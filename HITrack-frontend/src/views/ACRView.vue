@@ -464,13 +464,20 @@ interface RepoItem {
 
 const providerOptions: { title: string; value: RegistryProvider }[] = [
   { title: 'Azure Container Registry', value: 'acr' },
-  { title: 'JFrog Artifactory', value: 'jfrog' }
+  { title: 'JFrog Artifactory', value: 'jfrog' },
+  { title: 'Google Container Registry', value: 'gcr' },
+  { title: 'Harbor', value: 'harbor' },
+  { title: 'Docker Hub', value: 'dockerhub' },
+  { title: 'Amazon ECR', value: 'ecr' },
 ]
 
 const provider = ref<RegistryProvider>('acr')
 const registries = ref<ContainerRegistry[]>([])
 const selectedRegistry = ref<string | null>(null)
 const isJfrog = computed(() => provider.value === 'jfrog')
+const providerTitle = computed(() =>
+  providerOptions.find(option => option.value === provider.value)?.title ?? 'Container Registry'
+)
 
 const dialog = ref(false)
 const currentStep = ref(1)
@@ -546,20 +553,16 @@ const canAdvance = computed(() => {
 })
 
 const registrySelectLabel = computed(() =>
-  isJfrog.value ? 'Select Artifactory Registry' : 'Select ACR Registry'
+  `Select ${providerTitle.value}`
 )
 const addFromButtonLabel = computed(() =>
-  isJfrog.value ? 'Add from Artifactory' : 'Add from ACR'
+  `Add from ${providerTitle.value}`
 )
 const noRegistryMessage = computed(() =>
-  isJfrog.value
-    ? 'No JFrog Artifactory registry found in database'
-    : 'No Azure Container Registry found in database'
+  `No ${providerTitle.value} registry found in database`
 )
 const dialogTitle = computed(() =>
-  isJfrog.value
-    ? 'Add Repositories (Artifactory)'
-    : 'Add Repositories (ACR)'
+  `Add Repositories (${providerTitle.value})`
 )
 
 const filteredRepositories = computed(() => {
@@ -769,7 +772,7 @@ const registryNameByUuid = (uuid: string) => {
 const loadAllRegistries = async () => {
   try {
     const results: { uuid: string; name: string; provider: string }[] = []
-    for (const prov of ['acr', 'jfrog'] as const) {
+    for (const prov of providerOptions.map(option => option.value)) {
       const resp = await api.get('registries/', { params: { provider: prov } })
       for (const r of resp.data.registries ?? []) {
         results.push({ uuid: r.uuid, name: r.name, provider: prov })

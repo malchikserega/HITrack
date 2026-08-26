@@ -2192,8 +2192,8 @@ class RepositoryViewSet(BaseViewSet):
     @action(detail=False, methods=['get'])
     def get_acr_repos(self, request):
         """
-        Get repositories from container registry (ACR or Artifactory) with pagination.
-        Uses registry's native pagination. Pass provider='acr' or provider='jfrog'.
+        Get repositories from ACR, JFrog, GCR, Harbor, or Docker Hub with pagination.
+        Uses the selected registry's native discovery API.
 
         For JFrog, pass repo_key + package_type to list individual images/charts
         inside a repo key (step 2 of the two-phase discovery).
@@ -4217,19 +4217,21 @@ class ListACRRegistriesView(GenericAPIView):
 
 
 class ListRegistriesView(GenericAPIView):
-    """List container registries by provider (acr or jfrog). Used by frontend for ACR and Artifactory."""
+    """List configured container registries by supported provider."""
     permission_classes = [IsAuthenticated]
     serializer_class = ListACRRegistriesResponseSerializer
 
     def get(self, request):
         provider = request.query_params.get('provider', 'acr')
-        if provider not in ('acr', 'jfrog'):
+        supported_providers = {choice[0] for choice in ContainerRegistry.PROVIDER_CHOICES}
+        if provider not in supported_providers:
             return Response({'registries': []})
         registries = ContainerRegistry.objects.filter(provider=provider)
         data = [
             {
                 'uuid': str(r.uuid),
                 'name': r.name,
+                'provider': r.provider,
                 'api_url': r.api_url,
                 'image_fallback_repositories': r.image_fallback_repositories or [],
             }
@@ -4247,6 +4249,7 @@ class RegistryDetailView(GenericAPIView):
         return {
             'uuid': str(registry.uuid),
             'name': registry.name,
+            'provider': registry.provider,
             'api_url': registry.api_url,
             'image_fallback_repositories': registry.image_fallback_repositories or [],
         }
