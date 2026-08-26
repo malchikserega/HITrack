@@ -245,7 +245,7 @@ def get_tags(api_url: str, token: str, repo: str, limit: int = None) -> Generato
     count = 0
     while url:
         try:
-            response = requests.get(url, headers=headers)
+            response = requests.get(url, headers=headers, timeout=30)
             response.raise_for_status()
             data = response.json()
             tags = data.get('tags') or []
@@ -258,7 +258,7 @@ def get_tags(api_url: str, token: str, repo: str, limit: int = None) -> Generato
             url = response.links.get('next', {}).get('url') or None
         except requests.RequestException as e:
             logger.error(f"Failed to fetch tags from {url}: {e}")
-            break
+            raise RuntimeError(f"Artifactory tag request failed: {e}") from e
 
 
 def get_manifest(api_url: str, token: str, repo: str, tag: str) -> Tuple[Optional[dict], Optional[str]]:
@@ -280,12 +280,16 @@ def get_manifest(api_url: str, token: str, repo: str, tag: str) -> Tuple[Optiona
             **_auth_headers(token),
             "Accept": "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"
         }
-        response = requests.get(f"{base}/v2/{repo}/manifests/{tag}", headers=headers)
+        response = requests.get(
+            f"{base}/v2/{repo}/manifests/{tag}",
+            headers=headers,
+            timeout=30,
+        )
         response.raise_for_status()
         return response.json(), response.headers.get("Docker-Content-Digest")
     except requests.RequestException as e:
         logger.error(f"Failed to get manifest for {repo}:{tag}: {e}")
-        return None, None
+        raise RuntimeError(f"Artifactory manifest request failed for {repo}:{tag}: {e}") from e
 
 
 def is_helm_chart(manifest: dict) -> bool:
@@ -341,13 +345,13 @@ def get_helm_index(api_url: str, token: str, repo_key: str) -> List[Dict[str, An
         response.raise_for_status()
     except requests.RequestException as e:
         logger.warning("Failed to fetch Helm index for %s: %s", repo_key, e)
-        return []
+        raise RuntimeError(f"Failed to fetch Helm index for {repo_key}: {e}") from e
 
     try:
         data = yaml.safe_load(response.text)
     except yaml.YAMLError as e:
         logger.warning("Invalid YAML in Helm index for %s: %s", repo_key, e)
-        return []
+        raise RuntimeError(f"Invalid Helm index YAML for {repo_key}: {e}") from e
 
     if not data or not isinstance(data.get("entries"), dict):
         return []

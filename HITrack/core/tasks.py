@@ -1811,7 +1811,7 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
     import json
     import tempfile
     import os
-    from .utils.registry import get_bearer_token, get_image_digest
+    from .utils.registry import get_docker_login_credentials, get_image_digest
 
     logger.info(f"Starting SBOM generation for image {image_uuid}")
     
@@ -1853,13 +1853,12 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
             image.save()
             raise ValueError("Unsafe image reference")
 
-        # Get registry token if available
+        # Resolve registry metadata without performing network authentication.
+        # A locally available image must remain scannable even when its source
+        # registry is temporarily unavailable.
         registry = None
-        token = None
         if image.repository_tags.exists():
             registry = image.repository_tags.first().repository.container_registry
-            if registry:
-                token = get_bearer_token(registry)
 
         # Prefer the image already present in the worker's Docker daemon. This
         # permits scanning images built locally without publishing them first.
@@ -1875,29 +1874,20 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
                 subprocess.run(["docker", "pull", image_ref], capture_output=True, check=True)
                 downloaded_by_task = True
             except subprocess.CalledProcessError:
-                if token and registry:
+                credentials = get_docker_login_credentials(registry) if registry else None
+                if credentials:
                     # Try with registry authentication
                     registry_host = image_ref.split('/')[0]
                     logger.info(f"First pull failed, trying with registry authentication for {registry_host}")
-                    # Artifactory uses username/password; ACR uses token with special username
-                    if getattr(registry, 'provider', None) == 'jfrog':
-                        login_process = subprocess.Popen(
-                            ["docker", "login", registry_host, "-u", registry.login, "--password-stdin"],
-                            stdin=subprocess.PIPE,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE,
-                            text=True
-                        )
-                        _, stderr = login_process.communicate(input=registry.password)
-                    else:
-                        login_process = subprocess.Popen(
-                            ["docker", "login", registry_host, "-u", "00000000-0000-0000-0000-000000000000", "--password-stdin"],
-                            stdin=subprocess.PIPE,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE,
-                            text=True
-                        )
-                        _, stderr = login_process.communicate(input=token)
+                    login_username, login_password = credentials
+                    login_process = subprocess.Popen(
+                        ["docker", "login", registry_host, "-u", login_username, "--password-stdin"],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True
+                    )
+                    _, stderr = login_process.communicate(input=login_password)
 
                     # Check if login failed
                     if login_process.returncode != 0:
@@ -2949,6 +2939,31 @@ def update_components_latest_versions(image_uuid: str):
             "timestamp": timezone.now().isoformat()
         }
 
+def _schedule_vulnerability_enrichment(vulnerabilities) -> list[str]:
+    """Immediately queue enrichment for newly persisted supported findings."""
+    eligible_uuids = [
+        str(vulnerability.uuid)
+        for vulnerability in vulnerabilities
+        if _is_supported_vulnerability_enrichment_target(
+            vulnerability.vulnerability_id,
+            vulnerability.vulnerability_type,
+        )
+    ]
+    if not eligible_uuids:
+        return []
+    task = update_vulnerability_details_bulk.apply_async(
+        args=[eligible_uuids],
+        kwargs={'batch_size': min(50, len(eligible_uuids))},
+        task_name="Update Vulnerability Details (Bulk)",
+    )
+    logger.info(
+        "Queued immediate enrichment for %s newly detected vulnerabilities as task %s",
+        len(eligible_uuids),
+        task.id,
+    )
+    return eligible_uuids
+
+
 @celery_app.task(name="Process Grype Scan Results")
 def process_grype_scan_results(image_uuid: str, scan_results: dict, scan_run_uuid: str | None = None):
     """
@@ -2997,13 +3012,22 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict, scan_run_uui
 
         # Bulk create Vulnerabilities with optimized query
         existing_vulns = {v.vulnerability_id: v for v in Vulnerability.objects.filter(vulnerability_id__in=vuln_ids)}
-        new_vulns = [Vulnerability(vulnerability_id=vid) for vid in vuln_ids if vid not in existing_vulns]
+        new_vulnerability_ids = [vid for vid in vuln_ids if vid not in existing_vulns]
+        new_vulns = [Vulnerability(vulnerability_id=vid) for vid in new_vulnerability_ids]
         if new_vulns:
             Vulnerability.objects.bulk_create(new_vulns, ignore_conflicts=True)
             # Refresh cache only if new vulnerabilities were created
             existing_vulns.update({v.vulnerability_id: v for v in Vulnerability.objects.filter(
                 vulnerability_id__in=[nv.vulnerability_id for nv in new_vulns]
             )})
+            # Queue only after rows are visible in the database. Routing sends
+            # this work to the isolated enrichment worker, so image scanning is
+            # not blocked by external CVE/KEV/EPSS sources.
+            _schedule_vulnerability_enrichment([
+                existing_vulns[vulnerability_id]
+                for vulnerability_id in new_vulnerability_ids
+                if vulnerability_id in existing_vulns
+            ])
 
         # Bulk create ComponentVersions with optimized query
         existing_versions = {(cv.component.name, cv.version): cv for cv in ComponentVersion.objects.filter(
@@ -3764,10 +3788,7 @@ def scan_repository_tags(
         # Get registry
         registry = repository.container_registry
         if not registry:
-            logger.warning(f"No registry found for repository {repository.name}")
-            repository.scan_status = 'error'
-            repository.save()
-            return
+            raise RuntimeError(f"No registry configured for repository {repository.name}")
 
         all_tag_tuples = []  # (tag_name, image_path or None)
         jfrog_new_style = registry.provider == 'jfrog' and repository.repo_key
@@ -3792,10 +3813,9 @@ def scan_repository_tags(
                 try:
                     helm_entries = get_helm_chart_versions(registry, rk)
                 except Exception as e:
-                    logger.error(f"Failed to get Helm index for {repository.name}: {e}")
-                    repository.scan_status = 'error'
-                    repository.save()
-                    return
+                    raise RuntimeError(
+                        f"Failed to get Helm index for {repository.name}: {e}"
+                    ) from e
                 # Filter for this specific chart only
                 helm_entries = [(ver, chart) for ver, chart in helm_entries if chart == image_name]
                 if limited_selection and helm_entries:
@@ -3817,10 +3837,9 @@ def scan_repository_tags(
                         image_name=image_name,
                     ))
                 except Exception as e:
-                    logger.error(f"Failed to get tags for {repository.name}: {e}")
-                    repository.scan_status = 'error'
-                    repository.save()
-                    return
+                    raise RuntimeError(
+                        f"Failed to get tags for {repository.name}: {e}"
+                    ) from e
                 if limited_selection and tags:
                     tags = select_tags(tags)
                 all_tag_tuples = [(t, None) for t in tags]
@@ -3835,10 +3854,9 @@ def scan_repository_tags(
                 try:
                     helm_entries = get_helm_chart_versions(registry, repository.name)
                 except Exception as e:
-                    logger.error(f"Failed to get Helm index for {repository.name}: {e}")
-                    repository.scan_status = 'error'
-                    repository.save()
-                    return
+                    raise RuntimeError(
+                        f"Failed to get Helm index for {repository.name}: {e}"
+                    ) from e
                 if limited_selection and helm_entries:
                     entries_by_chart = defaultdict(list)
                     for version, chart in helm_entries:
@@ -3854,13 +3872,13 @@ def scan_repository_tags(
                 try:
                     image_names, _ = get_catalog(registry, repository.name, page_size=500)
                 except Exception as e:
-                    logger.error(f"Failed to get catalog for {repository.name}: {e}")
-                    repository.scan_status = 'error'
-                    repository.save()
-                    return
+                    raise RuntimeError(
+                        f"Failed to get catalog for {repository.name}: {e}"
+                    ) from e
                 if limited_selection:
                     image_names = image_names[:SCAN_LATEST_ONLY_MAX_IMAGES]
                 logger.info(f"Found {len(image_names)} images in Artifactory repo {repository.name}" + (f" ({effective_selection_mode})" if limited_selection else ""))
+                tag_discovery_errors = []
                 for img in image_names:
                     try:
                         tags = list(get_tags(
@@ -3875,6 +3893,12 @@ def scan_repository_tags(
                             all_tag_tuples.append((tag_name, img))
                     except Exception as e:
                         logger.warning(f"Failed to get tags for image {img}: {e}")
+                        tag_discovery_errors.append(f"{img}: {e}")
+                if tag_discovery_errors:
+                    raise RuntimeError(
+                        "Failed to completely discover JFrog image tags: "
+                        + "; ".join(tag_discovery_errors[:3])
+                    )
                 if all_tag_tuples and repository.repository_type in ('none', 'Unknown'):
                     repository.repository_type = 'docker'
                     repository.save()

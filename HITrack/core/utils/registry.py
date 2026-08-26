@@ -1,7 +1,5 @@
 """
-Registry abstraction: dispatches to ACR or Artifactory based on provider.
-Allows the app to support both Azure Container Registry and JFrog Artifactory
-as scanning sources with a single interface.
+Registry abstraction for ACR, JFrog, GCR, Harbor, and Docker Hub.
 """
 
 from typing import Generator, List, Optional, Tuple
@@ -14,12 +12,34 @@ from .acr import is_helm_chart, get_chart_digest
 _TOKEN_TTL = 270  # ACR tokens are valid ~300s; refresh 30s early
 
 
+def get_docker_login_credentials(registry) -> Optional[Tuple[str, str]]:
+    """Return credentials suitable for ``docker login`` without logging them."""
+    if not registry:
+        return None
+    if registry.provider == 'ecr':
+        from .ecr import get_docker_login_credentials as ecr_credentials
+        return ecr_credentials(registry)
+    if registry.provider == 'acr':
+        if registry.login and registry.password:
+            return registry.login, registry.password
+        token = registry.token or get_bearer_token(registry)
+        return ("00000000-0000-0000-0000-000000000000", token) if token else None
+    password = registry.password or registry.token or ''
+    return (registry.login, password) if registry.login and password else None
+
+
 def get_bearer_token(registry) -> str:
     """Get auth token for the given registry (ACR Bearer or Artifactory Basic).
     ACR tokens are cached in Redis to avoid repeated HTTP token requests."""
     if registry.provider == 'jfrog':
         from .artifactory import get_bearer_token as art_get_token
         return art_get_token(registry.api_url, registry.login, registry.password)
+
+    if registry.provider in {'gcr', 'dockerhub', 'harbor'}:
+        # These providers use standard Registry v2 challenge-based auth.  A
+        # persisted bearer token is usable by callers that explicitly need it;
+        # discovery operations obtain correctly scoped tokens per request.
+        return registry.token or ''
 
     cache_key = f'acr_token:{registry.pk}'
     token = cache.get(cache_key)
@@ -46,6 +66,15 @@ def get_repositories(registry, page_size: int = 100, last_repo: str = None) -> T
         combined = [(r[0], r[1], 'docker') for r in docker_repos]
         combined.extend([(r[0], r[1], 'helm') for r in helm_repos])
         return (combined, None)
+    if registry.provider == 'dockerhub':
+        from .oci_registry import get_dockerhub_repositories
+        return get_dockerhub_repositories(registry, page_size=page_size, last_repo=last_repo)
+    if registry.provider == 'ecr':
+        from .ecr import get_repositories as ecr_get_repositories
+        return ecr_get_repositories(registry, page_size=page_size, last_repo=last_repo)
+    if registry.provider in {'gcr', 'harbor'}:
+        from .oci_registry import get_repositories as oci_get_repositories
+        return oci_get_repositories(registry, page_size=page_size, last_repo=last_repo)
     from .acr import get_repositories as acr_get_repos
     return acr_get_repos(registry.api_url, token, page_size=page_size, last_repo=last_repo)
 
@@ -62,6 +91,12 @@ def get_tags(registry, repo: str, limit: int = None, image_name: str = None) -> 
             docker_base = _docker_api_base(registry.api_url, repo)
             return art_get_tags(docker_base, token, image_name, limit=limit)
         return art_get_tags(registry.api_url, token, repo, limit=limit)
+    if registry.provider in {'gcr', 'dockerhub', 'harbor'}:
+        from .oci_registry import get_tags as oci_get_tags
+        return oci_get_tags(registry, repo, limit=limit)
+    if registry.provider == 'ecr':
+        from .ecr import get_tags as ecr_get_tags
+        return ecr_get_tags(registry, repo, limit=limit)
     from .acr import get_tags as acr_get_tags
     return acr_get_tags(registry.api_url, token, repo, limit=limit)
 
@@ -84,6 +119,12 @@ def get_manifest(registry, repo: str, tag: str, image_name: str = None) -> Tuple
             docker_base = _docker_api_base(registry.api_url, repo)
             return art_get_manifest(docker_base, token, image_name, tag)
         return art_get_manifest(registry.api_url, token, repo, tag)
+    if registry.provider in {'gcr', 'dockerhub', 'harbor'}:
+        from .oci_registry import get_manifest as oci_get_manifest
+        return oci_get_manifest(registry, repo, tag)
+    if registry.provider == 'ecr':
+        from .ecr import get_manifest as ecr_get_manifest
+        return ecr_get_manifest(registry, repo, tag)
     from .acr import get_manifest as acr_get_manifest
     return acr_get_manifest(registry.api_url, token, repo, tag)
 
@@ -116,6 +157,12 @@ def get_image_digest(registry, image_ref: str) -> Optional[str]:
     if registry.provider == 'jfrog':
         from .artifactory import get_artifactory_image_digest
         return get_artifactory_image_digest(registry.api_url, get_bearer_token(registry), image_ref)
+    if registry.provider in {'gcr', 'dockerhub', 'harbor'}:
+        from .oci_registry import get_image_digest as oci_get_image_digest
+        return oci_get_image_digest(registry, image_ref)
+    if registry.provider == 'ecr':
+        from .ecr import get_image_digest as ecr_get_image_digest
+        return ecr_get_image_digest(registry, image_ref)
     from .acr import get_acr_image_digest
     return get_acr_image_digest(registry.api_url, get_bearer_token(registry), image_ref)
 
@@ -209,6 +256,20 @@ def get_helm_images(registry, repo: str, digest: str) -> List[str]:
     if registry and registry.provider == 'jfrog':
         from .artifactory import get_helm_images as art_get_helm_images
         return art_get_helm_images(api_url, token, repo, digest)
+    if registry and registry.provider in {'gcr', 'dockerhub', 'harbor'}:
+        from .helm import extract_images_from_chart_blob
+        from .oci_registry import get_blob
+        return extract_images_from_chart_blob(
+            get_blob(registry, repo, digest),
+            f"{repo}:{digest}",
+        )
+    if registry and registry.provider == 'ecr':
+        from .ecr import get_blob
+        from .helm import extract_images_from_chart_blob
+        return extract_images_from_chart_blob(
+            get_blob(registry, repo, digest),
+            f"{repo}:{digest}",
+        )
     from .acr import get_helm_images as acr_get_helm_images
     return acr_get_helm_images(api_url, token, repo, digest)
 

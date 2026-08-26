@@ -24,7 +24,8 @@ For a selected Docker tag, HITrack:
 7. stores components, versions, image-specific contexts, and locations;
 8. runs Grype and stores its raw result;
 9. maps findings, fix metadata, and image summaries into the database;
-10. updates image, tag, and repository states.
+10. immediately queues enrichment for newly persisted CVE/GHSA identifiers;
+11. updates image, tag, and repository states.
 
 The local-image check is exact. A locally built `local/app:1.0` does not satisfy a scan for `registry.example/local/app:1.0` unless that second reference is also tagged in the same Docker daemon.
 
