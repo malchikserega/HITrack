@@ -545,8 +545,8 @@ export interface Stats {
   components: number
 }
 
-/** Container registry provider (ACR or Artifactory) */
-export type RegistryProvider = 'acr' | 'jfrog'
+/** Container registry provider supported by the backend. */
+export type RegistryProvider = 'acr' | 'jfrog' | 'gcr' | 'dockerhub' | 'harbor' | 'ecr'
 
 export interface RegistryFallbackEntry {
   url: string
@@ -557,6 +557,7 @@ export interface RegistryFallbackEntry {
 export interface ContainerRegistry {
   uuid: string
   name: string
+  provider: RegistryProvider
   api_url: string
   image_fallback_repositories?: RegistryFallbackEntry[]
 }
