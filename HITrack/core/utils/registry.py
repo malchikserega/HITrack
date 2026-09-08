@@ -57,6 +57,9 @@ def get_repositories(registry, page_size: int = 100, last_repo: str = None) -> T
     For jfrog: returns both Docker and Helm repo keys; each item is (name, url, package_type).
     For acr: returns (name, url) per repo.
     """
+    if registry.provider == 'ecr':
+        from .ecr import get_repositories as ecr_get_repositories
+        return ecr_get_repositories(registry, page_size=page_size, last_repo=last_repo)
     token = get_bearer_token(registry)
     if registry.provider == 'jfrog':
         from .artifactory import get_repositories_rest
@@ -69,9 +72,6 @@ def get_repositories(registry, page_size: int = 100, last_repo: str = None) -> T
     if registry.provider == 'dockerhub':
         from .oci_registry import get_dockerhub_repositories
         return get_dockerhub_repositories(registry, page_size=page_size, last_repo=last_repo)
-    if registry.provider == 'ecr':
-        from .ecr import get_repositories as ecr_get_repositories
-        return ecr_get_repositories(registry, page_size=page_size, last_repo=last_repo)
     if registry.provider in {'gcr', 'harbor'}:
         from .oci_registry import get_repositories as oci_get_repositories
         return oci_get_repositories(registry, page_size=page_size, last_repo=last_repo)

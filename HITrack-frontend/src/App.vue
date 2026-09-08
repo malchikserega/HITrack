@@ -217,6 +217,7 @@ const menuItems = [
   { title: 'Threat Intelligence', path: '/threat-intel' },
   { title: 'Recent Activities', path: '/activities' },
   { title: 'Releases', path: '/releases' },
+  { title: 'Clusters', path: '/clusters' },
   { title: 'Task Management', path: '/tasks' },
   { title: 'Container Registries', path: '/acr' },
   { title: 'Report Generator', path: '/reports' },

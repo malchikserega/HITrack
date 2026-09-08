@@ -2,7 +2,7 @@ from rest_framework import serializers
 from rest_framework.validators import UniqueValidator
 from drf_spectacular.utils import extend_schema_field
 from django.db.models import Count, Q
-from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ComponentVersionVulnerability, Release, RepositoryTagRelease, VulnerabilityDetails, ComponentLocation, ImageComponentVersionContext, RiskAcceptance
+from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ComponentVersionVulnerability, Release, RepositoryTagRelease, VulnerabilityDetails, ComponentLocation, ImageComponentVersionContext, RiskAcceptance, Cluster, ClusterImage
 from collections import Counter, defaultdict
 from .utils.status import (
     resolve_repository_scan_status,
@@ -1792,6 +1792,44 @@ class RepositoryTagReleaseSerializer(serializers.ModelSerializer):
 
 class ReleaseAssignmentSerializer(serializers.Serializer):
     release_id = serializers.UUIDField() 
+
+
+class ClusterSerializer(serializers.ModelSerializer):
+    images_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Cluster
+        fields = ['uuid', 'name', 'description', 'images_count', 'created_at', 'updated_at']
+        read_only_fields = ['uuid', 'created_at', 'updated_at']
+
+    def get_images_count(self, obj):
+        return getattr(obj, 'images_count', None) if hasattr(obj, 'images_count') else obj.images.count()
+
+    def validate_name(self, value):
+        queryset = Cluster.objects.filter(name__iexact=value.strip())
+        if self.instance:
+            queryset = queryset.exclude(pk=self.instance.pk)
+        if queryset.exists():
+            raise serializers.ValidationError('Cluster with this name already exists.')
+        return value.strip()
+
+
+class ClusterImageSerializer(serializers.ModelSerializer):
+    uuid = serializers.UUIDField(source='image.uuid', read_only=True)
+    name = serializers.CharField(source='image.name', read_only=True)
+    digest = serializers.CharField(source='image.digest', read_only=True)
+    scan_status = serializers.CharField(source='image.scan_status', read_only=True)
+    registry = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ClusterImage
+        fields = ['uuid', 'name', 'source_reference', 'digest', 'scan_status', 'registry', 'added_at']
+
+    def get_registry(self, obj):
+        registry = obj.image.container_registry
+        if not registry:
+            return None
+        return {'uuid': str(registry.uuid), 'name': registry.name, 'provider': registry.provider}
 
 
 class TaskResultSerializer(serializers.ModelSerializer):

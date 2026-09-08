@@ -4,7 +4,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.generics import ListAPIView, GenericAPIView
 from django_filters.rest_framework import DjangoFilterBackend
-from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ContainerRegistry, ComponentVersionVulnerability, Release, RepositoryTagRelease, VulnerabilityDetails, ComponentLocation, ImageComponentVersionContext, RiskAcceptance
+from .models import Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, ContainerRegistry, ComponentVersionVulnerability, Release, RepositoryTagRelease, VulnerabilityDetails, ComponentLocation, ImageComponentVersionContext, RiskAcceptance, Cluster, ClusterImage
 from .serializers import (
     RepositorySerializer, RepositoryDetailSerializer, RepositoryTagSerializer, ImageSerializer, ImageListSerializer,
     ComponentSerializer, ComponentVersionSerializer, VulnerabilitySerializer, VulnerabilityShortSerializer, ComponentListSerializer,
@@ -22,6 +22,7 @@ from .serializers import (
     RootCauseRepositoryPreviewSerializer, RootCauseVulnerabilityPreviewSerializer,
     BaseLineageComponentPreviewSerializer,
     RiskAcceptanceSerializer, RiskAcceptanceCreateSerializer,
+    ClusterSerializer, ClusterImageSerializer,
 )
 from django.db import models, transaction
 from .pagination import CustomPageNumberPagination
@@ -2694,15 +2695,17 @@ class ImageViewSet(BaseViewSet):
     def cleanup_orphaned(self, request):
         """Remove registry images no longer linked to a repository tag.
 
-        Manually created standalone images and images with active scans are
-        deliberately excluded.
+        Manually created standalone images, cluster-linked images, and images
+        with active scans are deliberately excluded.
         """
         unlinked = Image.objects.annotate(
-            repository_tag_count=Count('repository_tags', distinct=True)
+            repository_tag_count=Count('repository_tags', distinct=True),
+            cluster_count=Count('clusters', distinct=True),
         ).filter(repository_tag_count=0)
         standalone_filter = Q(artifact_reference__isnull=True) | Q(artifact_reference='')
         standalone_count = unlinked.filter(standalone_filter).count()
-        registry_images = unlinked.exclude(standalone_filter)
+        cluster_linked_count = unlinked.filter(cluster_count__gt=0).count()
+        registry_images = unlinked.exclude(standalone_filter).filter(cluster_count=0)
         active_count = registry_images.filter(
             scan_status__in=['pending', 'in_process']
         ).count()
@@ -2711,6 +2714,7 @@ class ImageViewSet(BaseViewSet):
         payload = {
             'orphaned': count,
             'excluded_standalone': standalone_count,
+            'excluded_cluster_linked': cluster_linked_count,
             'excluded_active_scans': active_count,
         }
 
@@ -3525,6 +3529,135 @@ class ComponentVersionViewSet(BaseViewSet):
             'locations': location_data,
             'total_count': locations_qs.count()
         })
+
+class ClusterViewSet(BaseViewSet):
+    queryset = Cluster.objects.all()
+    serializer_class = ClusterSerializer
+    search_fields = ['name', 'description']
+    ordering_fields = ['name', 'created_at', 'updated_at', 'images_count']
+
+    def get_queryset(self):
+        return super().get_queryset().annotate(images_count=Count('images', distinct=True))
+
+    @staticmethod
+    def _image_values(request):
+        values = request.data.get('images', [])
+        if isinstance(values, str):
+            return values.splitlines()
+        if isinstance(values, list):
+            return values
+        return None
+
+    @action(detail=False, methods=['post'], url_path='check-images')
+    def check_images(self, request):
+        from .services.clusters import inspect_image_references
+
+        values = self._image_values(request)
+        if values is None:
+            return Response({'images': ['Must be a list or newline-delimited string.']}, status=400)
+        rows = inspect_image_references(values)
+        return Response({
+            'results': rows,
+            'summary': {
+                'total': len(rows),
+                'existing': sum(1 for row in rows if row.get('exists')),
+                'missing': sum(1 for row in rows if row.get('valid') and not row.get('exists')),
+                'invalid': sum(1 for row in rows if not row.get('valid')),
+                'authenticated': sum(1 for row in rows if row.get('authenticated_scan')),
+            },
+        })
+
+    @action(detail=True, methods=['get'])
+    def contents(self, request, uuid=None):
+        cluster = self.get_object()
+        links = cluster.image_links.select_related('image', 'image__container_registry').all()
+        return Response({
+            'cluster': ClusterSerializer(cluster).data,
+            'images': ClusterImageSerializer(links, many=True).data,
+        })
+
+    @action(detail=True, methods=['post'], url_path='attach-images')
+    def attach_images(self, request, uuid=None):
+        from .services.clusters import (
+            find_existing_image,
+            find_registry_for_reference,
+            normalize_image_reference,
+        )
+        from .tasks import generate_sbom_and_create_components
+
+        values = self._image_values(request)
+        if values is None:
+            return Response({'images': ['Must be a list or newline-delimited string.']}, status=400)
+        create_values = request.data.get('create_references', [])
+        scan_values = request.data.get('scan_references', [])
+        if not isinstance(create_values, list) or not isinstance(scan_values, list):
+            return Response({'error': 'create_references and scan_references must be lists.'}, status=400)
+        create_references = {str(value).strip().lower() for value in create_values}
+        scan_references = {str(value).strip().lower() for value in scan_values}
+        cluster = self.get_object()
+        results = []
+        scheduled = []
+        seen = set()
+
+        for raw_value in values:
+            try:
+                reference = normalize_image_reference(raw_value)
+            except ValueError as exc:
+                results.append({'reference': str(raw_value or '').strip(), 'status': 'invalid', 'error': str(exc)})
+                continue
+            key = reference.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            registry = find_registry_for_reference(reference)
+
+            with transaction.atomic():
+                image = find_existing_image(reference)
+                created = False
+                if image is None and key in create_references:
+                    image = Image.objects.create(
+                        name=reference,
+                        artifact_reference=reference,
+                        container_registry=registry,
+                    )
+                    created = True
+                if image is None:
+                    results.append({'reference': reference, 'status': 'missing'})
+                    continue
+                if registry and image.container_registry_id is None:
+                    image.container_registry = registry
+                    image.save(update_fields=['container_registry', 'updated_at'])
+                _link, attached = ClusterImage.objects.get_or_create(
+                    cluster=cluster,
+                    image=image,
+                    defaults={'source_reference': reference},
+                )
+
+            scan_scheduled = False
+            if key in scan_references and image.scan_status not in {'pending', 'in_process'}:
+                image.scan_status = 'pending'
+                image.save(update_fields=['scan_status', 'updated_at'])
+                task = generate_sbom_and_create_components.delay(str(image.uuid), 'docker')
+                scheduled.append({'image_uuid': str(image.uuid), 'task_id': task.id})
+                scan_scheduled = True
+            results.append({
+                'reference': reference,
+                'status': 'created' if created else ('attached' if attached else 'already_attached'),
+                'image_uuid': str(image.uuid),
+                'registry': registry.name if registry else None,
+                'scan_scheduled': scan_scheduled,
+            })
+
+        return Response({'results': results, 'scheduled': scheduled})
+
+    @action(detail=True, methods=['delete'], url_path=r'images/(?P<image_uuid>[^/.]+)')
+    def remove_image(self, request, uuid=None, image_uuid=None):
+        cluster = self.get_object()
+        deleted, _ = ClusterImage.objects.filter(cluster=cluster, image_id=image_uuid).delete()
+        if not deleted:
+            return Response({'error': 'Image is not attached to this cluster.'}, status=404)
+        return Response(status=204)
+
 
 class ReleaseViewSet(BaseViewSet):
     """
