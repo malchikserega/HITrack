@@ -130,6 +130,12 @@ const router = createRouter({
       meta: { requiresAuth: true }
     },
     {
+      path: '/clusters',
+      name: 'clusters',
+      component: () => import('../views/ClustersView.vue'),
+      meta: { requiresAuth: true }
+    },
+    {
       path: '/tasks',
       name: 'tasks',
       component: () => import('../views/TaskManagementView.vue'),

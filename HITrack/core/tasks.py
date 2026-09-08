@@ -1291,6 +1291,20 @@ def _select_sbom_pull_reference(image, art_type='docker'):
     return fallback_ref
 
 
+def _select_image_registry(image):
+    """Choose credentials for an image, including repository-less cluster images."""
+    if image.container_registry_id:
+        return image.container_registry
+    return next(
+        (
+            linked_tag.repository.container_registry
+            for linked_tag in image.repository_tags.all()
+            if linked_tag.repository.container_registry_id
+        ),
+        None,
+    )
+
+
 def _reconcile_helm_tag_images(repo_tag, keep_image_ids):
     keep_ids = set(keep_image_ids or [])
     repository = repo_tag.repository
@@ -1835,7 +1849,7 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
     
     try:
         # Get image with prefetched related data
-        image = Image.objects.select_related().prefetch_related(
+        image = Image.objects.select_related('container_registry').prefetch_related(
             'repository_tags__repository__container_registry',
             'component_versions__component',
             'component_versions__vulnerabilities'
@@ -1874,9 +1888,7 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
         # Resolve registry metadata without performing network authentication.
         # A locally available image must remain scannable even when its source
         # registry is temporarily unavailable.
-        registry = None
-        if image.repository_tags.exists():
-            registry = image.repository_tags.first().repository.container_registry
+        registry = _select_image_registry(image)
 
         # Prefer the image already present in the worker's Docker daemon. This
         # permits scanning images built locally without publishing them first.

@@ -7,7 +7,7 @@ from .views import (
     StatsViewSet, JobViewSet, HasACRRegistryView, ListACRRegistriesView,
     ListRegistriesView, RegistryDetailView,
     RepositoryTagListForRepositoryView, ReportGeneratorView,
-    ComponentMatrixView, ReleaseViewSet, VulnerabilityDetailsViewSet,
+    ComponentMatrixView, ReleaseViewSet, ClusterViewSet, VulnerabilityDetailsViewSet,
     TaskManagementViewSet, PeriodicTaskViewSet, TestTaskViewSet, TestViewSet
 )
 
@@ -20,6 +20,7 @@ router.register(r'component-versions', ComponentVersionViewSet)
 router.register(r'vulnerabilities', VulnerabilityViewSet, basename='vulnerability')
 router.register(r'vulnerability-details', VulnerabilityDetailsViewSet, basename='vulnerability-details')
 router.register(r'releases', ReleaseViewSet, basename='release')
+router.register(r'clusters', ClusterViewSet, basename='cluster')
 router.register(r'stats', StatsViewSet, basename='stats')
 router.register(r'jobs', JobViewSet, basename='job')
 router.register(r'tasks', TaskManagementViewSet, basename='task')

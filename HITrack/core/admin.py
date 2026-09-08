@@ -2,7 +2,7 @@ from django.contrib import admin
 from django.contrib import messages
 from django.utils import timezone
 from django.db import models
-from .models import AuditEvent, Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, VulnerabilityDetails, ContainerRegistry, ComponentVersionVulnerability, Release, RepositoryTagRelease, ScanArtifact, ScanRun, ThreatIntelSnapshot, RiskAcceptance
+from .models import AuditEvent, Repository, RepositoryTag, Image, Component, ComponentVersion, Vulnerability, VulnerabilityDetails, ContainerRegistry, ComponentVersionVulnerability, Release, RepositoryTagRelease, ScanArtifact, ScanRun, ThreatIntelSnapshot, RiskAcceptance, Cluster, ClusterImage
 from .tasks import update_vulnerability_details
 
 
@@ -70,6 +70,7 @@ class ImageAdmin(admin.ModelAdmin):
     search_fields = ('name', 'digest')
     list_filter = ('scan_status',)
     filter_horizontal = ('repository_tags',)
+    raw_id_fields = ('container_registry',)
 
 
 @admin.register(ScanRun)
@@ -449,4 +450,19 @@ class RepositoryTagReleaseAdmin(admin.ModelAdmin):
     search_fields = ('repository_tag__tag', 'repository_tag__repository__name', 'release__name')
     list_filter = ('release',)
     raw_id_fields = ('repository_tag', 'release')
+    readonly_fields = ('added_at',)
+
+
+@admin.register(Cluster)
+class ClusterAdmin(admin.ModelAdmin):
+    list_display = ('name', 'created_at', 'updated_at')
+    search_fields = ('name', 'description')
+    readonly_fields = ('created_at', 'updated_at')
+
+
+@admin.register(ClusterImage)
+class ClusterImageAdmin(admin.ModelAdmin):
+    list_display = ('cluster', 'source_reference', 'image', 'added_at')
+    search_fields = ('cluster__name', 'source_reference', 'image__name')
+    raw_id_fields = ('cluster', 'image')
     readonly_fields = ('added_at',)
