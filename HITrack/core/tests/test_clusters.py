@@ -1,4 +1,5 @@
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import call, patch
 
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group
@@ -105,3 +106,52 @@ class ClusterApiTests(TestCase):
         )
 
         self.assertEqual(_select_image_registry(image), self.registry)
+
+    def test_contents_returns_durable_scan_progress(self):
+        statuses = ['success', 'error', 'pending', 'none']
+        for index, scan_status in enumerate(statuses):
+            image = Image.objects.create(name=f'registry.example.com/app:{index}', scan_status=scan_status)
+            ClusterImage.objects.create(cluster=self.cluster, image=image, source_reference=image.name)
+
+        response = self.client.get(f'/api/clusters/{self.cluster.uuid}/contents/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['progress'], {
+            'state': 'running',
+            'total': 4,
+            'completed': 2,
+            'remaining': 2,
+            'pending': 1,
+            'in_process': 0,
+            'success': 1,
+            'error': 1,
+            'not_started': 1,
+            'active': True,
+            'percent': 50.0,
+        })
+
+    @patch('core.tasks.generate_sbom_and_create_components.delay')
+    def test_scan_all_queues_every_non_active_image_and_returns_progress(self, delay):
+        delay.side_effect = [SimpleNamespace(id='task-1'), SimpleNamespace(id='task-2')]
+        images = [
+            Image.objects.create(name='registry.example.com/api:1', scan_status='success'),
+            Image.objects.create(name='registry.example.com/worker:1', scan_status='none'),
+            Image.objects.create(name='registry.example.com/running:1', scan_status='in_process'),
+        ]
+        for image in images:
+            ClusterImage.objects.create(cluster=self.cluster, image=image, source_reference=image.name)
+
+        response = self.client.post(f'/api/clusters/{self.cluster.uuid}/scan-all/', {}, format='json')
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(len(response.data['scheduled']), 2)
+        self.assertEqual(response.data['already_running'], [str(images[2].uuid)])
+        self.assertEqual(response.data['progress']['total'], 3)
+        self.assertEqual(response.data['progress']['remaining'], 3)
+        self.assertEqual(response.data['progress']['pending'], 2)
+        self.assertEqual(response.data['progress']['in_process'], 1)
+        self.assertTrue(response.data['progress']['active'])
+        delay.assert_has_calls([
+            call(image_uuid=str(images[0].uuid), art_type='docker'),
+            call(image_uuid=str(images[1].uuid), art_type='docker'),
+        ], any_order=True)

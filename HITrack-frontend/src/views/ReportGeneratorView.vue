@@ -29,10 +29,46 @@
                 <v-btn
                   color="primary"
                   :loading="generatingReleaseReport"
+                  :disabled="!selectedRelease"
                   @click="generateReleaseReport"
                   icon="mdi-file-excel"
                   size="large"
                   title="Generate Release Report"
+                  class="ml-2"
+                />
+              </div>
+            </v-card-text>
+          </v-card>
+
+          <!-- Cluster Selection Card -->
+          <v-card class="mb-4 wide-card">
+            <v-card-title class="text-h6 pa-4">
+              <v-icon class="mr-2" color="primary">mdi-server-network</v-icon>
+              Generate Report by Cluster
+            </v-card-title>
+            <v-card-text class="pa-4">
+              <div class="d-flex align-center gap-8">
+                <v-select
+                  v-model="selectedCluster"
+                  :items="clusters"
+                  item-title="name"
+                  item-value="uuid"
+                  label="Select Cluster"
+                  placeholder="Choose a cluster to report on all deployed images"
+                  variant="outlined"
+                  clearable
+                  :loading="loadingClusters"
+                  @update:model-value="onClusterChange"
+                  style="max-width: 350px;"
+                />
+                <v-btn
+                  color="primary"
+                  :loading="generatingClusterReport"
+                  :disabled="!selectedCluster"
+                  @click="generateClusterReport"
+                  icon="mdi-file-excel"
+                  size="large"
+                  title="Generate Cluster Report"
                   class="ml-2"
                 />
               </div>
@@ -173,6 +209,12 @@ const selectedRelease = ref<string | null>(null)
 const loadingReleases = ref(false)
 const generatingReleaseReport = ref(false)
 
+// Cluster selection variables
+const clusters = ref<Array<{ uuid: string; name: string }>>([])
+const selectedCluster = ref<string | null>(null)
+const loadingClusters = ref(false)
+const generatingClusterReport = ref(false)
+
 const headers: any[] = [
   { title: 'Name', key: 'name', sortable: true },
   { title: 'Digest', key: 'digest', sortable: true },
@@ -200,7 +242,25 @@ const fetchReleases = async () => {
 
 const onReleaseChange = (releaseUuid: string | null) => {
   selectedRelease.value = releaseUuid
-  // Clear selected images when release changes
+  selectedCluster.value = null
+  selectedImages.value = []
+}
+
+const fetchClusters = async () => {
+  loadingClusters.value = true
+  try {
+    const response = await api.get('/clusters/names/')
+    clusters.value = response.data
+  } catch (error) {
+    notificationService.error('Failed to load clusters')
+  } finally {
+    loadingClusters.value = false
+  }
+}
+
+const onClusterChange = (clusterUuid: string | null) => {
+  selectedCluster.value = clusterUuid
+  selectedRelease.value = null
   selectedImages.value = []
 }
 
@@ -253,6 +313,41 @@ const generateReleaseReport = async () => {
     notificationService.error(await getReportErrorMessage(error, 'Failed to generate release report'))
   } finally {
     generatingReleaseReport.value = false
+  }
+}
+
+const generateClusterReport = async () => {
+  if (!selectedCluster.value) return
+
+  generatingClusterReport.value = true
+  try {
+    const response = await api.post('reports/generate/', {
+      cluster_uuid: selectedCluster.value,
+    }, {
+      responseType: 'blob',
+    })
+
+    const contentDisposition = response.headers['content-disposition']
+    let filename = 'cluster_vulnerability_report.xlsx'
+    if (contentDisposition) {
+      const filenameMatch = contentDisposition.match(/filename="(.+)"/)
+      if (filenameMatch) filename = filenameMatch[1]
+    }
+
+    const url = window.URL.createObjectURL(new Blob([response.data]))
+    const link = document.createElement('a')
+    link.href = url
+    link.setAttribute('download', filename)
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    window.URL.revokeObjectURL(url)
+
+    notificationService.success('Cluster report generated successfully')
+  } catch (error: any) {
+    notificationService.error(await getReportErrorMessage(error, 'Failed to generate cluster report'))
+  } finally {
+    generatingClusterReport.value = false
   }
 }
 
@@ -352,6 +447,8 @@ watch([search, sortBy], () => {
 })
 
 const onRowClick = (event: MouseEvent, { item }: { item: any }) => {
+  selectedRelease.value = null
+  selectedCluster.value = null
   const idx = selectedImages.value.indexOf(item.uuid)
   if (idx === -1) {
     selectedImages.value.push(item.uuid)
@@ -363,6 +460,7 @@ const onRowClick = (event: MouseEvent, { item }: { item: any }) => {
 onMounted(() => {
   fetchImages()
   fetchReleases()
+  fetchClusters()
 })
 </script>
 

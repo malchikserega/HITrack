@@ -7,6 +7,8 @@ from openpyxl import load_workbook
 from rest_framework.test import APIClient
 
 from core.models import (
+    Cluster,
+    ClusterImage,
     Component,
     ComponentVersion,
     ComponentVersionVulnerability,
@@ -55,3 +57,38 @@ class ReportGeneratorTests(TestCase):
             self.image.name, 'openssl', 'deb', '3.0.0',
             'CVE-2024-0001', 'HIGH', '3.0.1',
         ))
+
+    def test_generates_xlsx_for_cluster_images(self):
+        cluster = Cluster.objects.create(name='production aks')
+        ClusterImage.objects.create(
+            cluster=cluster,
+            image=self.image,
+            source_reference=self.image.name,
+        )
+
+        response = self.client.post(
+            reverse('generate-report'),
+            {'cluster_uuid': str(cluster.uuid)},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(
+            'filename="cluster_production_aks_vulnerability_report_',
+            response['Content-Disposition'],
+        )
+        workbook = load_workbook(BytesIO(response.content))
+        rows = list(workbook.active.iter_rows(values_only=True))
+        self.assertEqual(rows[1][0], self.image.name)
+
+    def test_rejects_multiple_report_sources(self):
+        cluster = Cluster.objects.create(name='production')
+
+        response = self.client.post(
+            reverse('generate-report'),
+            {'cluster_uuid': str(cluster.uuid), 'image_uuids': [str(self.image.uuid)]},
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('exactly one report source', response.data['error'])
