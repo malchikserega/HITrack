@@ -16,7 +16,7 @@ import {
   type ChartOptions,
   type ChartData
 } from 'chart.js'
-import ChartDataLabels from 'chartjs-plugin-datalabels'
+import ChartDataLabels, { type Context as DataLabelContext } from 'chartjs-plugin-datalabels'
 
 ChartJS.register(Title, Tooltip, Legend, ArcElement, ChartDataLabels)
 
@@ -32,9 +32,22 @@ const mergedOptions = computed(() => ({
     legend: { display: false },
     datalabels: {
       color: '#222',
-      font: { weight: 'bold', size: 16 },
-      formatter: (value: number) => value > 0 ? value : ''
+      clamp: true,
+      font: { weight: 'bold', size: 12 },
+      formatter: (value: number, context: DataLabelContext) => {
+        const values = context.chart.data.datasets[context.datasetIndex]?.data || []
+        const total = values.reduce<number>(
+          (sum, item) => sum + (typeof item === 'number' ? item : 0),
+          0,
+        )
+
+        // Tiny slices remain discoverable via the legend and tooltip, while
+        // suppressing their labels prevents unreadable text collisions.
+        return value > 0 && (total === 0 || value / total >= 0.05)
+          ? value.toLocaleString()
+          : ''
+      }
     }
   }
 }) as Partial<ChartOptions<'pie'>>)
-</script> 
+</script>

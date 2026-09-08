@@ -1,11 +1,18 @@
-/* Reset and base styles */
-* {
-  margin: 0;
-  padding: 0;
+/* Base box model. Vuetify owns component spacing and its CSS reset. */
+*,
+*::before,
+*::after {
   box-sizing: border-box;
 }
 
+html,
+body,
+#app {
+  min-height: 100%;
+}
+
 body {
+  margin: 0;
   font-family: 'Roboto', sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
