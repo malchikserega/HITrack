@@ -3537,7 +3537,15 @@ class ClusterViewSet(BaseViewSet):
     ordering_fields = ['name', 'created_at', 'updated_at', 'images_count']
 
     def get_queryset(self):
-        return super().get_queryset().annotate(images_count=Count('images', distinct=True))
+        queryset = super().get_queryset()
+        annotations = {'images_count': Count('images', distinct=True)}
+        for scan_status in ('pending', 'in_process', 'success', 'error', 'none'):
+            annotations[f'{scan_status}_images_count'] = Count(
+                'images',
+                filter=Q(images__scan_status=scan_status),
+                distinct=True,
+            )
+        return queryset.annotate(**annotations)
 
     @staticmethod
     def _image_values(request):
@@ -3569,12 +3577,71 @@ class ClusterViewSet(BaseViewSet):
 
     @action(detail=True, methods=['get'])
     def contents(self, request, uuid=None):
+        from .services.clusters import build_cluster_scan_progress
+
         cluster = self.get_object()
         links = cluster.image_links.select_related('image', 'image__container_registry').all()
         return Response({
             'cluster': ClusterSerializer(cluster).data,
             'images': ClusterImageSerializer(links, many=True).data,
+            'progress': build_cluster_scan_progress(cluster),
         })
+
+    @action(detail=False, methods=['get'])
+    def names(self, request):
+        return Response(list(Cluster.objects.values('uuid', 'name').order_by('name')))
+
+    @action(detail=True, methods=['post'], url_path='scan-all')
+    def scan_all(self, request, uuid=None):
+        """Queue a full rescan for every non-active image in this cluster."""
+        from .services.clusters import build_cluster_scan_progress
+        from .tasks import generate_sbom_and_create_components
+
+        cluster = self.get_object()
+        now = timezone.now()
+        with transaction.atomic():
+            cluster_image_ids = ClusterImage.objects.filter(cluster=cluster).values_list('image_id', flat=True)
+            images = list(
+                Image.objects.select_for_update()
+                .filter(pk__in=cluster_image_ids)
+                .prefetch_related('repository_tags__repository')
+            )
+            queueable = [image for image in images if image.scan_status not in {'pending', 'in_process'}]
+            already_running = [image for image in images if image.scan_status in {'pending', 'in_process'}]
+            for image in queueable:
+                image.scan_status = 'pending'
+                image.updated_at = now
+            if queueable:
+                Image.objects.bulk_update(queueable, ['scan_status', 'updated_at'])
+
+        scheduled = []
+        failed_to_queue = []
+        for image in queueable:
+            repository_tag = next(iter(image.repository_tags.all()), None)
+            art_type = repository_tag.repository.repository_type if repository_tag else 'docker'
+            try:
+                task = generate_sbom_and_create_components.delay(
+                    image_uuid=str(image.uuid),
+                    art_type=art_type,
+                )
+                scheduled.append({'image_uuid': str(image.uuid), 'task_id': task.id})
+            except Exception as exc:
+                Image.objects.filter(pk=image.pk).update(scan_status='error', updated_at=timezone.now())
+                failed_to_queue.append({'image_uuid': str(image.uuid), 'error': str(exc)})
+
+        cluster = self.get_queryset().get(pk=cluster.pk)
+        return Response({
+            'status': 'scheduled',
+            'message': (
+                f'Queued {len(scheduled)} image(s); '
+                f'{len(already_running)} already running; '
+                f'{len(failed_to_queue)} failed to queue'
+            ),
+            'scheduled': scheduled,
+            'already_running': [str(image.uuid) for image in already_running],
+            'failed_to_queue': failed_to_queue,
+            'progress': build_cluster_scan_progress(cluster),
+        }, status=status.HTTP_202_ACCEPTED)
 
     @action(detail=True, methods=['post'], url_path='attach-images')
     def attach_images(self, request, uuid=None):
@@ -5111,26 +5178,38 @@ class ReportGeneratorView(APIView):
 
     def post(self, request):
         """
-        Generate a vulnerability report for selected images or a release.
+        Generate a vulnerability report for selected images, a release, or a cluster.
         Returns an Excel file with vulnerability data.
         
         Request body:
         - For images: {"image_uuids": ["uuid1", "uuid2", ...]}
         - For release: {"release_uuid": "uuid"}
+        - For cluster: {"cluster_uuid": "uuid"}
         """
         image_uuids = request.data.get('image_uuids', [])
         release_uuid = request.data.get('release_uuid')
-        
-        if not image_uuids and not release_uuid:
+        cluster_uuid = request.data.get('cluster_uuid')
+        selected_sources = sum(bool(value) for value in (image_uuids, release_uuid, cluster_uuid))
+
+        if selected_sources == 0:
             return Response(
-                {'error': 'No images or release selected'},
+                {'error': 'No images, release, or cluster selected'},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
+        if selected_sources > 1:
+            return Response(
+                {'error': 'Select exactly one report source: images, release, or cluster'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        report_scope = 'images'
+        report_name = ''
         # If release_uuid is provided, get all images from that release
         if release_uuid:
             try:
                 release = Release.objects.get(uuid=release_uuid)
+                report_scope = 'release'
+                report_name = release.name
                 # Get all images from repository tags in this release
                 images = Image.objects.filter(
                     repository_tags__releases__release=release
@@ -5139,6 +5218,17 @@ class ReportGeneratorView(APIView):
                 return Response(
                     {'error': 'Release not found'},
                     status=status.HTTP_404_NOT_FOUND
+                )
+        elif cluster_uuid:
+            try:
+                cluster = Cluster.objects.get(uuid=cluster_uuid)
+                report_scope = 'cluster'
+                report_name = cluster.name
+                images = Image.objects.filter(clusters=cluster).distinct()
+            except Cluster.DoesNotExist:
+                return Response(
+                    {'error': 'Cluster not found'},
+                    status=status.HTTP_404_NOT_FOUND,
                 )
         else:
             # Use provided image UUIDs
@@ -5198,9 +5288,11 @@ class ReportGeneratorView(APIView):
             timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             
             # Generate appropriate filename based on report type
-            if release_uuid:
-                release_name = Release.objects.get(uuid=release_uuid).name
-                filename = f"release_{release_name}_vulnerability_report_{timestamp}.xlsx"
+            safe_report_name = re.sub(r'[^A-Za-z0-9_.-]+', '_', report_name).strip('_')
+            if report_scope == 'release':
+                filename = f"release_{safe_report_name}_vulnerability_report_{timestamp}.xlsx"
+            elif report_scope == 'cluster':
+                filename = f"cluster_{safe_report_name}_vulnerability_report_{timestamp}.xlsx"
             else:
                 filename = f"vulnerability_report_{timestamp}.xlsx"
 

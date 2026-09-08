@@ -1,7 +1,7 @@
 import re
 from urllib.parse import urlparse
 
-from django.db.models import Q
+from django.db.models import Count, Q
 
 from core.models import ContainerRegistry, Image
 
@@ -11,6 +11,50 @@ IMAGE_REFERENCE_RE = re.compile(
     r'[a-zA-Z0-9_./-]+(?:[:][a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}|@sha256:[a-fA-F0-9]{64})?$'
 )
 DOCKER_HUB_HOSTS = {'docker.io', 'index.docker.io', 'registry-1.docker.io'}
+CLUSTER_SCAN_STATUSES = ('pending', 'in_process', 'success', 'error', 'none')
+
+
+def build_cluster_scan_progress(cluster):
+    """Return durable scan progress derived from the cluster's image statuses."""
+    annotated_counts = {
+        status: getattr(cluster, f'{status}_images_count', None)
+        for status in CLUSTER_SCAN_STATUSES
+    }
+    if any(value is None for value in annotated_counts.values()):
+        rows = cluster.images.values('scan_status').annotate(count=Count('uuid'))
+        counts = {status: 0 for status in CLUSTER_SCAN_STATUSES}
+        for row in rows:
+            status = row['scan_status'] if row['scan_status'] in counts else 'none'
+            counts[status] += row['count']
+    else:
+        counts = {status: int(value or 0) for status, value in annotated_counts.items()}
+
+    total = sum(counts.values())
+    active = counts['pending'] + counts['in_process']
+    completed = counts['success'] + counts['error']
+    remaining = total - completed
+    if total == 0:
+        state = 'empty'
+    elif active:
+        state = 'running'
+    elif counts['none']:
+        state = 'idle'
+    else:
+        state = 'completed'
+
+    return {
+        'state': state,
+        'total': total,
+        'completed': completed,
+        'remaining': remaining,
+        'pending': counts['pending'],
+        'in_process': counts['in_process'],
+        'success': counts['success'],
+        'error': counts['error'],
+        'not_started': counts['none'],
+        'active': active > 0,
+        'percent': round((completed / total) * 100, 1) if total else 0,
+    }
 
 
 def normalize_image_reference(value):
