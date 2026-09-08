@@ -15,10 +15,6 @@ import { formatDate } from './utils/dateUtils'
 import MetricCard from './components/MetricCard.vue'
 import TaskResultDisplay from './components/TaskResultDisplay.vue'
 
-// Vuetify
-import 'vuetify/styles'
-import '@mdi/font/css/materialdesignicons.css'
-
 const app: VueApp = createApp(App)
 
 // Add global error handler
