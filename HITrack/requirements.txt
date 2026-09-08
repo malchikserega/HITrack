@@ -1,4 +1,4 @@
-Django==6.0.8
+Django==6.1.1
 djangorestframework==3.18.1
 django-filter==26.1
 drf-spectacular==0.30.0
