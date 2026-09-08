@@ -1796,14 +1796,19 @@ class ReleaseAssignmentSerializer(serializers.Serializer):
 
 class ClusterSerializer(serializers.ModelSerializer):
     images_count = serializers.SerializerMethodField()
+    scan_progress = serializers.SerializerMethodField()
 
     class Meta:
         model = Cluster
-        fields = ['uuid', 'name', 'description', 'images_count', 'created_at', 'updated_at']
+        fields = ['uuid', 'name', 'description', 'images_count', 'scan_progress', 'created_at', 'updated_at']
         read_only_fields = ['uuid', 'created_at', 'updated_at']
 
     def get_images_count(self, obj):
         return getattr(obj, 'images_count', None) if hasattr(obj, 'images_count') else obj.images.count()
+
+    def get_scan_progress(self, obj):
+        from .services.clusters import build_cluster_scan_progress
+        return build_cluster_scan_progress(obj)
 
     def validate_name(self, value):
         queryset = Cluster.objects.filter(name__iexact=value.strip())

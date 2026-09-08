@@ -42,6 +42,22 @@
         <template #item.images_count="{ item }">
           <v-chip size="small" color="primary" variant="tonal">{{ item.images_count }}</v-chip>
         </template>
+        <template #item.scan_progress="{ item }">
+          <div class="cluster-progress-cell py-2">
+            <div class="d-flex align-center justify-space-between text-caption mb-1">
+              <span>{{ item.scan_progress.completed }}/{{ item.scan_progress.total }}</span>
+              <span v-if="item.scan_progress.remaining">{{ item.scan_progress.remaining }} remaining</span>
+              <span v-else-if="item.scan_progress.total">Complete</span>
+              <span v-else>No images</span>
+            </div>
+            <v-progress-linear
+              :model-value="item.scan_progress.percent"
+              :color="progressColor(item.scan_progress)"
+              height="7"
+              rounded
+            />
+          </div>
+        </template>
         <template #item.created_at="{ item }">{{ formatDate(item.created_at) }}</template>
         <template #item.actions="{ item }">
           <v-btn icon="mdi-eye-outline" size="small" variant="text" @click="viewCluster(item)" />
@@ -71,11 +87,58 @@
         <v-card-title class="d-flex align-center">
           <span>{{ selectedCluster?.name }} images</span>
           <v-spacer />
+          <v-btn
+            color="success"
+            variant="tonal"
+            prepend-icon="mdi-radar"
+            class="mr-2"
+            :loading="bulkScanning"
+            :disabled="clusterProgress.total === 0 || clusterProgress.active"
+            @click="scanAllImages"
+          >
+            Scan all images
+          </v-btn>
           <v-btn color="primary" variant="tonal" prepend-icon="mdi-plus" class="mr-2" @click="openWizard(selectedCluster || undefined)">Add images</v-btn>
           <v-btn icon="mdi-close" variant="text" @click="detailsDialog = false" />
         </v-card-title>
         <v-card-text>
           <v-progress-linear v-if="loadingContents" indeterminate class="mb-3" />
+          <v-sheet v-if="clusterProgress.total" rounded="lg" border class="pa-4 mb-4">
+            <div class="d-flex flex-wrap align-center ga-3 mb-3">
+              <div>
+                <div class="text-subtitle-1 font-weight-bold">Cluster scan progress</div>
+                <div class="text-body-2 text-medium-emphasis">
+                  {{ clusterProgress.completed }} of {{ clusterProgress.total }} completed ·
+                  {{ clusterProgress.remaining }} remaining
+                </div>
+              </div>
+              <v-spacer />
+              <v-chip v-if="clusterProgress.pending" color="warning" variant="tonal" size="small">
+                {{ clusterProgress.pending }} queued
+              </v-chip>
+              <v-chip v-if="clusterProgress.in_process" color="info" variant="tonal" size="small">
+                {{ clusterProgress.in_process }} scanning
+              </v-chip>
+              <v-chip color="success" variant="tonal" size="small">
+                {{ clusterProgress.success }} successful
+              </v-chip>
+              <v-chip v-if="clusterProgress.error" color="error" variant="tonal" size="small">
+                {{ clusterProgress.error }} failed
+              </v-chip>
+              <v-chip v-if="clusterProgress.not_started" variant="tonal" size="small">
+                {{ clusterProgress.not_started }} not started
+              </v-chip>
+            </div>
+            <v-progress-linear
+              :model-value="clusterProgress.percent"
+              :color="progressColor(clusterProgress)"
+              height="12"
+              rounded
+              striped
+            >
+              <strong class="text-caption">{{ clusterProgress.percent }}%</strong>
+            </v-progress-linear>
+          </v-sheet>
           <v-alert v-if="!loadingContents && clusterImages.length === 0" type="info" variant="tonal">No images have been added yet.</v-alert>
           <v-table v-else density="comfortable">
             <thead><tr><th>Image</th><th>Registry</th><th>Status</th><th>Digest</th><th></th></tr></thead>
@@ -186,12 +249,25 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, onUnmounted, ref, watch } from 'vue'
 import api from '../plugins/axios'
 import { notificationService } from '../plugins/notifications'
 import { debounce } from '../utils/debounce'
 
-interface Cluster { uuid: string; name: string; description: string; images_count: number; created_at: string; updated_at: string }
+interface ClusterScanProgress {
+  state: 'empty' | 'idle' | 'running' | 'completed'
+  total: number
+  completed: number
+  remaining: number
+  pending: number
+  in_process: number
+  success: number
+  error: number
+  not_started: number
+  active: boolean
+  percent: number
+}
+interface Cluster { uuid: string; name: string; description: string; images_count: number; scan_progress: ClusterScanProgress; created_at: string; updated_at: string }
 interface Registry { uuid: string; name: string; provider: string }
 interface ClusterImage { uuid: string; name: string; source_reference: string; digest?: string; scan_status: string; registry?: Registry }
 interface CheckedImage { reference: string; valid: boolean; error?: string; exists?: boolean; registry?: Registry; create?: boolean; scan?: boolean }
@@ -206,6 +282,7 @@ const clusterHeaders = [
   { title: 'Name', key: 'name' },
   { title: 'Description', key: 'description' },
   { title: 'Images', key: 'images_count', align: 'center' as const },
+  { title: 'Scan progress', key: 'scan_progress', sortable: false },
   { title: 'Created', key: 'created_at' },
   { title: '', key: 'actions', sortable: false, align: 'end' as const },
 ]
@@ -218,6 +295,13 @@ const detailsDialog = ref(false)
 const loadingContents = ref(false)
 const selectedCluster = ref<Cluster | null>(null)
 const clusterImages = ref<ClusterImage[]>([])
+const emptyProgress = (): ClusterScanProgress => ({
+  state: 'empty', total: 0, completed: 0, remaining: 0, pending: 0,
+  in_process: 0, success: 0, error: 0, not_started: 0, active: false, percent: 0,
+})
+const clusterProgress = ref<ClusterScanProgress>(emptyProgress())
+const bulkScanning = ref(false)
+let clusterPollTimer: ReturnType<typeof setInterval> | null = null
 const deleteDialog = ref(false)
 const deletingCluster = ref<Cluster | null>(null)
 
@@ -261,16 +345,22 @@ async function saveCluster() {
 }
 async function viewCluster(cluster: Cluster) {
   selectedCluster.value = cluster
+  clusterProgress.value = cluster.scan_progress || emptyProgress()
   detailsDialog.value = true
   await loadContents()
 }
-async function loadContents() {
+async function loadContents(showLoader = true) {
   if (!selectedCluster.value) return
-  loadingContents.value = true
+  if (showLoader) loadingContents.value = true
   try {
     const response = await api.get(`/clusters/${selectedCluster.value.uuid}/contents/`)
     clusterImages.value = response.data.images
-  } finally { loadingContents.value = false }
+    clusterProgress.value = response.data.progress || emptyProgress()
+    selectedCluster.value = { ...selectedCluster.value, scan_progress: clusterProgress.value }
+    syncClusterPolling()
+  } finally {
+    if (showLoader) loadingContents.value = false
+  }
 }
 async function removeImage(image: ClusterImage) {
   if (!selectedCluster.value) return
@@ -286,6 +376,44 @@ async function scanImage(image: ClusterImage) {
   } catch (error: any) {
     if (error.response?.status === 409) notificationService.warning('This image is already being scanned')
     else notificationService.error('Failed to queue image scan')
+  }
+}
+async function scanAllImages() {
+  if (!selectedCluster.value || clusterProgress.value.total === 0) return
+  bulkScanning.value = true
+  try {
+    const response = await api.post(`/clusters/${selectedCluster.value.uuid}/scan-all/`)
+    clusterProgress.value = response.data.progress || clusterProgress.value
+    const failed = response.data.failed_to_queue?.length || 0
+    notificationService.success(
+      `Queued ${response.data.scheduled.length} image(s); ${clusterProgress.value.remaining} remaining${failed ? `; ${failed} failed to queue` : ''}`,
+    )
+    await Promise.all([loadContents(false), fetchClusters()])
+    syncClusterPolling()
+  } catch (error: any) {
+    notificationService.error(error.response?.data?.error || 'Failed to scan cluster images')
+  } finally {
+    bulkScanning.value = false
+  }
+}
+
+function stopClusterPolling() {
+  if (clusterPollTimer) {
+    clearInterval(clusterPollTimer)
+    clusterPollTimer = null
+  }
+}
+
+function syncClusterPolling() {
+  if (!detailsDialog.value || !clusterProgress.value.active) {
+    stopClusterPolling()
+    return
+  }
+  if (!clusterPollTimer) {
+    clusterPollTimer = setInterval(async () => {
+      await loadContents(false)
+      await fetchClusters()
+    }, 2500)
   }
 }
 function confirmDelete(cluster: Cluster) { deletingCluster.value = cluster; deleteDialog.value = true }
@@ -337,12 +465,24 @@ async function attachImages() {
 
 function formatDate(value: string) { return value ? new Date(value).toLocaleString() : '—' }
 function statusColor(status: string) { return ({ success: 'success', error: 'error', pending: 'warning', in_process: 'info' } as Record<string, string>)[status] || 'default' }
+function progressColor(progress: ClusterScanProgress) {
+  if (progress.active) return 'info'
+  if (progress.error) return 'error'
+  if (progress.total && progress.remaining === 0) return 'success'
+  return 'primary'
+}
 
 onMounted(fetchClusters)
+watch(detailsDialog, (open) => {
+  if (open) syncClusterPolling()
+  else stopClusterPolling()
+})
+onUnmounted(stopClusterPolling)
 </script>
 
 <style scoped>
 .reference-cell { max-width: 440px; overflow-wrap: anywhere; }
 .digest-cell { max-width: 220px; }
+.cluster-progress-cell { min-width: 190px; }
 button { cursor: pointer; }
 </style>
