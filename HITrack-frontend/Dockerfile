@@ -1,10 +1,10 @@
 # Build stage
-FROM node:22.15.1 AS build-stage
+FROM node:22.23.2 AS build-stage
 ARG VITE_API_URL
 ENV VITE_API_URL=${VITE_API_URL}
 WORKDIR /app
 COPY package*.json ./
-RUN npm install
+RUN npm ci
 COPY . .
 RUN npm run build
 RUN echo "VITE_API_URL is $VITE_API_URL"

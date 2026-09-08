@@ -42,7 +42,8 @@ class OrphanCleanupTests(TestCase):
         preview = self.client.get('/api/images/cleanup-orphaned/')
         self.assertEqual(preview.status_code, 200)
         self.assertEqual(preview.data, {
-            'orphaned': 1, 'excluded_standalone': 1, 'excluded_active_scans': 1,
+            'orphaned': 1, 'excluded_standalone': 1,
+            'excluded_cluster_linked': 0, 'excluded_active_scans': 1,
         })
 
         cleanup = self.client.post('/api/images/cleanup-orphaned/')

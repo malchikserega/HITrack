@@ -146,6 +146,15 @@ class Image(models.Model):
     name = models.CharField(max_length=255)
     digest = models.CharField(max_length=255, blank=True, null=True)
     artifact_reference = models.CharField(max_length=255, blank=True, null=True)
+    container_registry = models.ForeignKey(
+        'ContainerRegistry',
+        on_delete=models.SET_NULL,
+        related_name='standalone_images',
+        blank=True,
+        null=True,
+        to_field='uuid',
+        help_text='Registry credentials used when this image is scanned without a repository tag.',
+    )
     repository_tags = models.ManyToManyField(RepositoryTag, related_name='images', blank=True)
     sbom_data = models.JSONField(null=True, blank=True)
     grype_data = models.JSONField(null=True, blank=True)
@@ -724,6 +733,36 @@ class Release(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class Cluster(models.Model):
+    uuid = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=128, unique=True)
+    description = models.TextField(blank=True)
+    images = models.ManyToManyField(Image, through='ClusterImage', related_name='clusters', blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name']
+
+    def __str__(self):
+        return self.name
+
+
+class ClusterImage(models.Model):
+    uuid = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    cluster = models.ForeignKey(Cluster, on_delete=models.CASCADE, related_name='image_links')
+    image = models.ForeignKey(Image, on_delete=models.CASCADE, related_name='cluster_links')
+    source_reference = models.CharField(max_length=255)
+    added_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ['cluster', 'image']
+        ordering = ['source_reference']
+
+    def __str__(self):
+        return f'{self.cluster}: {self.source_reference}'
 
 
 class RepositoryTagRelease(models.Model):
