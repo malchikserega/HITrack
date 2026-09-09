@@ -25,7 +25,7 @@ from .serializers import (
     ClusterSerializer, ClusterImageSerializer,
 )
 from django.db import models, transaction
-from .pagination import CustomPageNumberPagination
+from .pagination import ClusterImagePagination, CustomPageNumberPagination
 from django.db.models import Q, Count, Prefetch, Case, When, Value, BooleanField, IntegerField, F, CharField, TextField, Func, Max, OuterRef, Subquery, Sum, Exists
 from django.db.models.query import prefetch_related_objects
 from django.db.models.functions import Cast, Concat, TruncDate, Coalesce
@@ -3538,12 +3538,11 @@ class ClusterViewSet(BaseViewSet):
 
     def get_queryset(self):
         queryset = super().get_queryset()
-        annotations = {'images_count': Count('images', distinct=True)}
+        annotations = {'images_count': Count('images')}
         for scan_status in ('pending', 'in_process', 'success', 'error', 'none'):
             annotations[f'{scan_status}_images_count'] = Count(
                 'images',
                 filter=Q(images__scan_status=scan_status),
-                distinct=True,
             )
         return queryset.annotate(**annotations)
 
@@ -3580,12 +3579,33 @@ class ClusterViewSet(BaseViewSet):
         from .services.clusters import build_cluster_scan_progress
 
         cluster = self.get_object()
-        links = cluster.image_links.select_related('image', 'image__container_registry').all()
+        links = (
+            cluster.image_links
+            .select_related('image', 'image__container_registry')
+            .only(
+                'uuid', 'cluster_id', 'source_reference', 'added_at',
+                'image__uuid', 'image__name', 'image__digest', 'image__scan_status',
+                'image__container_registry_id', 'image__container_registry__uuid',
+                'image__container_registry__name', 'image__container_registry__provider',
+            )
+        )
+        paginator = ClusterImagePagination()
+        page = paginator.paginate_queryset(links, request, view=self)
+        progress = build_cluster_scan_progress(cluster)
         return Response({
-            'cluster': ClusterSerializer(cluster).data,
-            'images': ClusterImageSerializer(links, many=True).data,
-            'progress': build_cluster_scan_progress(cluster),
+            'cluster': ClusterSerializer(cluster, context={'scan_progress': progress}).data,
+            'images': ClusterImageSerializer(page, many=True).data,
+            'progress': progress,
+            'count': paginator.page.paginator.count,
+            'next': paginator.get_next_link(),
+            'previous': paginator.get_previous_link(),
         })
+
+    @action(detail=True, methods=['get'], url_path='scan-progress')
+    def scan_progress(self, request, uuid=None):
+        from .services.clusters import build_cluster_scan_progress
+
+        return Response(build_cluster_scan_progress(self.get_object()))
 
     @action(detail=False, methods=['get'])
     def names(self, request):
@@ -3604,7 +3624,12 @@ class ClusterViewSet(BaseViewSet):
             images = list(
                 Image.objects.select_for_update()
                 .filter(pk__in=cluster_image_ids)
-                .prefetch_related('repository_tags__repository')
+                .annotate(scan_repository_type=Subquery(
+                    RepositoryTag.objects
+                    .filter(images=OuterRef('pk'))
+                    .values('repository__repository_type')[:1]
+                ))
+                .only('uuid', 'scan_status', 'updated_at')
             )
             queueable = [image for image in images if image.scan_status not in {'pending', 'in_process'}]
             already_running = [image for image in images if image.scan_status in {'pending', 'in_process'}]
@@ -3617,8 +3642,7 @@ class ClusterViewSet(BaseViewSet):
         scheduled = []
         failed_to_queue = []
         for image in queueable:
-            repository_tag = next(iter(image.repository_tags.all()), None)
-            art_type = repository_tag.repository.repository_type if repository_tag else 'docker'
+            art_type = image.scan_repository_type or 'docker'
             try:
                 task = generate_sbom_and_create_components.delay(
                     image_uuid=str(image.uuid),

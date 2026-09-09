@@ -760,6 +760,9 @@ class ClusterImage(models.Model):
     class Meta:
         unique_together = ['cluster', 'image']
         ordering = ['source_reference']
+        indexes = [
+            models.Index(fields=['cluster', 'source_reference'], name='core_climg_cluster_src_idx'),
+        ]
 
     def __str__(self):
         return f'{self.cluster}: {self.source_reference}'

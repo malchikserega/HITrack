@@ -139,29 +139,45 @@
               <strong class="text-caption">{{ clusterProgress.percent }}%</strong>
             </v-progress-linear>
           </v-sheet>
-          <v-alert v-if="!loadingContents && clusterImages.length === 0" type="info" variant="tonal">No images have been added yet.</v-alert>
-          <v-table v-else density="comfortable">
-            <thead><tr><th>Image</th><th>Registry</th><th>Status</th><th>Digest</th><th></th></tr></thead>
-            <tbody>
-              <tr v-for="image in clusterImages" :key="image.uuid">
-                <td><router-link :to="`/images/${image.uuid}`">{{ image.source_reference }}</router-link></td>
-                <td>{{ image.registry?.name || 'Public / no configured credentials' }}</td>
-                <td><v-chip size="small" :color="statusColor(image.scan_status)" variant="tonal">{{ image.scan_status }}</v-chip></td>
-                <td class="text-truncate digest-cell">{{ image.digest || '—' }}</td>
-                <td class="text-right text-no-wrap">
-                  <v-btn
-                    icon="mdi-radar"
-                    size="small"
-                    color="primary"
-                    variant="text"
-                    :disabled="['pending', 'in_process'].includes(image.scan_status)"
-                    @click="scanImage(image)"
-                  />
-                  <v-btn icon="mdi-link-off" size="small" variant="text" @click="removeImage(image)" />
-                </td>
-              </tr>
-            </tbody>
-          </v-table>
+          <v-alert v-if="!loadingContents && clusterImagesTotal === 0" type="info" variant="tonal">No images have been added yet.</v-alert>
+          <v-data-table-server
+            v-else
+            :headers="clusterImageHeaders"
+            :items="clusterImages"
+            :items-length="clusterImagesTotal"
+            :loading="loadingContents"
+            v-model:page="clusterImagesPage"
+            v-model:items-per-page="clusterImagesPerPage"
+            item-value="uuid"
+            density="comfortable"
+            @update:options="onClusterImageOptionsUpdate"
+          >
+            <template #item.source_reference="{ item }">
+              <router-link :to="`/images/${item.uuid}`">{{ item.source_reference }}</router-link>
+            </template>
+            <template #item.registry="{ item }">
+              {{ item.registry?.name || 'Public / no configured credentials' }}
+            </template>
+            <template #item.scan_status="{ item }">
+              <v-chip size="small" :color="statusColor(item.scan_status)" variant="tonal">{{ item.scan_status }}</v-chip>
+            </template>
+            <template #item.digest="{ item }">
+              <span class="d-block text-truncate digest-cell">{{ item.digest || '—' }}</span>
+            </template>
+            <template #item.actions="{ item }">
+              <div class="text-right text-no-wrap">
+                <v-btn
+                  icon="mdi-radar"
+                  size="small"
+                  color="primary"
+                  variant="text"
+                  :disabled="['pending', 'in_process'].includes(item.scan_status)"
+                  @click="scanImage(item)"
+                />
+                <v-btn icon="mdi-link-off" size="small" variant="text" @click="removeImage(item)" />
+              </div>
+            </template>
+          </v-data-table-server>
         </v-card-text>
       </v-card>
     </v-dialog>
@@ -295,13 +311,25 @@ const detailsDialog = ref(false)
 const loadingContents = ref(false)
 const selectedCluster = ref<Cluster | null>(null)
 const clusterImages = ref<ClusterImage[]>([])
+const clusterImagesTotal = ref(0)
+const clusterImagesPage = ref(1)
+const clusterImagesPerPage = ref(50)
+const loadedClusterImagesPage = ref(0)
+const loadedClusterImagesPerPage = ref(0)
+const clusterImageHeaders = [
+  { title: 'Image', key: 'source_reference' },
+  { title: 'Registry', key: 'registry', sortable: false },
+  { title: 'Status', key: 'scan_status', sortable: false },
+  { title: 'Digest', key: 'digest', sortable: false },
+  { title: '', key: 'actions', sortable: false, align: 'end' as const },
+]
 const emptyProgress = (): ClusterScanProgress => ({
   state: 'empty', total: 0, completed: 0, remaining: 0, pending: 0,
   in_process: 0, success: 0, error: 0, not_started: 0, active: false, percent: 0,
 })
 const clusterProgress = ref<ClusterScanProgress>(emptyProgress())
 const bulkScanning = ref(false)
-let clusterPollTimer: ReturnType<typeof setInterval> | null = null
+let clusterPollTimer: ReturnType<typeof setTimeout> | null = null
 const deleteDialog = ref(false)
 const deletingCluster = ref<Cluster | null>(null)
 
@@ -346,6 +374,9 @@ async function saveCluster() {
 async function viewCluster(cluster: Cluster) {
   selectedCluster.value = cluster
   clusterProgress.value = cluster.scan_progress || emptyProgress()
+  clusterImagesPage.value = 1
+  loadedClusterImagesPage.value = 0
+  loadedClusterImagesPerPage.value = 0
   detailsDialog.value = true
   await loadContents()
 }
@@ -353,8 +384,13 @@ async function loadContents(showLoader = true) {
   if (!selectedCluster.value) return
   if (showLoader) loadingContents.value = true
   try {
-    const response = await api.get(`/clusters/${selectedCluster.value.uuid}/contents/`)
+    const response = await api.get(`/clusters/${selectedCluster.value.uuid}/contents/`, {
+      params: { page: clusterImagesPage.value, page_size: clusterImagesPerPage.value },
+    })
     clusterImages.value = response.data.images
+    clusterImagesTotal.value = response.data.count ?? response.data.images.length
+    loadedClusterImagesPage.value = clusterImagesPage.value
+    loadedClusterImagesPerPage.value = clusterImagesPerPage.value
     clusterProgress.value = response.data.progress || emptyProgress()
     selectedCluster.value = { ...selectedCluster.value, scan_progress: clusterProgress.value }
     syncClusterPolling()
@@ -362,10 +398,21 @@ async function loadContents(showLoader = true) {
     if (showLoader) loadingContents.value = false
   }
 }
+async function onClusterImageOptionsUpdate(options: { page: number; itemsPerPage: number }) {
+  if (!detailsDialog.value) return
+  clusterImagesPage.value = options.page
+  clusterImagesPerPage.value = options.itemsPerPage
+  if (
+    options.page === loadedClusterImagesPage.value &&
+    options.itemsPerPage === loadedClusterImagesPerPage.value
+  ) return
+  await loadContents()
+}
 async function removeImage(image: ClusterImage) {
   if (!selectedCluster.value) return
   await api.delete(`/clusters/${selectedCluster.value.uuid}/images/${image.uuid}/`)
   notificationService.success('Image removed from cluster')
+  if (clusterImages.value.length === 1 && clusterImagesPage.value > 1) clusterImagesPage.value -= 1
   await Promise.all([loadContents(), fetchClusters()])
 }
 async function scanImage(image: ClusterImage) {
@@ -399,7 +446,7 @@ async function scanAllImages() {
 
 function stopClusterPolling() {
   if (clusterPollTimer) {
-    clearInterval(clusterPollTimer)
+    clearTimeout(clusterPollTimer)
     clusterPollTimer = null
   }
 }
@@ -410,9 +457,22 @@ function syncClusterPolling() {
     return
   }
   if (!clusterPollTimer) {
-    clusterPollTimer = setInterval(async () => {
-      await loadContents(false)
-      await fetchClusters()
+    clusterPollTimer = setTimeout(async () => {
+      clusterPollTimer = null
+      if (!selectedCluster.value) return
+      try {
+        const response = await api.get(`/clusters/${selectedCluster.value.uuid}/scan-progress/`)
+        clusterProgress.value = response.data
+        selectedCluster.value = { ...selectedCluster.value, scan_progress: response.data }
+        if (!response.data.active) {
+          stopClusterPolling()
+          await Promise.all([loadContents(false), fetchClusters()])
+        }
+      } catch {
+        stopClusterPolling()
+        return
+      }
+      syncClusterPolling()
     }, 2500)
   }
 }
