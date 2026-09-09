@@ -1807,6 +1807,9 @@ class ClusterSerializer(serializers.ModelSerializer):
         return getattr(obj, 'images_count', None) if hasattr(obj, 'images_count') else obj.images.count()
 
     def get_scan_progress(self, obj):
+        precomputed = self.context.get('scan_progress')
+        if precomputed is not None:
+            return precomputed
         from .services.clusters import build_cluster_scan_progress
         return build_cluster_scan_progress(obj)
 
