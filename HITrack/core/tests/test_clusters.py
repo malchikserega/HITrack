@@ -7,6 +7,7 @@ from django.test import TestCase
 from rest_framework.test import APIClient
 
 from core.models import Cluster, ClusterImage, ContainerRegistry, Image
+from core.services.clusters import inspect_image_references
 from core.tasks import _select_image_registry
 
 
@@ -48,6 +49,19 @@ class ClusterApiTests(TestCase):
         private_row = response.data['results'][1]
         self.assertEqual(private_row['registry']['uuid'], str(self.registry.uuid))
         self.assertTrue(private_row['authenticated_scan'])
+
+    def test_check_images_batches_existing_image_lookup(self):
+        references = [f'registry.example.com/team/app:{index}' for index in range(25)]
+        Image.objects.bulk_create([
+            Image(name=reference, artifact_reference=reference)
+            for reference in references
+        ])
+
+        with self.assertNumQueries(2):
+            rows = inspect_image_references(references)
+
+        self.assertEqual(len(rows), 25)
+        self.assertTrue(all(row['exists'] for row in rows))
 
     @patch('core.tasks.generate_sbom_and_create_components.delay')
     def test_attach_creates_standalone_image_with_registry_and_queues_scan(self, delay):
@@ -129,6 +143,43 @@ class ClusterApiTests(TestCase):
             'active': True,
             'percent': 50.0,
         })
+        self.assertEqual(response.data['count'], 4)
+
+    def test_contents_is_paginated_and_has_constant_query_count(self):
+        images = [
+            Image(name=f'registry.example.com/app:{index:03d}')
+            for index in range(55)
+        ]
+        Image.objects.bulk_create(images)
+        ClusterImage.objects.bulk_create([
+            ClusterImage(cluster=self.cluster, image=image, source_reference=image.name)
+            for image in images
+        ])
+
+        with self.assertNumQueries(3):
+            response = self.client.get(
+                f'/api/clusters/{self.cluster.uuid}/contents/?page=3&page_size=20'
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['count'], 55)
+        self.assertEqual(len(response.data['images']), 15)
+        self.assertIsNone(response.data['next'])
+        self.assertIsNotNone(response.data['previous'])
+
+    def test_scan_progress_does_not_load_cluster_images(self):
+        images = [Image(name=f'registry.example.com/app:{index}') for index in range(20)]
+        Image.objects.bulk_create(images)
+        ClusterImage.objects.bulk_create([
+            ClusterImage(cluster=self.cluster, image=image, source_reference=image.name)
+            for image in images
+        ])
+
+        with self.assertNumQueries(1):
+            response = self.client.get(f'/api/clusters/{self.cluster.uuid}/scan-progress/')
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['total'], 20)
 
     @patch('core.tasks.generate_sbom_and_create_components.delay')
     def test_scan_all_queues_every_non_active_image_and_returns_progress(self, delay):

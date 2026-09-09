@@ -2,6 +2,7 @@ import re
 from urllib.parse import urlparse
 
 from django.db.models import Count, Q
+from django.db.models.functions import Lower
 
 from core.models import ContainerRegistry, Image
 
@@ -12,6 +13,7 @@ IMAGE_REFERENCE_RE = re.compile(
 )
 DOCKER_HUB_HOSTS = {'docker.io', 'index.docker.io', 'registry-1.docker.io'}
 CLUSTER_SCAN_STATUSES = ('pending', 'in_process', 'success', 'error', 'none')
+IMAGE_LOOKUP_BATCH_SIZE = 1000
 
 
 def build_cluster_scan_progress(cluster):
@@ -99,6 +101,33 @@ def find_existing_image(reference):
     ).order_by('-updated_at').first()
 
 
+def find_existing_images(references):
+    """Resolve many references with one query, preferring the newest duplicate."""
+    keys = {reference.lower() for reference in references}
+    if not keys:
+        return {}
+    resolved = {}
+    key_list = list(keys)
+    for offset in range(0, len(key_list), IMAGE_LOOKUP_BATCH_SIZE):
+        batch = key_list[offset:offset + IMAGE_LOOKUP_BATCH_SIZE]
+        images = (
+            Image.objects
+            .annotate(
+                artifact_reference_lower=Lower('artifact_reference'),
+                name_lower=Lower('name'),
+            )
+            .filter(Q(artifact_reference_lower__in=batch) | Q(name_lower__in=batch))
+            .order_by('-updated_at')
+            .only('uuid', 'name', 'artifact_reference', 'scan_status', 'updated_at')
+        )
+        for image in images:
+            for value in (image.artifact_reference, image.name):
+                key = str(value or '').lower()
+                if key in keys:
+                    resolved.setdefault(key, image)
+    return resolved
+
+
 def inspect_image_references(values):
     registries = list(ContainerRegistry.objects.all())
     rows = []
@@ -113,11 +142,16 @@ def inspect_image_references(values):
         if key in seen:
             continue
         seen.add(key)
-        image = find_existing_image(reference)
+        rows.append({'reference': reference, 'valid': True})
+
+    existing_images = find_existing_images(row['reference'] for row in rows if row['valid'])
+    for row in rows:
+        if not row['valid']:
+            continue
+        reference = row['reference']
+        image = existing_images.get(reference.lower())
         registry = find_registry_for_reference(reference, registries)
-        rows.append({
-            'reference': reference,
-            'valid': True,
+        row.update({
             'exists': image is not None,
             'image': ({
                 'uuid': str(image.uuid),
