@@ -204,7 +204,7 @@
             v-if="!wizardChecked"
             v-model="imageInput"
             label="Image references, one per line"
-            placeholder="nlpapp0336cre.azurecr.io/litellm/backend:v1.94.0"
+            placeholder="registry.example.test/team/backend:1.2.3"
             variant="outlined"
             rows="12"
             spellcheck="false"
