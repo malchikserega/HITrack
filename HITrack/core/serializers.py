@@ -201,11 +201,15 @@ def _get_repository_tag_processing_status(obj):
 
 
 def _get_repository_scan_status(obj):
-    if hasattr(obj, 'active_tag_count') and hasattr(obj, 'active_image_count'):
+    if all(hasattr(obj, attr) for attr in (
+        'active_tag_count', 'active_image_count', 'error_tag_count', 'error_image_count',
+    )):
         return resolve_repository_scan_status(
             getattr(obj, 'scan_status', 'none'),
             getattr(obj, 'active_tag_count', 0) or 0,
             getattr(obj, 'active_image_count', 0) or 0,
+            getattr(obj, 'error_tag_count', 0) or 0,
+            getattr(obj, 'error_image_count', 0) or 0,
         )
 
     active_tag_count = obj.tags.filter(
@@ -215,10 +219,17 @@ def _get_repository_scan_status(obj):
         repository_tags__repository=obj,
         scan_status__in=['pending', 'in_process'],
     ).distinct().count()
+    error_tag_count = obj.tags.filter(processing_status='error').count()
+    error_image_count = Image.objects.filter(
+        repository_tags__repository=obj,
+        scan_status='error',
+    ).distinct().count()
     return resolve_repository_scan_status(
         getattr(obj, 'scan_status', 'none'),
         active_tag_count,
         active_image_count,
+        error_tag_count,
+        error_image_count,
     )
 
 

@@ -1676,6 +1676,16 @@ def _with_repository_scan_status_annotations(queryset):
             filter=Q(tags__images__scan_status__in=['pending', 'in_process']),
             distinct=True,
         ),
+        error_tag_count=Count(
+            'tags',
+            filter=Q(tags__processing_status='error'),
+            distinct=True,
+        ),
+        error_image_count=Count(
+            'tags__images',
+            filter=Q(tags__images__scan_status='error'),
+            distinct=True,
+        ),
     )
 
 

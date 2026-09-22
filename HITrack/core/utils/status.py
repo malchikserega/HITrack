@@ -33,16 +33,21 @@ def resolve_repository_scan_status(
     current_status,
     active_tag_count,
     active_image_count,
+    error_tag_count=0,
+    error_image_count=0,
 ):
     current_status = current_status or 'none'
 
-    if current_status == 'pending' and active_tag_count == 0 and active_image_count == 0:
+    if active_tag_count > 0 or active_image_count > 0:
+        return 'in_process'
+
+    if error_tag_count > 0 or error_image_count > 0:
+        return 'error'
+
+    if current_status == 'pending':
         return 'pending'
 
     if current_status == 'in_process':
-        return 'in_process'
-
-    if active_tag_count > 0 or active_image_count > 0:
         return 'in_process'
 
     return current_status
