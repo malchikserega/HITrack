@@ -20,19 +20,47 @@ from django.db import connection, transaction
 from django.db.models import Count, Q
 from .utils.status import resolve_repository_tag_processing_status
 
-# Performance and logging configuration
-# Set DEBUG_LOGGING=true environment variable to enable debug logging
-# Set DEBUG_LOGGING=false or unset to disable debug logging for production
-#
-# Performance optimizations implemented:
-# - Database queries optimized with select_related and prefetch_related
-# - Bulk operations for better performance
-# - Conditional debug logging to reduce I/O overhead
-# - Task retry mechanisms with exponential backoff
-# - Performance monitoring task for system health checks
+def _capture_repository_tag_scan_snapshot(tag_id):
+    from .models import RepositoryTag, RepositoryTagScanSnapshot
+    from .utils.analytics import (
+        build_repository_tag_scan_summary,
+        compare_vulnerability_states,
+    )
 
-# Configure logging
-logger = logging.getLogger(__name__)
+    tag = RepositoryTag.objects.get(pk=tag_id)
+    current_summary = build_repository_tag_scan_summary(tag)
+    previous_snapshot = tag.scan_snapshots.order_by('-created_at').first()
+    previous_state = previous_snapshot.vulnerability_state if previous_snapshot else {}
+    delta = compare_vulnerability_states(previous_state, current_summary['vulnerability_state'])
+    risk_score_delta = current_summary['weighted_risk_score'] - (
+        previous_snapshot.weighted_risk_score if previous_snapshot else 0.0
+    )
+
+    return RepositoryTagScanSnapshot.objects.create(
+        repository_tag=tag,
+        processing_status=current_summary['processing_status'],
+        total_images=current_summary['total_images'],
+        successful_images=current_summary['successful_images'],
+        unique_vulnerabilities_count=current_summary['unique_vulnerabilities_count'],
+        weighted_risk_score=current_summary['weighted_risk_score'],
+        previous_unique_vulnerabilities_count=delta['previous_unique_vulnerabilities_count'],
+        new_vulnerabilities_count=delta['new_vulnerabilities_count'],
+        fixed_vulnerabilities_count=delta['fixed_vulnerabilities_count'],
+        severity_increased_count=delta['severity_increased_count'],
+        new_kev_relevant_count=delta['new_kev_relevant_count'],
+        risk_score_delta=round(risk_score_delta, 2),
+        has_changes=delta['has_changes'] or round(risk_score_delta, 2) != 0,
+        fixability_breakdown=current_summary['fixability_breakdown'],
+        vulnerability_state=current_summary['vulnerability_state'],
+        delta_summary=delta['delta_summary'],
+    )
+
+
+def _sync_repository_tag_processing_statuses(tag_ids):
+    from .models import RepositoryTag
+
+    if not tag_ids:
+        return {}
 
 # Remove debug logging in production
 DEBUG_LOGGING = os.getenv('DEBUG_LOGGING', 'False').lower() == 'true'
@@ -53,8 +81,12 @@ _OS_EOL_STATUS_PRIORITY = {
     'eol': 2,
 }
 
-def is_safe_image_ref(image_ref: str) -> bool:
-    return bool(DOCKER_IMAGE_REGEX.match(image_ref)) and len(image_ref) < 200
+    return resolved_statuses
+
+
+def _sync_repository_scan_statuses(repository_ids):
+    """Persist the aggregate scan state after child tag/image state changes."""
+    from .models import Repository
 
 
 def _is_image_available_locally(image_ref: str) -> bool:
@@ -1793,7 +1825,6 @@ def _sync_repository_tag_processing_statuses(tag_ids):
         success_images_count=Count('images', filter=Q(images__scan_status='success'), distinct=True),
     ).only('uuid', 'processing_status')
 
-    repository_ids = set(status_rows.values_list('repository_id', flat=True))
     now = timezone.now()
     updated_tags = []
     resolved_statuses = {}
@@ -1825,56 +1856,7 @@ def _sync_repository_tag_processing_statuses(tag_ids):
         except Exception as exc:
             logger.error("Failed to capture repository tag snapshot for %s: %s", tag_id, exc)
 
-    _sync_repository_scan_statuses(repository_ids)
-
     return resolved_statuses
-
-
-def _sync_repository_scan_statuses(repository_ids):
-    """Persist the aggregate scan state after child tag/image state changes."""
-    from .models import Repository
-
-    if not repository_ids:
-        return {}
-
-    rows = Repository.objects.filter(pk__in=repository_ids).annotate(
-        active_tag_count=Count(
-            'tags',
-            filter=Q(tags__processing_status__in=['pending', 'in_process']),
-            distinct=True,
-        ),
-        error_tag_count=Count(
-            'tags', filter=Q(tags__processing_status='error'), distinct=True,
-        ),
-        active_image_count=Count(
-            'tags__images',
-            filter=Q(tags__images__scan_status__in=['pending', 'in_process']),
-            distinct=True,
-        ),
-        error_image_count=Count(
-            'tags__images', filter=Q(tags__images__scan_status='error'), distinct=True,
-        ),
-    ).only('uuid', 'scan_status')
-
-    now = timezone.now()
-    updates = []
-    resolved = {}
-    for repository in rows:
-        if repository.active_tag_count or repository.active_image_count:
-            new_status = 'in_process'
-        elif repository.error_tag_count or repository.error_image_count:
-            new_status = 'error'
-        else:
-            new_status = 'success'
-        resolved[str(repository.pk)] = new_status
-        if repository.scan_status != new_status:
-            repository.scan_status = new_status
-            repository.updated_at = now
-            updates.append(repository)
-
-    if updates:
-        Repository.objects.bulk_update(updates, ['scan_status', 'updated_at'])
-    return resolved
 
 @celery_app.task(
     bind=True,
@@ -2059,8 +2041,6 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
             logger.info(f"Successfully generated SBOM for image {image_uuid}")
 
             # Schedule SBOM parsing
-            from .services.scans import renew_scan_lease
-            renew_scan_lease(scan_run.uuid)
             parse_sbom_and_create_components.delay(str(image_uuid), str(scan_run.uuid))
             logger.info(f"Scheduled SBOM parsing for image {image_uuid}")
 
@@ -2870,8 +2850,6 @@ def parse_sbom_and_create_components(image_uuid: str, scan_run_uuid: str | None 
         logger.info(f"- Component versions created: {versions_created}")
 
         # Schedule Grype scan after successful SBOM processing
-        if scan_run_uuid:
-            renew_scan_lease(scan_run_uuid)
         scan_image_with_grype.delay(str(image_uuid), scan_run_uuid)
         logger.info(f"Scheduled Grype scan for image {image_uuid}")
 
@@ -3385,11 +3363,8 @@ def scan_image_with_grype(self, image_uuid: str, scan_run_uuid: str | None = Non
         # Allow the normal Syft -> Parse SBOM -> Grype pipeline to continue while the image
         # is already marked in_process; only skip if another Grype run has already produced data.
         if image.scan_status == 'in_process' and image.grype_data:
-            logger.warning("Resuming result processing for image %s", image_uuid)
-            process_grype_scan_results.delay(
-                str(image_uuid), image.grype_data, scan_run_uuid,
-            )
-            return {"status": "resumed", "reason": "grype results already available"}
+            logger.warning(f"Image {image_uuid} is already being scanned")
+            return {"status": "skipped", "reason": "already in process"}
 
         # Check if we have SBOM data
         if not image.sbom_data:
@@ -3442,8 +3417,6 @@ def scan_image_with_grype(self, image_uuid: str, scan_run_uuid: str | None = Non
             logger.info(f"Saved Grype results for image {image_uuid}")
 
             # Process Grype results (this will set status to 'success' when done)
-            if scan_run_uuid:
-                renew_scan_lease(scan_run_uuid)
             process_grype_scan_results.delay(str(image_uuid), grype_results, scan_run_uuid)
             
             logger.info(f"Successfully scanned image {image_uuid} with Grype")
@@ -3637,119 +3610,6 @@ def monitor_mass_rescan_progress():
             "task_name": "Monitor Mass Rescan Progress",
             "error": str(e)
         }
-
-
-@celery_app.task(name="Reconcile Stale Scan States")
-def reconcile_stale_scan_states():
-    """Move abandoned scan pipelines to a terminal state and repair aggregates.
-
-    Hard worker termination cannot run a task's exception handler. ScanRun leases
-    and model timestamps therefore act as the durable watchdog for lost work.
-    """
-    from .models import Image, Repository, RepositoryTag, ScanRun
-
-    now = timezone.now()
-    orphan_timeout_minutes = int(os.getenv('HITRACK_ORPHAN_SCAN_TIMEOUT_MINUTES', '240'))
-    stale_before = now - timedelta(minutes=max(orphan_timeout_minutes, 1))
-    failure_message = 'Scan lease expired before the pipeline reached a terminal state'
-
-    expired_runs = list(ScanRun.objects.filter(
-        status__in=['queued', 'running'],
-        lease_expires_at__isnull=False,
-        lease_expires_at__lte=now,
-    ).values_list('pk', 'image_id'))
-    expired_run_ids = [run_id for run_id, _ in expired_runs]
-    expired_image_ids = {image_id for _, image_id in expired_runs}
-    if expired_run_ids:
-        ScanRun.objects.filter(pk__in=expired_run_ids).update(
-            status='failed',
-            error_message=failure_message,
-            finished_at=now,
-            lease_expires_at=None,
-        )
-        images_with_newer_live_runs = set(ScanRun.objects.filter(
-            image_id__in=expired_image_ids,
-            status__in=['queued', 'running'],
-            lease_expires_at__gt=now,
-        ).values_list('image_id', flat=True))
-        expired_image_ids.difference_update(images_with_newer_live_runs)
-
-    # Also catch images set to pending before broker dispatch, for which no
-    # ScanRun could ever be created if publishing or delivery was lost.
-    orphan_image_ids = set(Image.objects.filter(
-        scan_status__in=['pending', 'in_process'],
-        updated_at__lte=stale_before,
-    ).exclude(
-        scan_runs__status__in=['queued', 'running'],
-        scan_runs__lease_expires_at__gt=now,
-    ).values_list('pk', flat=True))
-    failed_image_ids = expired_image_ids | orphan_image_ids
-    if failed_image_ids:
-        Image.objects.filter(
-            pk__in=failed_image_ids,
-            scan_status__in=['pending', 'in_process'],
-        ).update(scan_status='error', updated_at=now)
-
-    affected_tag_ids = set(RepositoryTag.objects.filter(
-        images__pk__in=failed_image_ids,
-    ).values_list('pk', flat=True))
-
-    stale_empty_tags = RepositoryTag.objects.filter(
-        processing_status__in=['pending', 'in_process'],
-        updated_at__lte=stale_before,
-        images__isnull=True,
-    )
-    stale_empty_tag_ids = set(stale_empty_tags.values_list('pk', flat=True))
-    if stale_empty_tag_ids:
-        RepositoryTag.objects.filter(pk__in=stale_empty_tag_ids).update(
-            processing_status='error', updated_at=now,
-        )
-    affected_tag_ids.update(stale_empty_tag_ids)
-
-    if affected_tag_ids:
-        _sync_repository_tag_processing_statuses(affected_tag_ids)
-
-    # A repository task can itself be hard-killed before it creates a tag. For
-    # stale active repositories with no active children, derive success/error
-    # from terminal children, or error when no completed discovery exists.
-    stale_repositories = Repository.objects.filter(
-        scan_status__in=['pending', 'in_process'],
-        updated_at__lte=stale_before,
-    ).annotate(
-        tag_count=Count('tags', distinct=True),
-        active_tag_count=Count(
-            'tags', filter=Q(tags__processing_status__in=['pending', 'in_process']), distinct=True,
-        ),
-        active_image_count=Count(
-            'tags__images',
-            filter=Q(tags__images__scan_status__in=['pending', 'in_process']),
-            distinct=True,
-        ),
-        error_tag_count=Count('tags', filter=Q(tags__processing_status='error'), distinct=True),
-        error_image_count=Count('tags__images', filter=Q(tags__images__scan_status='error'), distinct=True),
-    )
-    repository_updates = []
-    for repository in stale_repositories:
-        if repository.active_tag_count or repository.active_image_count:
-            continue
-        repository.scan_status = (
-            'error'
-            if repository.error_tag_count or repository.error_image_count or not repository.tag_count
-            else 'success'
-        )
-        repository.updated_at = now
-        repository_updates.append(repository)
-    if repository_updates:
-        Repository.objects.bulk_update(repository_updates, ['scan_status', 'updated_at'])
-
-    result = {
-        'expired_runs': len(expired_run_ids),
-        'failed_images': len(failed_image_ids),
-        'failed_empty_tags': len(stale_empty_tag_ids),
-        'reconciled_repositories': len(repository_updates),
-    }
-    logger.info("Reconciled stale scan states: %s", result)
-    return result
 
 
 def _repository_tag_image_ref(repository, repo_tag, registry=None):
@@ -4147,7 +4007,6 @@ def scan_repository_tags(
         new_tag_uuids = []
         existing_tag_uuids_to_process = []
         existing_tags_already_running = 0
-        tag_discovery_failures = 0
         for tag_name, image_path in all_tag_tuples:
             try:
                 image_path_val = (image_path or '').strip()
@@ -4179,8 +4038,7 @@ def scan_repository_tags(
                         repository=repository,
                         tag=tag_name,
                         digest=digest or None,
-                        image_path=image_path_val,
-                        processing_status='pending',
+                        image_path=image_path_val
                     )
                     new_count += 1
                     new_tag_uuids.append(str(rt.uuid))
@@ -4189,58 +4047,25 @@ def scan_repository_tags(
                     if existing_tag.processing_status in ['pending', 'in_process']:
                         existing_tags_already_running += 1
                     else:
-                        existing_tag.processing_status = 'pending'
-                        existing_tag.save(update_fields=['processing_status', 'updated_at'])
                         existing_tag_uuids_to_process.append(str(existing_tag.uuid))
             except Exception as e:
                 logger.error(f"Error processing tag {tag_name}: {str(e)}")
-                tag_discovery_failures += 1
-                try:
-                    failed_tag, _ = RepositoryTag.objects.get_or_create(
-                        repository=repository,
-                        tag=tag_name,
-                        image_path=(image_path or '').strip(),
-                    )
-                    failed_tag.processing_status = 'error'
-                    failed_tag.save(update_fields=['processing_status', 'updated_at'])
-                except Exception as status_error:
-                    logger.error(
-                        "Failed to persist error status for tag %s: %s",
-                        tag_name,
-                        status_error,
-                    )
                 continue
 
-        tags_to_process = new_tag_uuids + existing_tag_uuids_to_process
-
-        # Tag discovery is only the first stage. Keep the repository active until
-        # all queued tag/image pipelines reach a terminal state.
-        repository.scan_status = (
-            'in_process' if tags_to_process
-            else 'error' if tag_discovery_failures
-            else 'success'
-        )
+        # Update repository status
+        repository.scan_status = 'success'
         repository.last_scanned = timezone.now()
-        repository.save(update_fields=['scan_status', 'last_scanned', 'updated_at'])
+        repository.save()
         logger.info(f"Successfully completed repository tags scan for {repository.name} ({new_count} new tags)")
 
         # Schedule processing (create Images, SBOM) for each new tag
-        scheduling_errors = 0
+        tags_to_process = new_tag_uuids + existing_tag_uuids_to_process
         if tags_to_process:
             from .tasks import process_single_tag
             for tag_uuid in tags_to_process:
-                try:
-                    process_single_tag.apply_async(args=[tag_uuid], task_name="Process Single Tag")
-                except Exception as exc:
-                    scheduling_errors += 1
-                    logger.error("Failed to queue tag %s: %s", tag_uuid, exc)
-                    RepositoryTag.objects.filter(pk=tag_uuid).update(
-                        processing_status='error', updated_at=timezone.now(),
-                    )
-            _sync_repository_scan_statuses([repository.pk])
+                process_single_tag.apply_async(args=[tag_uuid], task_name="Process Single Tag")
             logger.info(
-                "Scheduled process_single_tag for %s/%s tags (%s new, %s existing)",
-                len(tags_to_process) - scheduling_errors,
+                "Scheduled process_single_tag for %s tags (%s new, %s existing)",
                 len(tags_to_process),
                 len(new_tag_uuids),
                 len(existing_tag_uuids_to_process),
@@ -4264,9 +4089,7 @@ def scan_repository_tags(
                 "tags_skipped": tags_skipped,
                 "existing_tags_requeued": len(existing_tag_uuids_to_process),
                 "existing_tags_already_running": existing_tags_already_running,
-                "tags_scheduled_for_processing": len(tags_to_process) - scheduling_errors,
-                "tag_scheduling_errors": scheduling_errors,
-                "tag_discovery_failures": tag_discovery_failures,
+                "tags_scheduled_for_processing": len(tags_to_process),
                 "scan_status_updated": True,
                 "last_scanned_updated": True
             },
@@ -4360,7 +4183,6 @@ def process_single_tag(tag_uuid: str):
             )
             tag.processing_status = 'error'
             tag.save(update_fields=['processing_status', 'updated_at'])
-            _sync_repository_scan_statuses([repository.pk])
             return {
                 "status": "error",
                 "task_name": "Process Single Tag",
@@ -4440,7 +4262,6 @@ def process_single_tag(tag_uuid: str):
                     logger.warning(f"Could not get manifest for {repository.name}:{tag.tag}")
                     tag.processing_status = 'error'
                     tag.save()
-                    _sync_repository_scan_statuses([repository.pk])
                     return
                 else:
                     return _helm_processing_error_result(
@@ -4520,16 +4341,10 @@ def process_single_tag(tag_uuid: str):
             image.save(update_fields=['scan_status', 'updated_at'])
             repo_tag = image.repository_tags.first()
             art_type = repo_tag.repository.repository_type if repo_tag else 'docker'
-            try:
-                child_task = generate_sbom_and_create_components.delay(
-                    image_uuid=str(image.uuid),
-                    art_type=art_type
-                )
-            except Exception as exc:
-                logger.error("Failed to queue image %s scan: %s", image.pk, exc)
-                image.scan_status = 'error'
-                image.save(update_fields=['scan_status', 'updated_at'])
-                continue
+            child_task = generate_sbom_and_create_components.delay(
+                image_uuid=str(image.uuid),
+                art_type=art_type
+            )
             child_task_ids.append(child_task.id)
             started += 1
         logger.info(f"Triggered SBOM scan for {started} images for tag {tag.tag}")
@@ -4542,7 +4357,6 @@ def process_single_tag(tag_uuid: str):
         if unresolved_image_refs:
             tag.processing_status = 'error'
             tag.save(update_fields=['processing_status', 'updated_at'])
-            _sync_repository_scan_statuses([repository.pk])
             return {
                 "status": "error",
                 "task_name": "Process Single Tag",
@@ -4573,7 +4387,6 @@ def process_single_tag(tag_uuid: str):
         if total_images_linked == 0:
             tag.processing_status = 'success'
             tag.save(update_fields=['processing_status', 'updated_at'])
-            _sync_repository_scan_statuses([repository.pk])
             try:
                 _capture_repository_tag_scan_snapshot(tag.pk)
             except Exception as exc:

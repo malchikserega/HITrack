@@ -66,15 +66,6 @@ def finish_scan(run_id, *, error=''):
     )
 
 
-def renew_scan_lease(run_id, *, lease_minutes=90):
-    """Extend a live pipeline lease when work moves to its next Celery task."""
-    if not run_id:
-        return 0
-    return ScanRun.objects.filter(
-        pk=run_id, status__in={'queued', 'running'},
-    ).update(lease_expires_at=timezone.now() + timedelta(minutes=lease_minutes))
-
-
 def store_raw_artifact(image, kind, payload, *, scan_run=None, scanner_version=''):
     """Store scanner JSON via Django storage (filesystem today, S3/MinIO when configured)."""
     encoded = json.dumps(payload, separators=(',', ':'), sort_keys=True).encode()

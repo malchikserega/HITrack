@@ -3,8 +3,8 @@ from unittest.mock import patch
 
 from django.test import SimpleTestCase, TestCase
 
-from core.models import ContainerRegistry, Repository, RepositoryTag
-from core.tasks import _select_tags_for_scan, periodic_repository_scan, scan_repository_tags
+from core.models import ContainerRegistry, Repository
+from core.tasks import _select_tags_for_scan, periodic_repository_scan
 
 
 class RepositoryTagSelectionTests(SimpleTestCase):
@@ -109,34 +109,3 @@ class PeriodicRepositoryScanPolicyTests(TestCase):
                 'tag_candidates_limit': 750,
             },
         )
-
-
-class RepositoryScanLifecycleTests(TestCase):
-    def setUp(self):
-        registry = ContainerRegistry.objects.create(
-            name='registry-lifecycle',
-            provider='acr',
-            api_url='https://registry.example.com',
-        )
-        self.repository = Repository.objects.create(
-            name='example/service',
-            url='registry.example.com/example/service',
-            repository_type='docker',
-            container_registry=registry,
-        )
-
-    @patch('core.tasks.process_single_tag.apply_async')
-    @patch('core.utils.registry.get_manifest', return_value=({}, 'sha256:abc'))
-    @patch('core.utils.registry.get_tags', return_value=['1.0.0'])
-    def test_repository_stays_in_process_while_new_tag_is_queued(
-        self, get_tags, get_manifest, apply_async,
-    ):
-        apply_async.return_value = SimpleNamespace(id='tag-task')
-
-        result = scan_repository_tags.run(str(self.repository.pk))
-
-        self.repository.refresh_from_db()
-        tag = RepositoryTag.objects.get(repository=self.repository, tag='1.0.0')
-        self.assertEqual(result['status'], 'success')
-        self.assertEqual(tag.processing_status, 'pending')
-        self.assertEqual(self.repository.scan_status, 'in_process')
