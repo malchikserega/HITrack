@@ -1,5 +1,5 @@
 Django==6.0.8
-djangorestframework==3.18.1
+djangorestframework==3.18.3
 django-filter==26.1
 drf-spectacular==0.30.0
 django-cors-headers==4.9.0
