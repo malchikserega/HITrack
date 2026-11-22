@@ -8,7 +8,7 @@ python-dotenv==1.2.3
 requests==2.34.2
 boto3==1.43.89
 pyyaml==6.0.3
-psycopg2-binary==2.9.12
+psycopg2-binary==2.9.13
 celery==5.6.3
 django-celery-beat==2.9.0
 django-celery-results==2.6.0
