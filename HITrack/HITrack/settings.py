@@ -281,6 +281,11 @@ CELERY_BROKER_TRANSPORT_OPTIONS = {
     'socket_connect_timeout': 30,  # 30 seconds
 }
 
+# Automated scans of an image whose content (digest) was scanned successfully
+# within this many hours reuse that result instead of pulling and scanning
+# again. 0 disables reuse. Manual rescans always scan.
+SCAN_REUSE_HOURS = int(os.getenv('HITRACK_SCAN_REUSE_HOURS', '24'))
+
 CELERY_RESULT_BACKEND = 'django-db'
 CELERY_TASK_TRACK_STARTED = True
 CELERY_TASK_TIME_LIMIT = 600  # 10 minutes
@@ -308,6 +313,7 @@ CELERY_TASK_ROUTES = {
     'Sync Single JFrog Registry': {'queue': 'light', 'routing_key': 'light'},
     'Rescan All Images with SBOM': {'queue': 'light', 'routing_key': 'light'},
     'Monitor Mass Rescan Progress': {'queue': 'light', 'routing_key': 'light'},
+    'Reconcile Stale Scan States': {'queue': 'light', 'routing_key': 'light'},
     'Update Components Latest Versions': {'queue': 'light', 'routing_key': 'light'},
     'Update All Components Latest Versions': {'queue': 'light', 'routing_key': 'light'},
     'Update Deb Components Latest Versions': {'queue': 'light', 'routing_key': 'light'},

@@ -218,6 +218,11 @@ class ScanRun(models.Model):
     started_at = models.DateTimeField(null=True, blank=True)
     finished_at = models.DateTimeField(null=True, blank=True)
     error_message = models.TextField(blank=True, default='')
+    # Other images with the same content (digest) that arrived while this run
+    # was live. They receive this run's results when it succeeds and are
+    # re-queued when it fails. Internal bookkeeping only: not exposed via the
+    # API, and superseded once results are stored per digest.
+    waiting_images = models.ManyToManyField(Image, related_name='waiting_scan_runs', blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

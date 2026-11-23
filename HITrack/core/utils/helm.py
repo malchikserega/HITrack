@@ -6,15 +6,40 @@ import tarfile
 import tempfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import yaml
 
 logger = logging.getLogger(__name__)
 
+# Rendered charts may keep deploy-time shell placeholders in the registry part,
+# e.g. `image: "docker.${REPO_HOST}/app:1.2.3"`, so `$`, `{` and `}` are
+# allowed here and then resolved (or the ref dropped) by _resolve_placeholders().
 RENDERED_IMAGE_RE = re.compile(
-    r'image:\s*["\']?([A-Za-z0-9][A-Za-z0-9./:_-]*(?::[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64}))'
+    r'image:\s*["\']?([A-Za-z0-9$][A-Za-z0-9./:_${}-]*(?::[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64}))'
 )
 VALUES_PATH_RE = re.compile(r"\.Values(?:\.[A-Za-z0-9_-]+)+")
+PLACEHOLDER_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
+# name[:port]/path segments, then a tag or a digest. No whitespace, no leading '-'.
+IMAGE_REF_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._/-]*(?::[0-9]+/[A-Za-z0-9._/-]+)?"
+    r"(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}|@sha256:[a-f0-9]{64})$"
+)
+
+
+def _placeholder_substitutions(chart_ref: str, repo_host: str | None = None) -> dict[str, str]:
+    """Values for deploy-time placeholders; REPO_HOST is the chart registry host."""
+    host = repo_host or urlparse(chart_ref or "").hostname
+    return {"REPO_HOST": host} if host else {}
+
+
+def _resolve_placeholders(ref: str, substitutions: dict[str, str] | None) -> str | None:
+    if "$" not in ref:
+        return ref
+    resolved = PLACEHOLDER_RE.sub(lambda m: (substitutions or {}).get(m.group(1), m.group(0)), ref)
+    if any(ch in resolved for ch in "${}"):
+        return None
+    return resolved
 
 
 def _helm_template_error_detail(error: BaseException) -> str:
@@ -25,8 +50,13 @@ def _helm_template_error_detail(error: BaseException) -> str:
     return detail[:4000] if detail else "unknown Helm template error"
 
 
-def _extract_image_refs_from_text(text: str) -> set[str]:
-    return {match.strip().strip("'\"") for match in RENDERED_IMAGE_RE.findall(text or "") if match}
+def _extract_image_refs_from_text(text: str, substitutions: dict[str, str] | None = None) -> set[str]:
+    refs: set[str] = set()
+    for match in RENDERED_IMAGE_RE.findall(text or ""):
+        ref = _resolve_placeholders(match.strip().strip("'\""), substitutions)
+        if ref:
+            refs.add(ref)
+    return refs
 
 
 def _extract_values_paths_from_error(detail: str) -> list[list[str]]:
@@ -103,7 +133,11 @@ def _run_helm_template(chart_path: str, values_override: dict[str, Any] | None =
                 pass
 
 
-def _discover_images_via_helm_template(chart_path: str, chart_ref: str) -> list[str]:
+def _discover_images_via_helm_template(
+    chart_path: str,
+    chart_ref: str,
+    substitutions: dict[str, str] | None = None,
+) -> list[str]:
     overrides: dict[str, Any] = {}
     seen_paths: set[tuple[str, ...]] = set()
     last_error = ""
@@ -111,7 +145,7 @@ def _discover_images_via_helm_template(chart_path: str, chart_ref: str) -> list[
     for attempt in range(4):
         try:
             rendered = _run_helm_template(chart_path, overrides if overrides else None)
-            return sorted(_extract_image_refs_from_text(rendered))
+            return sorted(_extract_image_refs_from_text(rendered, substitutions))
         except (subprocess.SubprocessError, OSError) as error:
             last_error = _helm_template_error_detail(error)
             new_paths = []
@@ -137,11 +171,11 @@ def _looks_like_image_ref(value: str) -> bool:
     if not isinstance(value, str):
         return False
     candidate = value.strip().strip("'\"")
-    if not candidate:
+    if not candidate or candidate.startswith(("http://", "https://", "-", "/")):
         return False
-    if "@sha256:" in candidate:
-        return True
-    return ":" in candidate and not candidate.startswith(("http://", "https://"))
+    if any(ch.isspace() for ch in candidate):
+        return False
+    return bool(IMAGE_REF_RE.match(candidate))
 
 
 def _compose_image_from_mapping(node: dict[str, Any]) -> str | None:
@@ -204,7 +238,10 @@ def _safe_extract_chart_archive(chart_path: str, output_dir: str):
         archive.extractall(output_dir)
 
 
-def _extract_images_from_chart_archive(chart_path: str) -> list[str]:
+def _extract_images_from_chart_archive(
+    chart_path: str,
+    substitutions: dict[str, str] | None = None,
+) -> list[str]:
     images: set[str] = set()
     with tempfile.TemporaryDirectory() as temp_dir:
         _safe_extract_chart_archive(chart_path, temp_dir)
@@ -217,7 +254,7 @@ def _extract_images_from_chart_archive(chart_path: str) -> list[str]:
                 content = file_path.read_text(encoding="utf-8")
             except UnicodeDecodeError:
                 continue
-            images.update(_extract_image_refs_from_text(content))
+            images.update(_extract_image_refs_from_text(content, substitutions))
             if file_path.name in {"values.yaml", "values.yml"}:
                 try:
                     parsed = yaml.safe_load(content)
@@ -227,9 +264,16 @@ def _extract_images_from_chart_archive(chart_path: str) -> list[str]:
     return sorted(images)
 
 
-def extract_images_from_chart_blob(blob: bytes, chart_ref: str) -> list[str]:
+def extract_images_from_chart_blob(blob: bytes, chart_ref: str, repo_host: str | None = None) -> list[str]:
+    """Return the image refs a chart deploys.
+
+    ``repo_host`` resolves ``$REPO_HOST``/``${REPO_HOST}`` placeholders in
+    rendered image fields; it defaults to the host of ``chart_ref`` when that
+    is a URL.
+    """
     chart_file = None
     render_error = None
+    substitutions = _placeholder_substitutions(chart_ref, repo_host)
     try:
         with tempfile.NamedTemporaryFile(suffix=".tgz", delete=False) as handle:
             handle.write(blob)
@@ -237,7 +281,7 @@ def extract_images_from_chart_blob(blob: bytes, chart_ref: str) -> list[str]:
             chart_file = handle.name
 
         try:
-            rendered_images = _discover_images_via_helm_template(chart_file, chart_ref)
+            rendered_images = _discover_images_via_helm_template(chart_file, chart_ref, substitutions)
             if rendered_images:
                 return rendered_images
             logger.warning(
@@ -252,7 +296,7 @@ def extract_images_from_chart_blob(blob: bytes, chart_ref: str) -> list[str]:
                 render_error,
             )
 
-        fallback_images = _extract_images_from_chart_archive(chart_file)
+        fallback_images = _extract_images_from_chart_archive(chart_file, substitutions)
         if fallback_images:
             logger.warning(
                 "Recovered %s image reference(s) for %s using static chart fallback",

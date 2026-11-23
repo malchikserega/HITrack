@@ -20,47 +20,19 @@ from django.db import connection, transaction
 from django.db.models import Count, Q
 from .utils.status import resolve_repository_tag_processing_status
 
-def _capture_repository_tag_scan_snapshot(tag_id):
-    from .models import RepositoryTag, RepositoryTagScanSnapshot
-    from .utils.analytics import (
-        build_repository_tag_scan_summary,
-        compare_vulnerability_states,
-    )
+# Performance and logging configuration
+# Set DEBUG_LOGGING=true environment variable to enable debug logging
+# Set DEBUG_LOGGING=false or unset to disable debug logging for production
+#
+# Performance optimizations implemented:
+# - Database queries optimized with select_related and prefetch_related
+# - Bulk operations for better performance
+# - Conditional debug logging to reduce I/O overhead
+# - Task retry mechanisms with exponential backoff
+# - Performance monitoring task for system health checks
 
-    tag = RepositoryTag.objects.get(pk=tag_id)
-    current_summary = build_repository_tag_scan_summary(tag)
-    previous_snapshot = tag.scan_snapshots.order_by('-created_at').first()
-    previous_state = previous_snapshot.vulnerability_state if previous_snapshot else {}
-    delta = compare_vulnerability_states(previous_state, current_summary['vulnerability_state'])
-    risk_score_delta = current_summary['weighted_risk_score'] - (
-        previous_snapshot.weighted_risk_score if previous_snapshot else 0.0
-    )
-
-    return RepositoryTagScanSnapshot.objects.create(
-        repository_tag=tag,
-        processing_status=current_summary['processing_status'],
-        total_images=current_summary['total_images'],
-        successful_images=current_summary['successful_images'],
-        unique_vulnerabilities_count=current_summary['unique_vulnerabilities_count'],
-        weighted_risk_score=current_summary['weighted_risk_score'],
-        previous_unique_vulnerabilities_count=delta['previous_unique_vulnerabilities_count'],
-        new_vulnerabilities_count=delta['new_vulnerabilities_count'],
-        fixed_vulnerabilities_count=delta['fixed_vulnerabilities_count'],
-        severity_increased_count=delta['severity_increased_count'],
-        new_kev_relevant_count=delta['new_kev_relevant_count'],
-        risk_score_delta=round(risk_score_delta, 2),
-        has_changes=delta['has_changes'] or round(risk_score_delta, 2) != 0,
-        fixability_breakdown=current_summary['fixability_breakdown'],
-        vulnerability_state=current_summary['vulnerability_state'],
-        delta_summary=delta['delta_summary'],
-    )
-
-
-def _sync_repository_tag_processing_statuses(tag_ids):
-    from .models import RepositoryTag
-
-    if not tag_ids:
-        return {}
+# Configure logging
+logger = logging.getLogger(__name__)
 
 # Remove debug logging in production
 DEBUG_LOGGING = os.getenv('DEBUG_LOGGING', 'False').lower() == 'true'
@@ -81,12 +53,8 @@ _OS_EOL_STATUS_PRIORITY = {
     'eol': 2,
 }
 
-    return resolved_statuses
-
-
-def _sync_repository_scan_statuses(repository_ids):
-    """Persist the aggregate scan state after child tag/image state changes."""
-    from .models import Repository
+def is_safe_image_ref(image_ref: str) -> bool:
+    return bool(DOCKER_IMAGE_REGEX.match(image_ref)) and len(image_ref) < 200
 
 
 def _is_image_available_locally(image_ref: str) -> bool:
@@ -1486,8 +1454,6 @@ def _get_or_create_canonical_image(name, digest=None, artifact_reference=None):
 
 
 def _propagate_image_completion_to_equivalent_images(image):
-    from .models import ComponentLocation, ImageComponentVersionContext
-
     duplicate_images = list(
         _equivalent_images_queryset(image.name, image.digest)
         .exclude(pk=image.pk)
@@ -1495,6 +1461,16 @@ def _propagate_image_completion_to_equivalent_images(image):
     )
     if not duplicate_images:
         return list(image.repository_tags.values_list('pk', flat=True))
+    return _copy_scan_results_to_images(image, duplicate_images)
+
+
+def _copy_scan_results_to_images(image, duplicate_images):
+    """Copy a successfully scanned image's results onto images with the same content.
+
+    Used for same-name duplicates, for images that waited on the same digest's
+    scan, and for reuse of a fresh result. Returns the affected tag ids.
+    """
+    from .models import ComponentLocation
 
     source_component_versions = list(image.component_versions.values_list('pk', flat=True))
     source_locations = list(
@@ -1858,6 +1834,128 @@ def _sync_repository_tag_processing_statuses(tag_ids):
 
     return resolved_statuses
 
+
+def _sync_repository_scan_statuses(repository_ids):
+    """Persist the aggregate scan state after child tag/image state changes.
+
+    Only repositories stuck in pending/in_process are touched: once none of
+    their tags or images is active any more they resolve to error (if any tag
+    errored) or success.
+    """
+    from .models import Image, Repository, RepositoryTag
+
+    repository_ids = [repository_id for repository_id in set(repository_ids or []) if repository_id]
+    if not repository_ids:
+        return {}
+
+    resolved = {}
+    now = timezone.now()
+    repositories = Repository.objects.filter(
+        pk__in=repository_ids, scan_status__in=['pending', 'in_process'],
+    ).only('uuid', 'scan_status')
+    for repository in repositories:
+        tags = RepositoryTag.objects.filter(repository=repository)
+        if tags.filter(processing_status__in=['pending', 'in_process']).exists():
+            continue
+        if Image.objects.filter(
+            repository_tags__repository=repository,
+            scan_status__in=['pending', 'in_process'],
+        ).exists():
+            continue
+        new_status = 'error' if tags.filter(processing_status='error').exists() else 'success'
+        Repository.objects.filter(pk=repository.pk).update(scan_status=new_status)
+        resolved[repository.pk] = new_status
+    if resolved:
+        logger.info("Resolved %s repository scan statuses at %s", len(resolved), now.isoformat())
+    return resolved
+
+
+def _image_art_type(image):
+    repo_tag = image.repository_tags.select_related('repository').first()
+    return repo_tag.repository.repository_type if repo_tag else 'docker'
+
+
+def _finish_scan_run(scan_run_uuid, *, error='', source_image=None):
+    """Finish a ScanRun and settle the images that waited on it.
+
+    On success the scanned ``source_image``'s results are copied to every
+    waiter. On failure each waiter is re-queued: one of them claims the run
+    again and the rest wait on it, so a transient failure (pull timeout) heals
+    while a permanent one ends after at most one attempt per waiter.
+    """
+    from .models import Image
+    from .services.scans import complete_scan
+
+    if not scan_run_uuid:
+        return []
+    waiter_ids = complete_scan(scan_run_uuid, error=error)
+    if source_image is not None:
+        waiter_ids = [waiter_id for waiter_id in waiter_ids if waiter_id != source_image.pk]
+    if not waiter_ids:
+        return []
+
+    waiters = list(Image.objects.filter(pk__in=waiter_ids).prefetch_related('repository_tags'))
+    if not error and source_image is not None:
+        tag_ids = _copy_scan_results_to_images(source_image, waiters)
+        _sync_repository_tag_processing_statuses(tag_ids)
+        logger.info(
+            "Copied scan results of %s to %s waiting image(s) with the same content",
+            source_image.name, len(waiters),
+        )
+    else:
+        for waiter in waiters:
+            generate_sbom_and_create_components.delay(
+                image_uuid=str(waiter.pk),
+                art_type=_image_art_type(waiter),
+            )
+        logger.warning(
+            "Scan run %s failed; re-queued %s waiting image(s): %s",
+            scan_run_uuid, len(waiters), error[:200],
+        )
+    return waiter_ids
+
+
+@celery_app.task(name="Reconcile Stale Scan States")
+def reconcile_stale_scan_states():
+    """Fail expired ScanRun leases and release images stuck in pending/in_process.
+
+    Celery messages live only in the Redis broker. If the broker loses them
+    (restart without persistence, eviction) or a worker dies mid-task, the
+    database keeps claiming the scan is active and every rescan path refuses
+    the image. This task is the only thing that clears that state.
+    """
+    from .models import RepositoryTag
+    from .services.scans import reap_stale_scans
+
+    reaped_runs, released_image_ids = reap_stale_scans()
+    tag_ids = []
+    repository_ids = []
+    if released_image_ids:
+        tag_rows = RepositoryTag.objects.filter(
+            images__uuid__in=released_image_ids,
+        ).values_list('pk', 'repository_id').distinct()
+        tag_ids = [tag_id for tag_id, _ in tag_rows]
+        repository_ids = [repository_id for _, repository_id in tag_rows]
+        _sync_repository_tag_processing_statuses(tag_ids)
+        _sync_repository_scan_statuses(repository_ids)
+
+    if reaped_runs or released_image_ids:
+        logger.warning(
+            "Reconciled stale scans: %s expired run(s) failed, %s image(s) released to error",
+            reaped_runs,
+            len(released_image_ids),
+        )
+    return {
+        'status': 'success',
+        'task_name': 'Reconcile Stale Scan States',
+        'reaped_runs': reaped_runs,
+        'released_images': len(released_image_ids),
+        'synced_tags': len(set(tag_ids)),
+        'synced_repositories': len(set(repository_ids)),
+        'timestamp': timezone.now().isoformat(),
+    }
+
+
 @celery_app.task(
     bind=True,
     max_retries=1,
@@ -1865,10 +1963,21 @@ def _sync_repository_tag_processing_statuses(tag_ids):
     soft_time_limit=GENERATE_SBOM_SOFT_TIME_LIMIT,
     time_limit=GENERATE_SBOM_TIME_LIMIT,
 )
-def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="docker", scan_run_uuid: str | None = None):
+def generate_sbom_and_create_components(
+    self,
+    image_uuid: str,
+    art_type: str = "docker",
+    scan_run_uuid: str | None = None,
+    allow_reuse: bool = True,
+):
     """
     Generate SBOM data for an image using Syft.
     This task can be retried up to 1 times if it fails.
+
+    Images sharing a digest share one ScanRun: if that content is being
+    scanned right now this image waits for the result instead of scanning,
+    and (when ``allow_reuse``) a fresh successful result is reused outright.
+    Manual rescans pass ``allow_reuse=False``.
     """
     from .models import Image, ContainerRegistry
     import subprocess
@@ -1887,24 +1996,63 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
             'component_versions__vulnerabilities'
         ).get(uuid=image_uuid)
         
-        # A durable lease makes retries and duplicate Celery deliveries idempotent.
-        from .services.scans import claim_scan, queue_scan
+        # A durable lease, keyed by image content, makes retries, duplicate
+        # Celery deliveries and same-digest images idempotent.
+        from .services.scans import (
+            WAITING,
+            claim_scan,
+            find_reusable_scan_source,
+            join_or_claim_scan,
+        )
+        celery_task_id = self.request.id or ''
         if scan_run_uuid:
-            scan_run, claimed = claim_scan(scan_run_uuid)
+            scan_run, claimed = claim_scan(scan_run_uuid, celery_task_id=celery_task_id)
+            if not claimed:
+                logger.warning(f"Image {image_uuid} is already being scanned")
+                return {
+                    "status": "skipped",
+                    "task_name": "Generate SBOM and Create Components",
+                    "image_uuid": str(image_uuid),
+                    "reason": "already in process",
+                    "message": f"Image {image_uuid} is already being processed",
+                    "current_status": image.scan_status,
+                    "timestamp": timezone.now().isoformat()
+                }
         else:
-            scan_run, created = queue_scan(image)
-            claimed = created and claim_scan(scan_run.uuid)[1]
-        if not claimed:
-            logger.warning(f"Image {image_uuid} is already being scanned")
-            return {
-                "status": "skipped", 
-                "task_name": "Generate SBOM and Create Components",
-                "image_uuid": str(image_uuid),
-                "reason": "already in process",
-                "message": f"Image {image_uuid} is already being processed",
-                "current_status": image.scan_status,
-                "timestamp": timezone.now().isoformat()
-            }
+            reuse_source = find_reusable_scan_source(image) if allow_reuse else None
+            if reuse_source is not None:
+                tag_ids = _copy_scan_results_to_images(reuse_source, [image])
+                _sync_repository_tag_processing_statuses(tag_ids)
+                logger.info(
+                    "Reused fresh scan of %s for image %s (same digest %s)",
+                    reuse_source.name, image.name, image.digest,
+                )
+                return {
+                    "status": "reused",
+                    "task_name": "Generate SBOM and Create Components",
+                    "image_uuid": str(image_uuid),
+                    "source_image_uuid": str(reuse_source.uuid),
+                    "message": f"Reused the recent scan of identical content {reuse_source.name}",
+                    "timestamp": timezone.now().isoformat()
+                }
+            joined_run, outcome = join_or_claim_scan(image, celery_task_id=celery_task_id)
+            if outcome == WAITING:
+                if image.scan_status != 'pending':
+                    image.scan_status = 'pending'
+                    image.save(update_fields=['scan_status', 'updated_at'])
+                logger.info(
+                    "Image %s waits for in-flight scan run %s of the same content",
+                    image_uuid, joined_run.uuid,
+                )
+                return {
+                    "status": "waiting",
+                    "task_name": "Generate SBOM and Create Components",
+                    "image_uuid": str(image_uuid),
+                    "scan_run_uuid": str(joined_run.uuid),
+                    "message": "Identical content is being scanned; results will be copied when it finishes",
+                    "timestamp": timezone.now().isoformat()
+                }
+            scan_run = joined_run
 
         # Update status to in_process
         image.scan_status = 'in_process'
@@ -2085,8 +2233,7 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
         }
     except Exception as e:
         if 'scan_run' in locals():
-            from .services.scans import finish_scan
-            finish_scan(scan_run.uuid, error=str(e))
+            _finish_scan_run(scan_run.uuid, error=str(e) or type(e).__name__, source_image=locals().get('image'))
         error_msg = f"Error generating SBOM for image {image_uuid}: {str(e)}"
         logger.error(error_msg)
         
@@ -2601,8 +2748,7 @@ def parse_sbom_and_create_components(image_uuid: str, scan_run_uuid: str | None 
             image.scan_status = 'error'
             image.save(update_fields=['scan_status', 'updated_at'])
             if scan_run_uuid:
-                from .services.scans import finish_scan
-                finish_scan(scan_run_uuid, error='No SBOM data found')
+                _finish_scan_run(scan_run_uuid, error='No SBOM data found', source_image=image)
             _sync_repository_tag_processing_statuses(
                 list(image.repository_tags.values_list('pk', flat=True))
             )
@@ -2888,8 +3034,7 @@ def parse_sbom_and_create_components(image_uuid: str, scan_run_uuid: str | None 
         }
     except Exception as e:
         if scan_run_uuid:
-            from .services.scans import finish_scan
-            finish_scan(scan_run_uuid, error=str(e))
+            _finish_scan_run(scan_run_uuid, error=str(e) or type(e).__name__, source_image=locals().get('image'))
         logger.error(f"Error parsing SBOM for image {image_uuid}: {str(e)}")
         try:
             image = Image.objects.get(uuid=image_uuid)
@@ -3273,10 +3418,10 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict, scan_run_uui
             *eol_update_fields, 'updated_at',
         ])
         if scan_run_uuid:
-            from .services.scans import finish_scan, store_raw_artifact
+            from .services.scans import store_raw_artifact
             from .models import ScanRun
             store_raw_artifact(image, 'grype', scan_results, scan_run=ScanRun.objects.get(pk=scan_run_uuid))
-            finish_scan(scan_run_uuid)
+            _finish_scan_run(scan_run_uuid, source_image=image)
         related_tag_ids = _propagate_image_completion_to_equivalent_images(image)
         _sync_repository_tag_processing_statuses(related_tag_ids)
         logger.info(f"Successfully processed Grype scan results for image {image_uuid}")
@@ -3314,8 +3459,7 @@ def process_grype_scan_results(image_uuid: str, scan_results: dict, scan_run_uui
         }
     except Exception as e:
         if scan_run_uuid:
-            from .services.scans import finish_scan
-            finish_scan(scan_run_uuid, error=str(e))
+            _finish_scan_run(scan_run_uuid, error=str(e) or type(e).__name__, source_image=locals().get('image'))
         error_msg = f"Error processing Grype scan results for image {image_uuid}: {str(e)}"
         logger.error(error_msg)
         
@@ -3440,8 +3584,7 @@ def scan_image_with_grype(self, image_uuid: str, scan_run_uuid: str | None = Non
         }
     except Exception as e:
         if scan_run_uuid:
-            from .services.scans import finish_scan
-            finish_scan(scan_run_uuid, error=str(e))
+            _finish_scan_run(scan_run_uuid, error=str(e) or type(e).__name__, source_image=locals().get('image'))
         error_msg = f"Error scanning image {image_uuid} with Grype: {str(e)}"
         logger.error(error_msg)
         
@@ -3481,11 +3624,15 @@ def rescan_all_images_with_sbom():
     start_time = time.time()
 
     try:
-        # Get all images that have SBOM data and are not currently being processed
-        images = Image.objects.filter(
-            Q(sbom_data__isnull=False) & 
-            ~Q(sbom_data={}) &
-            ~Q(scan_status__in=['in_process', 'pending'])
+        # Get all images that have SBOM data and are not currently being processed.
+        # Stale pending/in_process images (lost broker message) are included.
+        from .services.scans import live_active_images
+        images_with_sbom = Image.objects.filter(
+            Q(sbom_data__isnull=False) &
+            ~Q(sbom_data={})
+        )
+        images = images_with_sbom.exclude(
+            uuid__in=live_active_images(images_with_sbom).values('uuid')
         ).order_by('updated_at')
 
         total_images = images.count()
@@ -4323,6 +4470,7 @@ def process_single_tag(tag_uuid: str):
         skipped_in_progress = 0
         repaired_completed = 0
         repaired_tag_ids = set()
+        from .services.scans import image_scan_is_active
         for image in images:
             if image.scan_status in ['in_process', 'pending'] and _has_completed_image_payload(image):
                 image.scan_status = 'success'
@@ -4330,7 +4478,7 @@ def process_single_tag(tag_uuid: str):
                 repaired_tag_ids.update(_propagate_image_completion_to_equivalent_images(image))
                 repaired_completed += 1
                 continue
-            if image.scan_status == 'in_process':
+            if image.scan_status == 'in_process' and image_scan_is_active(image):
                 skipped_in_progress += 1
                 continue
             if _has_completed_image_scan(image):

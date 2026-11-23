@@ -23,6 +23,10 @@ services:
       context: redis
     ports:
       - "127.0.0.1:6379:6379"
+    volumes:
+      # Broker persistence (AOF/RDB). A bind mount survives `down -v` and
+      # container recreation, like the Postgres data next to it.
+      - ./volume/redis_data:/data
     networks:
       - hitrack-network
     healthcheck:
