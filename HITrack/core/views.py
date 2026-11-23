@@ -2484,7 +2484,9 @@ class RepositoryTagViewSet(BaseViewSet):
                 task = generate_sbom_and_create_components.apply_async(
                     kwargs={
                         'image_uuid': str(image.uuid),
-                        'art_type': art_type
+                        'art_type': art_type,
+                        # Manual rescan: always scan, never reuse a recent result.
+                        'allow_reuse': False,
                     },
                     task_name="Generate SBOM and Create Components"
                 )
@@ -3076,7 +3078,9 @@ class ImageViewSet(BaseViewSet):
             from .tasks import generate_sbom_and_create_components
             task = generate_sbom_and_create_components.delay(
                 image_uuid=str(image.uuid),
-                art_type=art_type
+                art_type=art_type,
+                # Manual rescan: always scan, never reuse a recent result.
+                allow_reuse=False,
             )
             return Response({
                 'status': 'scheduled',
