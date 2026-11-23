@@ -490,7 +490,11 @@ def get_helm_images(api_url: str, token: str, repo: str, digest: str) -> List[st
         logger.error("Failed to download Helm chart %s:%s: %s", repo, digest, e)
         raise RuntimeError(f"Failed to download Helm chart {repo}:{digest}: {e}") from e
 
-    return extract_images_from_chart_blob(response.content, f"{repo}:{digest}")
+    return extract_images_from_chart_blob(
+        response.content,
+        f"{repo}:{digest}",
+        repo_host=urlparse(base).hostname,
+    )
 
 
 def get_artifactory_image_digest(registry_url: str, token: str, image_ref: str) -> Optional[str]:
