@@ -1826,6 +1826,83 @@ def _sync_repository_tag_processing_statuses(tag_ids):
 
     return resolved_statuses
 
+
+def _sync_repository_scan_statuses(repository_ids):
+    """Persist the aggregate scan state after child tag/image state changes.
+
+    Only repositories stuck in pending/in_process are touched: once none of
+    their tags or images is active any more they resolve to error (if any tag
+    errored) or success.
+    """
+    from .models import Image, Repository, RepositoryTag
+
+    repository_ids = [repository_id for repository_id in set(repository_ids or []) if repository_id]
+    if not repository_ids:
+        return {}
+
+    resolved = {}
+    now = timezone.now()
+    repositories = Repository.objects.filter(
+        pk__in=repository_ids, scan_status__in=['pending', 'in_process'],
+    ).only('uuid', 'scan_status')
+    for repository in repositories:
+        tags = RepositoryTag.objects.filter(repository=repository)
+        if tags.filter(processing_status__in=['pending', 'in_process']).exists():
+            continue
+        if Image.objects.filter(
+            repository_tags__repository=repository,
+            scan_status__in=['pending', 'in_process'],
+        ).exists():
+            continue
+        new_status = 'error' if tags.filter(processing_status='error').exists() else 'success'
+        Repository.objects.filter(pk=repository.pk).update(scan_status=new_status)
+        resolved[repository.pk] = new_status
+    if resolved:
+        logger.info("Resolved %s repository scan statuses at %s", len(resolved), now.isoformat())
+    return resolved
+
+
+@celery_app.task(name="Reconcile Stale Scan States")
+def reconcile_stale_scan_states():
+    """Fail expired ScanRun leases and release images stuck in pending/in_process.
+
+    Celery messages live only in the Redis broker. If the broker loses them
+    (restart without persistence, eviction) or a worker dies mid-task, the
+    database keeps claiming the scan is active and every rescan path refuses
+    the image. This task is the only thing that clears that state.
+    """
+    from .models import RepositoryTag
+    from .services.scans import reap_stale_scans
+
+    reaped_runs, released_image_ids = reap_stale_scans()
+    tag_ids = []
+    repository_ids = []
+    if released_image_ids:
+        tag_rows = RepositoryTag.objects.filter(
+            images__uuid__in=released_image_ids,
+        ).values_list('pk', 'repository_id').distinct()
+        tag_ids = [tag_id for tag_id, _ in tag_rows]
+        repository_ids = [repository_id for _, repository_id in tag_rows]
+        _sync_repository_tag_processing_statuses(tag_ids)
+        _sync_repository_scan_statuses(repository_ids)
+
+    if reaped_runs or released_image_ids:
+        logger.warning(
+            "Reconciled stale scans: %s expired run(s) failed, %s image(s) released to error",
+            reaped_runs,
+            len(released_image_ids),
+        )
+    return {
+        'status': 'success',
+        'task_name': 'Reconcile Stale Scan States',
+        'reaped_runs': reaped_runs,
+        'released_images': len(released_image_ids),
+        'synced_tags': len(set(tag_ids)),
+        'synced_repositories': len(set(repository_ids)),
+        'timestamp': timezone.now().isoformat(),
+    }
+
+
 @celery_app.task(
     bind=True,
     max_retries=1,
@@ -1857,11 +1934,12 @@ def generate_sbom_and_create_components(self, image_uuid: str, art_type: str="do
         
         # A durable lease makes retries and duplicate Celery deliveries idempotent.
         from .services.scans import claim_scan, queue_scan
+        celery_task_id = self.request.id or ''
         if scan_run_uuid:
-            scan_run, claimed = claim_scan(scan_run_uuid)
+            scan_run, claimed = claim_scan(scan_run_uuid, celery_task_id=celery_task_id)
         else:
-            scan_run, created = queue_scan(image)
-            claimed = created and claim_scan(scan_run.uuid)[1]
+            scan_run, created = queue_scan(image, celery_task_id=celery_task_id)
+            claimed = created and claim_scan(scan_run.uuid, celery_task_id=celery_task_id)[1]
         if not claimed:
             logger.warning(f"Image {image_uuid} is already being scanned")
             return {
@@ -3449,11 +3527,15 @@ def rescan_all_images_with_sbom():
     start_time = time.time()
 
     try:
-        # Get all images that have SBOM data and are not currently being processed
-        images = Image.objects.filter(
-            Q(sbom_data__isnull=False) & 
-            ~Q(sbom_data={}) &
-            ~Q(scan_status__in=['in_process', 'pending'])
+        # Get all images that have SBOM data and are not currently being processed.
+        # Stale pending/in_process images (lost broker message) are included.
+        from .services.scans import live_active_images
+        images_with_sbom = Image.objects.filter(
+            Q(sbom_data__isnull=False) &
+            ~Q(sbom_data={})
+        )
+        images = images_with_sbom.exclude(
+            uuid__in=live_active_images(images_with_sbom).values('uuid')
         ).order_by('updated_at')
 
         total_images = images.count()
@@ -4291,6 +4373,7 @@ def process_single_tag(tag_uuid: str):
         skipped_in_progress = 0
         repaired_completed = 0
         repaired_tag_ids = set()
+        from .services.scans import image_scan_is_active
         for image in images:
             if image.scan_status in ['in_process', 'pending'] and _has_completed_image_payload(image):
                 image.scan_status = 'success'
@@ -4298,7 +4381,7 @@ def process_single_tag(tag_uuid: str):
                 repaired_tag_ids.update(_propagate_image_completion_to_equivalent_images(image))
                 repaired_completed += 1
                 continue
-            if image.scan_status == 'in_process':
+            if image.scan_status == 'in_process' and image_scan_is_active(image):
                 skipped_in_progress += 1
                 continue
             if _has_completed_image_scan(image):

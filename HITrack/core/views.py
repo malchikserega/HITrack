@@ -254,6 +254,16 @@ BASE_LINEAGE_SNAPSHOT_ORDERING_MAP = {
 }
 
 
+def _images_ready_for_rescan_count():
+    """Images with an SBOM that are not live-scanning (stale pending/in_process count as ready)."""
+    from .services.scans import live_active_images
+
+    images_with_sbom = Image.objects.filter(sbom_data__isnull=False).exclude(sbom_data={})
+    return images_with_sbom.exclude(
+        uuid__in=live_active_images(images_with_sbom).values('uuid')
+    ).count()
+
+
 def _normalize_recent_activity_types(raw_types):
     normalized = []
     for raw_type in raw_types:
@@ -2411,9 +2421,13 @@ class RepositoryTagViewSet(BaseViewSet):
     @action(detail=True, methods=['post'])
     def process(self, request, uuid=None):
         tag = self.get_object()
-        if tag.processing_status in ['in_process', 'pending'] or tag.images.filter(
-            scan_status__in=['in_process', 'pending']
-        ).exists():
+        from .services.scans import PENDING_GRACE_MINUTES, live_active_images
+        tag_is_active = (
+            tag.processing_status in ['in_process', 'pending']
+            and tag.updated_at
+            and tag.updated_at > timezone.now() - timedelta(minutes=PENDING_GRACE_MINUTES)
+        )
+        if tag_is_active or live_active_images(tag.images.all()).exists():
             return Response(
                 {'error': 'Tag is already queued for processing'}, 
                 status=status.HTTP_409_CONFLICT
@@ -2451,8 +2465,9 @@ class RepositoryTagViewSet(BaseViewSet):
     def rescan_images(self, request, uuid=None):
         tag = self.get_object()
         images = tag.images.all()
-        # Check if any image is already being scanned or queued
-        if images.filter(scan_status__in=['in_process', 'pending']).exists():
+        # Check if any image is already being scanned or queued (stale states don't count)
+        from .services.scans import image_scan_is_active, live_active_images
+        if live_active_images(images).exists():
             return Response(
                 {'error': 'At least one image is already being scanned or queued for scanning'},
                 status=status.HTTP_409_CONFLICT
@@ -2461,7 +2476,7 @@ class RepositoryTagViewSet(BaseViewSet):
         child_task_ids = []
         from .tasks import generate_sbom_and_create_components
         for image in images:
-            if image.scan_status != 'in_process':
+            if not image_scan_is_active(image):
                 image.scan_status = 'pending'
                 image.save()
                 repo_tag = image.repository_tags.first()
@@ -2508,8 +2523,9 @@ class RepositoryTagViewSet(BaseViewSet):
             )
         
         # Separate images into those that can be scanned and those that are already in process
-        available_images = images.exclude(scan_status__in=['in_process', 'pending'])
-        skipped_images = images.filter(scan_status__in=['in_process', 'pending'])
+        from .services.scans import live_active_images
+        skipped_images = live_active_images(images)
+        available_images = images.exclude(uuid__in=skipped_images.values('uuid'))
         
         if not available_images.exists():
             return Response(
@@ -3043,7 +3059,8 @@ class ImageViewSet(BaseViewSet):
     @action(detail=True, methods=['post'])
     def rescan(self, request, uuid=None):
         image = self.get_object()
-        if image.scan_status in ['in_process', 'pending']:
+        from .services.scans import image_scan_is_active
+        if image_scan_is_active(image):
             return Response(
                 {'error': 'Image is already being scanned or queued for scanning'}, 
                 status=status.HTTP_409_CONFLICT
@@ -3164,7 +3181,8 @@ class ImageViewSet(BaseViewSet):
         image = self.get_object()
         if not image.sbom_data:
             return Response({'error': 'No SBOM data available for this image.'}, status=400)
-        if image.scan_status in ['in_process', 'pending']:
+        from .services.scans import image_scan_is_active
+        if image_scan_is_active(image):
             return Response(
                 {'error': 'Image is already being scanned or queued for scanning'},
                 status=status.HTTP_409_CONFLICT
@@ -6080,11 +6098,7 @@ class TestTaskViewSet(viewsets.ViewSet):
                 'total_images': total_images,
                 'images_with_sbom': images_with_sbom,
                 'status_breakdown': status_breakdown,
-                'ready_for_rescan': Image.objects.filter(
-                    Q(sbom_data__isnull=False) & 
-                    ~Q(sbom_data={}) &
-                    ~Q(scan_status__in=['in_process', 'pending'])
-                ).count()
+                'ready_for_rescan': _images_ready_for_rescan_count(),
             })
         except Exception as e:
             return Response(
