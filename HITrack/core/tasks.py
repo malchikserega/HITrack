@@ -20,47 +20,19 @@ from django.db import connection, transaction
 from django.db.models import Count, Q
 from .utils.status import resolve_repository_tag_processing_status
 
-def _capture_repository_tag_scan_snapshot(tag_id):
-    from .models import RepositoryTag, RepositoryTagScanSnapshot
-    from .utils.analytics import (
-        build_repository_tag_scan_summary,
-        compare_vulnerability_states,
-    )
+# Performance and logging configuration
+# Set DEBUG_LOGGING=true environment variable to enable debug logging
+# Set DEBUG_LOGGING=false or unset to disable debug logging for production
+#
+# Performance optimizations implemented:
+# - Database queries optimized with select_related and prefetch_related
+# - Bulk operations for better performance
+# - Conditional debug logging to reduce I/O overhead
+# - Task retry mechanisms with exponential backoff
+# - Performance monitoring task for system health checks
 
-    tag = RepositoryTag.objects.get(pk=tag_id)
-    current_summary = build_repository_tag_scan_summary(tag)
-    previous_snapshot = tag.scan_snapshots.order_by('-created_at').first()
-    previous_state = previous_snapshot.vulnerability_state if previous_snapshot else {}
-    delta = compare_vulnerability_states(previous_state, current_summary['vulnerability_state'])
-    risk_score_delta = current_summary['weighted_risk_score'] - (
-        previous_snapshot.weighted_risk_score if previous_snapshot else 0.0
-    )
-
-    return RepositoryTagScanSnapshot.objects.create(
-        repository_tag=tag,
-        processing_status=current_summary['processing_status'],
-        total_images=current_summary['total_images'],
-        successful_images=current_summary['successful_images'],
-        unique_vulnerabilities_count=current_summary['unique_vulnerabilities_count'],
-        weighted_risk_score=current_summary['weighted_risk_score'],
-        previous_unique_vulnerabilities_count=delta['previous_unique_vulnerabilities_count'],
-        new_vulnerabilities_count=delta['new_vulnerabilities_count'],
-        fixed_vulnerabilities_count=delta['fixed_vulnerabilities_count'],
-        severity_increased_count=delta['severity_increased_count'],
-        new_kev_relevant_count=delta['new_kev_relevant_count'],
-        risk_score_delta=round(risk_score_delta, 2),
-        has_changes=delta['has_changes'] or round(risk_score_delta, 2) != 0,
-        fixability_breakdown=current_summary['fixability_breakdown'],
-        vulnerability_state=current_summary['vulnerability_state'],
-        delta_summary=delta['delta_summary'],
-    )
-
-
-def _sync_repository_tag_processing_statuses(tag_ids):
-    from .models import RepositoryTag
-
-    if not tag_ids:
-        return {}
+# Configure logging
+logger = logging.getLogger(__name__)
 
 # Remove debug logging in production
 DEBUG_LOGGING = os.getenv('DEBUG_LOGGING', 'False').lower() == 'true'
@@ -81,12 +53,8 @@ _OS_EOL_STATUS_PRIORITY = {
     'eol': 2,
 }
 
-    return resolved_statuses
-
-
-def _sync_repository_scan_statuses(repository_ids):
-    """Persist the aggregate scan state after child tag/image state changes."""
-    from .models import Repository
+def is_safe_image_ref(image_ref: str) -> bool:
+    return bool(DOCKER_IMAGE_REGEX.match(image_ref)) and len(image_ref) < 200
 
 
 def _is_image_available_locally(image_ref: str) -> bool:
